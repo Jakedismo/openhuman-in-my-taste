@@ -70,6 +70,7 @@ pub async fn try_dispatch_native(
         "GITHUB_USERS_GET_AUTHENTICATED" => {
             Some(dispatch_github_get_authenticated(http, service).await)
         }
+        "GITHUB_CREATE_AN_ISSUE" => Some(dispatch_github_create_issue(http, service, &args).await),
         _ => None,
     }
 }
@@ -238,6 +239,26 @@ async fn dispatch_calendar_create(
         obj.remove("calendarId");
     }
     google::calendar::create_event(http, service, &calendar_id, &body).await
+}
+
+async fn dispatch_github_create_issue(
+    http: &reqwest::Client,
+    service: &AuthService,
+    args: &Value,
+) -> Result<Value> {
+    let owner = str_field(args, "owner")?;
+    let repo = str_field(args, "repo")?;
+    let title = str_field(args, "title")?;
+    let body = args.get("body").and_then(Value::as_str);
+    let issue = gh_native::create_issue(http, service, &owner, &repo, &title, body).await?;
+    Ok(json!({
+        "id": issue.id,
+        "number": issue.number,
+        "title": issue.title,
+        "html_url": issue.html_url,
+        "state": issue.state,
+        "body": issue.body,
+    }))
 }
 
 async fn dispatch_github_get_authenticated(
