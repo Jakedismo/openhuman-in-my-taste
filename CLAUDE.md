@@ -10,10 +10,15 @@ Narrative architecture: [`gitbooks/developing/architecture.md`](gitbooks/develop
 
 | Path | Role |
 | --- | --- |
-| **`app/`** | pnpm workspace `openhuman-app` (v0.53.45): Vite + React (`app/src/`), Tauri desktop host (`app/src-tauri/`), Vitest tests |
-| **`src/`** (root) | Rust lib crate `openhuman` + `openhuman-core` CLI binary (`src/main.rs`) — `src/core/` (transport: Axum/HTTP, JSON-RPC, CLI), `src/openhuman/*` domains, event bus |
-| **`Cargo.toml`** (root) | Core crate; `cargo build --bin openhuman-core` produces the binary. Also defines `slack-backfill` and `gmail-backfill-3d` helper binaries in `src/bin/`. |
-| **`docs/`** | Remaining deep internals (memory pipeline excalidraws, sentry, etc.). Public contributor docs live in `gitbooks/developing/`. |
+| **`app/`** | pnpm workspace `openhuman-app` (currently `v0.53.50` — check `app/package.json`): Vite + React (`app/src/`), Tauri desktop host (`app/src-tauri/`), Vitest tests |
+| **`src/`** (root) | Rust lib crate `openhuman`. Transport layers: `src/core/` (in-process JSON-RPC server, CLI, dispatch, auth, event bus), `src/api/` (Axum REST + Socket.IO + JWT), `src/rpc/` (RPC dispatch + structured errors). Domain logic in `src/openhuman/*`. Entry point `src/main.rs` produces the `openhuman-core` binary. |
+| **`Cargo.toml`** (root) | Core crate. `cargo build --bin openhuman-core` builds the CLI. Helper binaries in `src/bin/`: `slack-backfill`, `gmail-backfill-3d`, `inference-probe`. |
+| **`packages/`** | Distribution packaging targets: `deb/`, `homebrew/`, `homebrew-core/`, `npm/`. Touched when cutting releases. |
+| **`remotion/`** | Remotion project for rendering mascot runtime assets (`pnpm mascot:render`). |
+| **`tests/`** | Root-level cargo tests including `tests/json_rpc_e2e.rs` (full RPC E2E exercised by `pnpm test:rust`). |
+| **`e2e/`** | Docker harness for running the Linux E2E suite from macOS (`docker compose -f e2e/docker-compose.yml run --rm e2e`). |
+| **`docs/`** | Deep internals (memory pipeline excalidraws, sentry notes, etc.). Public contributor docs live in `gitbooks/developing/`. |
+| **`.claude/`** | Agent-harness config: `agents/`, `commands/`, `rules/`, `mcp.json`, `settings.json`, and **[`memory.md`](.claude/memory.md)** — 28K of project-specific fixes, gotchas, and workflow notes. Read at session start. |
 
 Commands assume the **repo root**; `pnpm dev` delegates to the `app` workspace. The root `package.json` is `openhuman-repo` (private) and enforces pnpm via the `packageManager` field.
 
@@ -192,8 +197,8 @@ Watch out for Tauri plugins that inject JS by default. `tauri-plugin-opener` shi
 
 ## Rust core (`src/`)
 
-- **`src/openhuman/`** — Domain logic. Current domains: `about_app`, `accessibility`, `agent`, `app_state`, `approval`, `autocomplete`, `billing`, `channels`, `composio`, `config`, `context`, `cost`, `credentials`, `cron`, `doctor`, `embeddings`, `encryption`, `health`, `heartbeat`, `integrations`, `learning`, `local_ai`, `meet`, `meet_agent`, `memory`, `migration`, `node_runtime`, `notifications`, `overlay`, `people`, `prompt_injection`, `provider_surfaces`, `providers`, `redirect_links`, `referral`, `routing`, `scheduler_gate`, `screen_intelligence`, `security`, `service`, `skills`, `socket`, `subconscious`, `team`, `text_input`, `threads`, `tokenjuice`, `tool_timeout`, `tools`, `tree_summarizer`, `update`, `voice`, `wallet`, `webhooks`, `webview_accounts`, `webview_apis`, `webview_notifications`. RPC controllers in per-domain `rpc.rs` / `schemas.rs`; use `RpcOutcome<T>` per [`AGENTS.md`](AGENTS.md).
-- **Skills runtime removed**: the QuickJS / `rquickjs` runtime that previously executed skill packages is gone. `src/openhuman/skills/` is now a metadata-only domain (`ops_create`, `ops_discover`, `ops_install`, `ops_parse`, `inject`, `schemas`, `types`) — see the module header comment "Legacy skill metadata helpers retained after QuickJS runtime removal."
+- **`src/openhuman/`** — Domain logic. List of current domains changes frequently — discover with `ls src/openhuman/` rather than maintaining an enumeration here. RPC controllers in per-domain `rpc.rs` / `schemas.rs`; use `RpcOutcome<T>` per [`AGENTS.md`](AGENTS.md).
+- **Skills + script execution**: `src/openhuman/skills/` is **metadata-only** (module header: "Skill metadata helpers and prompt-injection support") — it discovers, installs, and renders catalog entries but does **not** execute packages. The QuickJS / `rquickjs` runtime was removed in PR #1061. New execution paths are being rebuilt under `src/openhuman/javascript/`, `src/openhuman/runtime_node/`, and `src/openhuman/runtime_python/` — check the current state of those modules before assuming a skill can run end-to-end. Skill registry source / bundler lives in **[github.com/tinyhumansai/openhuman-skills](https://github.com/tinyhumansai/openhuman-skills)** (not vendored in this tree); override with `VITE_SKILLS_GITHUB_REPO`.
 - **Module layout rule**: new functionality goes in a **dedicated subdirectory** (`openhuman/<domain>/mod.rs` + siblings). **Do not** add new standalone `*.rs` files at `src/openhuman/` root (`dev_paths.rs` and `util.rs` are grandfathered, not a template).
 - **Controller schema contract**: shared types in `src/core/types.rs` / `src/core/mod.rs` (`ControllerSchema`, `FieldSchema`, `TypeSchema`).
 - **Domain schema files**: per-domain `schemas.rs` (e.g. `src/openhuman/cron/schemas.rs`), exported from domain `mod.rs`.
@@ -249,11 +254,12 @@ Tauri/Rust in the shell is a **delivery vehicle** (windowing, process lifecycle,
 
 ## Git workflow
 
-- **Never write code on `main`.** Before making any code changes, fork a new branch off the latest `main` (`git fetch upstream && git checkout -b <branch> upstream/main`). All work happens on that feature branch; `main` stays clean and only advances via merged PRs.
-- Issues and PRs on upstream **[tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman)** — not a fork — unless explicitly told otherwise.
-- Issue templates: [`.github/ISSUE_TEMPLATE/feature.md`](.github/ISSUE_TEMPLATE/feature.md), [`.github/ISSUE_TEMPLATE/bug.md`](.github/ISSUE_TEMPLATE/bug.md). PR template: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). AI-authored text should follow them verbatim.
+- **Never write code on `main`.** Before making any code changes, branch off the latest `main` (`git fetch && git checkout -b <branch> origin/main` — or `upstream/main` if an `upstream` remote exists on this checkout). All work happens on a feature branch; `main` stays clean and only advances via merged PRs.
+- **Check `git remote -v` first** to see which remotes actually exist on this checkout. This repo has historically been worked from forks (`senamakel/openhuman`, `jruokola/closedhuman`, …) with `tinyhumansai/openhuman` as the canonical upstream, but not every clone has both remotes configured. Don't assume an `upstream` remote exists.
+- **If contributing to upstream** `tinyhumansai/openhuman`: push branches to `origin` (the fork), open PRs against `tinyhumansai/openhuman:main` with `--head <fork-owner>:<branch>`. Never push to upstream directly — pollutes its branch list and skips review boundaries. Treat `upstream` as fetch-only.
+- **If working a private fork** (no upstream remote): push to `origin` and open PRs against your own fork's `main`. The upstream-routing rules don't apply.
 - PRs target **`main`**.
-- **Push branches to `origin` (the user's fork — `senamakel/openhuman`), never to `upstream` (`tinyhumansai/openhuman`).** PRs are still opened against `tinyhumansai/openhuman:main`, but with `--head senamakel:<branch>` so the source is the fork. Direct pushes to upstream pollute its branch list and skip code-review boundaries. Treat the `upstream` remote as fetch-only.
+- Issue templates: [`.github/ISSUE_TEMPLATE/feature.md`](.github/ISSUE_TEMPLATE/feature.md), [`.github/ISSUE_TEMPLATE/bug.md`](.github/ISSUE_TEMPLATE/bug.md). PR template: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). AI-authored text should follow them verbatim.
 - **When the user asks you to push or open a PR, resolve blockers and push — don't prompt for permission.** If a pre-push hook fails on something unrelated to your changes (e.g. pre-existing breakage on `main` in code you didn't touch), push with `--no-verify` and call it out in the PR body. If the hook fails on your own changes, fix them and push again. Don't ask the user whether to bypass — just do the right thing and tell them what you did.
 
 ---

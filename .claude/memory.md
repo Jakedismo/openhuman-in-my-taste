@@ -6,7 +6,6 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 
 - **ServiceBlockingGate CORS errors** — The gate calls `openhumanServiceStatus()` and `openhumanAgentServerStatus()` at startup. These used `callCoreRpc()` which falls back to raw `fetch()` when socket isn't connected yet, causing CORS errors. Fix: route through `invoke('core_rpc_relay')` instead (Tauri IPC, no CORS).
 - **Socket not connected at startup** — `SocketProvider` only connects when a Redux `auth.token` is set. At fresh launch (no token), socket is null, so any `callCoreRpc()` call falls back to `fetch()`. Always use `invoke('core_rpc_relay')` for local sidecar RPC calls.
-- **`openhuman.agent_server_status` doesn't exist** — This RPC method is not registered in the core. The gate checks it but it always errors. The gate passes if either service is Running OR agent server is running OR core is reachable.
 - **Cargo incremental builds can serve stale UI** — If the app shows old frontend after a Rust rebuild, run `cargo clean --manifest-path app/src-tauri/Cargo.toml` before rebuilding.
 - **`build.rs` missing `rerun-if-changed` causes stale ACL / "Command not found" at runtime** — `app/src-tauri/build.rs` had no `cargo:rerun-if-changed` directives for `permissions/` or `capabilities/`. Adding/changing TOML or JSON files there did not re-trigger `tauri-build`, so ACL tables were stale and registered commands silently failed. Fixed by adding `println!("cargo:rerun-if-changed=permissions")` and `println!("cargo:rerun-if-changed=capabilities")` in `build.rs` (issue #270). Also: any new Tauri command must have a matching entry in a `permissions/` TOML file or it will hit the same error even if it is in `generate_handler!`.
 - **macOS deep links require .app bundle** — `pnpm tauri dev` does NOT support deep links. Must use `pnpm tauri build --debug --bundles app`.
@@ -24,15 +23,6 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 - **Agent order**: architectobot (plan) → user approval → codecrusher (implement) → architectobot (verify)
 - **Always read CLAUDE.md first** before any issue work
 - **Ask user when in doubt** — never assume scope or approach
-- **PRs target upstream** — `tinyhumansai/openhuman` main branch, not fork
-
-## Local AI Presets
-
-- **Tier system lives in `src/openhuman/local_ai/presets.rs`** — single source of truth for tier→model ID mapping. To change default models for a release, edit `all_presets()` there.
-- **Device detection** uses `sysinfo` crate (`src/openhuman/local_ai/device.rs`). Apple Silicon = GPU always; others = best-effort.
-- **`OPENHUMAN_LOCAL_AI_TIER` env var** overrides the selected tier at config load time (in `load.rs`).
-- **Frontend tier selector** is in `LocalModelPanel.tsx` under Settings > Local AI Model. Uses `coreRpcClient` to call 3 RPC methods: `local_ai_device_profile`, `local_ai_presets`, `local_ai_apply_preset`.
-- **Default config maps to Medium tier** (`gemma3:4b-it-qat`). If someone changes `model_ids.rs` defaults, they should keep `presets.rs` in sync.
 
 ## Core process (in-process, no sidecar)
 
@@ -44,10 +34,9 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 
 ## Onboarding System
 
-- **OnboardingOverlay is a portal, not a route** — mounted in `App.tsx`, renders via `createPortal` at z-[9999]. There is no `/onboarding` route in `AppRoutes.tsx`. Gating is purely Redux + workspace flag.
 - **Deferred onboarding** — `onboardingDeferredByUser` in `authSlice.ts` (persisted via redux-persist) durably tracks when a user clicks "Set up later". `SetupBanner.tsx` provides the resume path.
 - **`selectHasIncompleteOnboarding` is unused** in production code — only tested. Don't use it for new features.
-- **Logout must clear onboarding state** — `_clearToken` resets `isOnboardedByUser` + `isAnalyticsEnabledByUser`. Workspace flag (`.skip_onboarding` file) is cleared via `openhumanWorkspaceOnboardingFlagSet(false)` in SettingsHome logout, clearAllAppData, and UserProvider auth recovery. All three paths must stay in sync. **OnboardingOverlay local state** (`userLoadTimedOut`, `onboardingCompleted`) is reset via a `useEffect` watching `token` — if `token` becomes null, both reset to initial values (#192).
+- **Logout must clear onboarding state** — `_clearToken` resets `isOnboardedByUser` + `isAnalyticsEnabledByUser`. Workspace flag (`.skip_onboarding` file) is cleared via `openhumanWorkspaceOnboardingFlagSet(false)` in SettingsHome logout, clearAllAppData, and UserProvider auth recovery. All three paths must stay in sync.
 - **LocalAI download errors must surface** — `LocalAIStep` has an `onDownloadError` callback prop; `Onboarding.tsx` renders an error banner via `createPortal` when it fires. Without this, download failures are silently swallowed (#194).
 - **`formatBytes` / `formatEta` / `progressFromStatus`** — shared in `app/src/utils/localAiHelpers.ts`. Home.tsx and LocalModelPanel.tsx still have local copies (can be migrated later).
 - **Notification z-index stacking** — ErrorReportNotification: z-[10000] bottom-right. OnboardingOverlay: z-[9999]. LocalAIDownloadSnackbar: z-[9998] bottom-left.
@@ -59,16 +48,13 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 - **Recovery Phrase moved to Settings** — MnemonicStep was removed from onboarding (was step 5). The same BIP39 generate/import functionality now lives in `app/src/components/settings/panels/RecoveryPhrasePanel.tsx`, accessible via Settings > Recovery Phrase. Onboarding completion logic moved into `handleSkillsNext` in `Onboarding.tsx`.
 - **E2E tests find onboarding buttons by label text** — `shared-flows.ts`, `login-flow.spec.ts`, `auth-access-control.spec.ts`, and `voice-mode.spec.ts` locate buttons by their visible label. Changing button labels requires updating all four files. Note: `voice-mode.spec.ts` still references legacy labels that don't match current steps (pre-existing tech debt).
 - **`ScreenPermissionsStep` always shows Continue** — The Continue button is always visible regardless of permission grant status, allowing users to skip the permissions step (#274).
-- **OnboardingOverlay RPC/Redux race condition** — `getOnboardingCompleted()` RPC can fail (sidecar not ready, timeout); the old catch block hardcoded `setOnboardingCompleted(false)`, ignoring the persisted `isOnboardedByUser` Redux flag. Fix: read `selectIsOnboarded` from `authSelectors.ts` in the catch block as fallback, and combine both flags in `shouldShow`: `!onboardingCompleted && !isOnboardedRedux`. Either flag being `true` is sufficient to skip onboarding (#197).
-- **`DEV_FORCE_ONBOARDING` was a no-op** — The old ternary had identical branches; fixed to actually force-show when the flag is set.
-- **`isOnboardedRedux` must be in useEffect deps** — When reading a selector value inside a useEffect, add it to the dependency array or the effect won't re-run when Redux state changes.
 
 ## CoreStateProvider & Auth Bootstrap
 
 - **Auth session tokens are NOT in Redux persist** — They live entirely in the Rust sidecar, fetched via `fetchCoreAppSnapshot()` RPC. `PersistGate` only gates non-auth state (AI config, threads, channel connections). `CoreStateProvider` bootstrap is the critical auth path.
 - **`CoreStateProvider` premature `isBootstrapping: false` causes blank Settings** — If the initial RPC call fails (sidecar still starting), the old error handler set `isBootstrapping: false` immediately, causing `ProtectedRoute` to redirect to `/` before the 3s poll could recover. Fix (issue #413): keep `isBootstrapping: true` on initial failure, let the poll retry, give up after 5 attempts (~15s).
 - **`CoreStateProvider` is consumed by ~25 components** — Changes to its state shape or bootstrap behavior affect routes, socket, onboarding, nav, settings, and hooks. Treat it as a high-blast-radius file.
-- **Settings is a full route, not a modal** — `/settings/*` uses nested `<Routes>` in `Settings.tsx`. The `.claude/rules/15-settings-modal-system.md` doc describing a portal/modal approach is outdated. A catch-all `<Route path="*">` redirects unmatched sub-paths to `/settings`.
+- **Settings is a full route, not a modal** — `/settings/*` uses nested `<Routes>` in `Settings.tsx`. A catch-all `<Route path="*">` redirects unmatched sub-paths to `/settings`.
 - **`PersistGate loading={null}` causes flash** — Changed to `loading={<RouteLoadingScreen />}` (issue #413). `RouteLoadingScreen` accepts an optional `label` prop (defaults to "Initializing OpenHuman...") and can be rendered with no props.
 
 ## Build Blockers: macOS Tahoe + whisper-rs
@@ -101,7 +87,7 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 
 ## Settings & Skills Reorganization (Issue #396)
 
-- **Settings is NOT a modal** — It's a full route (`/settings/*`) with nested `<Routes>`. The `.claude/rules/15-settings-modal-system.md` doc is outdated.
+- **Settings is NOT a modal** — It's a full route (`/settings/*`) with nested `<Routes>`.
 - **SettingsHeader breadcrumbs** — All panels now receive `breadcrumbs` from `useSettingsNavigation()` hook. The hook derives breadcrumbs from the current route path. When adding a new settings panel, destructure `breadcrumbs` from the hook and pass to `<SettingsHeader>`.
 - **Standard settings padding** — All settings panel content areas use `p-4 space-y-4`. Don't deviate.
 - **Dead code removed** — `TauriCommandsPanel`, `useSettingsAnimation`, `SettingsPanelLayout`, `SettingsBackButton`, `ProfilePanel`, `AdvancedPanel`, `SkillsPanel`, `SkillsGrid` were all deleted. Don't re-create them.
@@ -121,7 +107,6 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 ## Agent Timeout & Cancellation (Issue #715)
 
 - **Frontend silence timer, not a wall-clock limit** — `armSilenceTimer` in `app/src/pages/Conversations.tsx` fires if 120s (fixed to 600s) pass with zero inference progress events. It re-arms on every `tool_call`, `tool_result`, `iteration_start`, etc., so long-running tool chains that keep emitting events are not cut off.
-- **Rust-side HTTP timeout is separate** — `src/openhuman/providers/compatible.rs` sets a 120s `reqwest` client timeout on LLM calls. Not changed in #715; relevant if a single LLM round-trip itself stalls for >2 min.
 - **Manual cancel path** — `chatCancel()` in `app/src/services/chatService.ts` → `openhuman.channel_web_cancel` RPC → `cancel_chat()` in `src/openhuman/channels/providers/web.rs`. Fully implemented; the silence timer is an automatic fallback.
 
 ## Webhook & Cron Triggers (Issue #726)
@@ -187,4 +172,3 @@ Quick reference for anyone starting with Claude on this project. Updated by the 
 - **Core port** — `7788` (default; in-process inside Tauri host). Check with `lsof -i :7788`.
 - **`pnpm core:stage`** — no-op (sidecar removed in PR #1061). Use `pnpm dev:app` for full Tauri+core dev.
 - **Kill stuck processes** — `lsof -i :7788` then `kill <PID>`. Useful when `dev:app` reports a stale listener and you want to force a fresh boot rather than relying on the handle's auto-recovery.
-- **Skills runtime removed** — the QuickJS / `rquickjs` runtime is gone; `src/openhuman/skills/` is metadata-only ("Legacy skill metadata helpers retained after QuickJS runtime removal"). Skill execution surfaces are being rebuilt; don't assume a `.skill` can run end-to-end without checking the current code.
