@@ -7,11 +7,13 @@ no app login, no Composio aggregator.
 ## TL;DR
 
 ```bash
-# 1. Build everything
+# 1. Build everything (run from the repo root)
 pnpm install
-pnpm tauri:ensure
 pnpm dev:app
 ```
+
+`pnpm dev:app` chains `pnpm tauri:ensure` automatically — it installs
+the vendored CEF-aware Tauri CLI on first run, then boots Vite + Tauri.
 
 Once the Tauri window opens:
 
@@ -43,17 +45,23 @@ scripted equivalents — useful for headless testing, but not required.
 pnpm install
 ```
 
-If you've never built the Tauri shell on this machine before, install the
-vendored CEF-aware Tauri CLI now (idempotent):
+The Tauri shell needs the vendored CEF-aware CLI rather than stock
+`@tauri-apps/cli` (the latter produces a bundle that panics inside
+CEF's library loader). The `dev:app` and `tauri:build:ui` scripts in
+`app/package.json` automatically chain `pnpm tauri:ensure`, which
+shells out to `scripts/ensure-tauri-cli.sh` and installs
+`app/src-tauri/vendor/tauri-cef/crates/tauri-cli` into `~/.cargo/bin`
+the first time it runs.
+
+If you want to run the ensure step explicitly (e.g. before a CI build
+or after blowing away your cargo bin dir):
 
 ```bash
-pnpm tauri:ensure
+pnpm --filter openhuman-app tauri:ensure
 ```
 
-This shells out to `scripts/ensure-tauri-cli.sh`, which installs
-`app/src-tauri/vendor/tauri-cef/crates/tauri-cli` into `~/.cargo/bin`.
-Stock `@tauri-apps/cli` produces a bundle that panics inside CEF's
-library loader, so this step is non-negotiable.
+It's idempotent — subsequent calls are a fast no-op once the vendored
+CLI is installed.
 
 ## Step 2 — Run the desktop app
 
@@ -189,7 +197,7 @@ dir manually) and restart.
 ### Tauri panic in `cef::library_loader::LibraryLoader::new`
 
 The stock `@tauri-apps/cli` ran instead of the vendored one. Re-run
-`pnpm tauri:ensure` and rebuild.
+`pnpm --filter openhuman-app tauri:ensure` and rebuild.
 
 ### gpt-5.4 returns 404 / "model not found"
 
