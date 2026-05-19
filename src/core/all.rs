@@ -190,12 +190,6 @@ fn build_registered_controllers() -> Vec<RegisteredController> {
     // Link shortener for long tracking URLs — saves LLM tokens
     controllers
         .extend(crate::openhuman::redirect_links::all_redirect_links_registered_controllers());
-    // Referral and growth tracking
-    controllers.extend(crate::openhuman::referral::all_referral_registered_controllers());
-    // Billing and subscription management
-    controllers.extend(crate::openhuman::billing::all_billing_registered_controllers());
-    // Team and role management
-    controllers.extend(crate::openhuman::team::all_team_registered_controllers());
     // E2E test support — `openhuman.test_reset` wipes sidecar state in-place.
     // Gated behind the `e2e-test-support` cargo feature so shipped binaries
     // never even register the destructive wipe RPC. Flipped on by the E2E
@@ -305,9 +299,6 @@ fn build_declared_controller_schemas() -> Vec<ControllerSchema> {
     );
     schemas.extend(crate::openhuman::memory::all_memory_sync_status_controller_schemas());
     schemas.extend(crate::openhuman::redirect_links::all_redirect_links_controller_schemas());
-    schemas.extend(crate::openhuman::referral::all_referral_controller_schemas());
-    schemas.extend(crate::openhuman::billing::all_billing_controller_schemas());
-    schemas.extend(crate::openhuman::team::all_team_controller_schemas());
     #[cfg(feature = "e2e-test-support")]
     schemas.extend(crate::openhuman::test_support::all_test_support_controller_schemas());
     schemas.extend(crate::openhuman::wallet::all_wallet_controller_schemas());
@@ -395,9 +386,6 @@ pub fn namespace_description(namespace: &str) -> Option<&'static str> {
         "redirect_links" => Some(
             "Shorten long tracking URLs to `openhuman://link/<id>` placeholders (SQLite-backed) to save tokens in prompts, with round-trip rewrite helpers.",
         ),
-        "referral" => Some("Referral codes, stats, and apply flows via the hosted backend API."),
-        "billing" => Some("Subscription plan, payment links, and credit top-up via the backend."),
-        "team" => Some("Team member management, invites, and role changes via the backend."),
         "tool_registry" => Some(
             "Read-only discovery for MCP stdio tools and controller-backed tools, including routes, schemas, version, allowed agents, and health.",
         ),
