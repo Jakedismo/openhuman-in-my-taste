@@ -5,20 +5,15 @@ import ReactDOM from 'react-dom/client';
 
 import App from './App';
 import './index.css';
-import { getCoreStateSnapshot } from './lib/coreState/store';
 import MascotWindowApp from './mascot/MascotWindowApp';
 import OverlayApp from './overlay/OverlayApp';
 import './polyfills';
 import { initGA, initSentry, trackEvent } from './services/analytics';
-import { setStoreForApiClient } from './services/apiClient';
 import { primeActiveUserId } from './store/userScopedStorage';
 import './styles/theme.css';
 import { APP_VERSION } from './utils/config';
-import { setupDesktopDeepLinkListener } from './utils/desktopDeepLinkListener';
 import { getActiveUserIdFromCore } from './utils/tauriCommands';
 import { isTauri as tauriRuntimeAvailable } from './utils/tauriCommands/common';
-
-setStoreForApiClient(() => getCoreStateSnapshot().snapshot.sessionToken);
 
 // The floating mascot is hosted in a native macOS NSPanel + WKWebView
 // that lives OUTSIDE Tauri's runtime (the vendored tauri-cef can't render
@@ -65,11 +60,6 @@ document.documentElement.dataset.window = currentWindowLabel;
 
 if (!isStandaloneWindow) {
   ensureDefaultHashRoute();
-
-  // Deep link listener — try/catch handles non-Tauri environments
-  setupDesktopDeepLinkListener().catch(err => {
-    console.error('[DeepLink] setup error:', err);
-  });
 }
 
 // Prime `userScopedStorage` from the Rust core's `active_user.toml`
