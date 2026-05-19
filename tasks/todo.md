@@ -86,6 +86,15 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
   Composio's 459-test integration suite still passes with the flag off — the fall-through path is the load-bearing regression guard.
 - [ ] **3.4** RPC: a proper `openhuman.oauth_*` JSON-RPC method via the controller registry — pairs with the eventual frontend OAuth UI. **Interim**: `oauth-connect` CLI binary (`src/bin/oauth_connect.rs`) drives the full Google / GitHub flow end-to-end and persists tokens locally, so Phase 4 validation is unblocked without waiting on the controller wiring. Pairs with 3.3 cutover.
 
+#### Extended dispatch coverage (post-Phase 5.6)
+
+Phase 5.1 made native dispatch the only execution path — every slug without a native arm hard-errors at `composio_execute`. The arms below were added to cover the agent's day-to-day toolset:
+
+- **Gmail**: `GMAIL_SEND_EMAIL`, `GMAIL_FETCH_EMAILS`, `GMAIL_DELETE_EMAIL`, `GMAIL_ADD_LABEL_TO_EMAIL`
+- **Calendar**: `GOOGLECALENDAR_EVENTS_LIST` (+ `GOOGLECALENDAR_FIND_EVENT` alias), `GOOGLECALENDAR_EVENTS_GET`, `GOOGLECALENDAR_CREATE_EVENT`
+- **Drive**: `GOOGLEDRIVE_LIST_FILES` / `GOOGLEDRIVE_FIND_FILE`, `GOOGLEDRIVE_GET_FILE_METADATA`, `GOOGLEDRIVE_CREATE_FILE` / `GOOGLEDRIVE_CREATE_FILE_FROM_TEXT`
+- **GitHub**: `GITHUB_USERS_GET_AUTHENTICATED`, `GITHUB_CREATE_AN_ISSUE`, `GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER`
+
 ### Phase 4 — Validate end-to-end (gate before cutover)
 
 - [ ] **4.1** Manual: connect Google, send a test email, list 3 calendar events, write a file to Drive, list, delete. Document the consent-screen UX (unverified-app warning + verifier path).
@@ -105,10 +114,13 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
   - 3 mock-backend tests removed (paths gone); 2 "errors_without_session" tests rewritten to assert the new disabled-state messages.
 - [x] **5.2** Deleted `IntegrationTokensHandoff`, `ConnectResponse`, `IntegrationSummary`, `decrypt_handoff_blob` + supporting envelope structs from `src/api/rest.rs`. Removed `connect`/`list_integrations`/`fetch_integration_tokens_handoff`/`fetch_client_key`/`revoke_integration` methods from `BackendOAuthClient`. Dropped the 5 `auth_oauth_*` RPCs from `credentials/`. `BackendOAuthClient` itself stays for surviving non-OAuth backend calls (channels, voice, login) — those go in 5.4 / Phase 6.
 - [x] **5.3** Deleted `src/openhuman/billing/`, `src/openhuman/referral/`, `src/openhuman/team/` (all confirmed `BackendOAuthClient`-tied). **Kept `src/openhuman/wallet/`** — Phase 1.3 mis-classified it; it's a local crypto wallet (balances/transfers/swaps) with zero backend dependency. `tokenjuice/` was always library-only and remains untouched.
-- [ ] **5.4** Delete the `auth` Redux slice + every selector + every consumer that breaks. Big frontend pass: ~30–50 files touched.
-- [ ] **5.5** Delete `OAuthProviderButton`, `authApi`, `apiClient`, `useBackendUrl`, `backendUrl.ts`, `Welcome` route, login-gated routes. Replace `CoreStateProvider` bootstrap with a no-auth snapshot.
-- [ ] **5.6** Delete `feature.native_oauth_enabled` flag; native OAuth is the only path.
-- [ ] **5.7** Verify `pnpm test`, `pnpm test:rust`, `pnpm typecheck`, `pnpm lint`, `pnpm test:e2e:all:flows` all green.
+- [x] **5.4** Frontend login-surface cut (two slices):
+  - **Slice 1**: deleted `OAuthProviderButton`, `OAuthLoginSection`, `providerConfigs`, `Welcome.tsx`, `PublicRoute.tsx`. `AppRoutes` now redirects `/` → `/home` and every `<ProtectedRoute>` drops `requireAuth`. `ProtectedRoute` simplified to a bootstrap-passthrough; `DefaultRedirect` no longer routes-on-no-token.
+  - **Slice 2**: deleted `desktopDeepLinkListener.ts` (login/Composio-OAuth/Stripe deep-link handlers — all dead), `authApi.ts` (magic-link + consumeLoginToken), `deepLinkAuthState.ts` (no surviving readers). `main.tsx` drops `setStoreForApiClient` wiring and `setupDesktopDeepLinkListener()` boot call.
+  - **Deferred**: `apiClient.ts` (still used by `mascotService`, `meetCallService`, `rewardsApi`, `inviteApi` — Phase 6 work); `backendUrl.ts` + `useBackendUrl.ts` (webhooks tunnel still needs these — A8 keeps); `sessionToken` field on `CoreStateProvider` (15+ null-tolerant consumers; sweep is mechanical but touches a lot of files).
+- [ ] **5.5** (merged into 5.4 above — the Redux auth slice never existed in this codebase; the pattern was already migrated to `CoreStateProvider` before this work began.)
+- [x] **5.6** Dropped the `OPENHUMAN_NATIVE_OAUTH` env-var gate on `try_dispatch_native`. Native dispatch is unconditional now — partial-rollout scaffolding gone. Outdated test note + 3 obsolete routing regression tests removed.
+- [ ] **5.7** Verify `pnpm test`, `pnpm test:rust`, `pnpm typecheck`, `pnpm lint`, `pnpm test:e2e:all:flows` all green. **Status**: `cargo test --lib` runs 7,579 green. Frontend `pnpm compile` blocked locally on `app/node_modules` not being installed in this session; needs a fresh `pnpm install` to verify. E2E + lint still pending.
 
 ### Phase 6 — Local replacements for A3–A7
 
