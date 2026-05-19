@@ -12,6 +12,7 @@ pub mod ops;
 pub mod persistence;
 pub mod pkce;
 pub mod providers;
+pub mod refresh;
 
 #[cfg(test)]
 mod loopback_tests;
