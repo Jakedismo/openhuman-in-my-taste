@@ -270,12 +270,6 @@ impl BackendOAuthClient {
         Ok(jwt)
     }
 
-    /// Validates that the provided session token is still active and accepted.
-    pub async fn validate_session_token(&self, bearer_jwt: &str) -> Result<()> {
-        let _ = self.fetch_current_user(bearer_jwt).await?;
-        Ok(())
-    }
-
     /// Creates a short-lived link token for connecting a specific communication channel.
     pub async fn create_channel_link_token(
         &self,
