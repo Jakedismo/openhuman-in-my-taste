@@ -7,6 +7,7 @@
 //! full deletion plan.
 
 pub mod loopback;
+pub mod native_dispatch;
 pub mod ops;
 pub mod persistence;
 pub mod pkce;
