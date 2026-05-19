@@ -54,6 +54,7 @@ pub mod overlay;
 pub mod people;
 pub mod prompt_injection;
 pub mod provider_surfaces;
+pub mod providers_native;
 pub mod redirect_links;
 pub mod referral;
 pub mod routing;
