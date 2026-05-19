@@ -111,7 +111,6 @@ impl GithubClient {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_token_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.token_endpoint = endpoint.into();
         self

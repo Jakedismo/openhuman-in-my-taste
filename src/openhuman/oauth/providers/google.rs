@@ -117,9 +117,11 @@ impl GoogleClient {
         }
     }
 
-    /// Test-only knob to point the client at a mock token endpoint
-    /// (typically a local axum server bound on `127.0.0.1:0`).
-    #[cfg(test)]
+    /// Crate-internal knob to point the client at a different token
+    /// endpoint. Used by the orchestrator (`oauth::ops`) to thread a
+    /// test override through and by tests to point at a local axum
+    /// mock. Not part of the public surface — production code should
+    /// always use [`TOKEN_ENDPOINT`].
     pub(crate) fn with_token_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.token_endpoint = endpoint.into();
         self
