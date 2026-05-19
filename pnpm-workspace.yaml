@@ -1,2 +1,7 @@
 packages:
   - "app"
+allowBuilds:
+  '@sentry/cli': set this to true or false
+  edgedriver: set this to true or false
+  esbuild: true
+  geckodriver: set this to true or false
