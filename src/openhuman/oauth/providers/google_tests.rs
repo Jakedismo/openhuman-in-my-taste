@@ -15,9 +15,9 @@ use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Router}
 use tokio::sync::Mutex;
 
 use super::google::{
-    build_auth_url, AuthUrlParams, GoogleClient, TokenError, TokenResponse, AUTH_ENDPOINT,
-    DEFAULT_SCOPES,
+    build_auth_url, AuthUrlParams, GoogleClient, TokenResponse, AUTH_ENDPOINT, DEFAULT_SCOPES,
 };
+use super::TokenError;
 
 fn parse(url: &str) -> (String, HashMap<String, String>) {
     let parsed = Url::parse(url).expect("auth url must be a valid URL");

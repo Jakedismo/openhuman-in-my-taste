@@ -6,7 +6,8 @@
 //! with a `127.0.0.1` loopback redirect (RFC 8252 §7.3) and PKCE S256.
 
 use serde::Deserialize;
-use thiserror::Error;
+
+use super::TokenError;
 
 /// Authorization endpoint — user-agent redirected here to consent.
 pub const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -94,26 +95,6 @@ pub struct TokenResponse {
     pub token_type: String,
     #[serde(default)]
     pub id_token: Option<String>,
-}
-
-/// Errors surfaced by [`GoogleClient::exchange_code`] and
-/// [`GoogleClient::refresh_access_token`].
-#[derive(Debug, Error)]
-pub enum TokenError {
-    /// The provider returned a non-2xx HTTP status. `body` is the raw
-    /// response body verbatim so callers can surface the
-    /// `error_description` Google embeds in the JSON.
-    #[error("google token endpoint returned HTTP {status}: {body}")]
-    Http { status: u16, body: String },
-
-    /// Underlying transport failed (DNS, TLS, connection reset, …).
-    #[error("network error talking to google token endpoint: {0}")]
-    Network(String),
-
-    /// Provider returned 2xx but the JSON did not parse into
-    /// [`TokenResponse`]. Carries the raw body for debugging.
-    #[error("could not decode google token response: {message} (body={body})")]
-    Decode { message: String, body: String },
 }
 
 /// Thin HTTPS client for the Google token endpoint. Holds the
