@@ -4,16 +4,11 @@
 //! …) and the typed Rust functions in
 //! [`crate::openhuman::providers_native`].
 //!
-//! The intent for Phase 5 cutover: every call site that today hits
-//! Composio's `execute` route runs `try_dispatch_native` first; if it
-//! returns `Some(_)`, the native path handled the request and the
-//! Composio call is skipped entirely. `None` means "no native impl —
-//! fall through" so partial coverage during the build-new-beside-old
-//! window is safe.
-//!
-//! The feature flag is read from the environment for now
-//! (`OPENHUMAN_NATIVE_OAUTH=1`); promoting it to a typed
-//! `config.feature.native_oauth_enabled` field is a follow-up.
+//! As of Phase 5.1 native dispatch is the ONLY execution route — the
+//! Composio backend fall-through was removed from
+//! [`crate::openhuman::composio::ops::composio_execute`]. A slug
+//! without a native arm hard-errors at the call site. Add new arms
+//! to the match below to extend coverage.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -24,37 +19,20 @@ use crate::openhuman::providers_native::{
     google::{self, calendar::ListEventsQuery},
 };
 
-/// Environment variable that enables routing to native providers. Set
-/// to `1` to flip dispatch on; any other value (or unset) means the
-/// dispatcher always returns `None` and Composio handles everything.
-pub const ENABLE_ENV: &str = "OPENHUMAN_NATIVE_OAUTH";
-
-/// True iff [`ENABLE_ENV`] is set to `1`.
-pub fn is_enabled() -> bool {
-    std::env::var(ENABLE_ENV).as_deref() == Ok("1")
-}
-
 /// Try to dispatch `tool` to a native client. Returns:
-///   * `None` — no native impl for this slug, caller should fall
-///     through to Composio.
+///   * `None` — no native impl for this slug; caller hard-errors
+///     (the Composio fall-through was removed in Phase 5.1).
 ///   * `Some(Ok(json))` — native handled the request, here is the
 ///     payload (shape mirrors what Composio's `data` field would
 ///     carry).
 ///   * `Some(Err(msg))` — native handled but failed; caller should
-///     surface this verbatim instead of retrying through Composio
-///     (the error is authoritative).
-///
-/// Returns `None` when the feature flag is off so callers never see
-/// a partial-rollout footgun even if a slug ships native.
+///     surface this verbatim. The error is authoritative.
 pub async fn try_dispatch_native(
     http: &reqwest::Client,
     service: &AuthService,
     tool: &str,
     arguments: Option<&Value>,
 ) -> Option<Result<Value>> {
-    if !is_enabled() {
-        return None;
-    }
     let trimmed = tool.trim();
     let args = arguments.cloned().unwrap_or_else(|| json!({}));
     match trimmed {
@@ -289,16 +267,12 @@ fn str_field(args: &Value, key: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    // NOTE: the env-var-driven `is_enabled()` gate is intentionally
-    // not tested in unit tests — `std::env` is process-global, and
-    // cargo's default parallel test runner races concurrent set/unset
-    // pairs into false negatives. The fall-through behavior (flag off
-    // OR unknown slug → caller proceeds with Composio) is exercised
-    // by the existing 459 composio integration tests, none of which
-    // set OPENHUMAN_NATIVE_OAUTH=1, so the dispatcher never short-
-    // circuits and Composio handles everything. The flag-ON path is
-    // validated manually via the `oauth-connect` binary and a real
-    // provider during Phase 4.
+    // The dispatcher's match arms are exercised through the integration
+    // entry point `composio_execute`; per-arm wiring (correct provider
+    // client call, arg-shape mapping) is covered by the provider-native
+    // test suites in `providers_native::{google,github}`. Unknown-slug
+    // fallthrough is covered by `composio_execute_errors_for_unknown_slug`
+    // in `composio/ops_test.rs`.
 
     #[test]
     fn str_field_extracts_string() {

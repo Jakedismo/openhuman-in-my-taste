@@ -1144,28 +1144,11 @@ async fn composio_authorize_routes_through_direct_mode() {
     );
 }
 
-#[tokio::test]
-async fn composio_execute_routes_through_direct_mode() {
-    // Same shape of assertion as
-    // `composio_authorize_routes_through_direct_mode` — we can't mock
-    // `backend.composio.dev` from a unit test, so we verify the factory
-    // routed to direct mode (no backend-auth error) and that an error
-    // surfaces because the live HTTP call cannot succeed against a
-    // test key.
-    let tmp = tempfile::tempdir().unwrap();
-    let config = direct_mode_config(&tmp);
-    let err = composio_execute(&config, "GMAIL_SEND_EMAIL", None)
-        .await
-        .unwrap_err();
-    assert!(
-        !err.contains("no backend session"),
-        "direct mode must not surface backend-auth errors, got: {err}"
-    );
-    assert!(
-        err.to_lowercase().contains("composio"),
-        "error must carry the composio prefix, got: {err}"
-    );
-}
+// `composio_execute_routes_through_direct_mode` pinned the old
+// direct-mode (BYO Composio key) routing. With native dispatch now the
+// only execution path, the Composio direct branch is unreachable.
+// The native-path coverage lives in src/openhuman/oauth/native_dispatch
+// and src/openhuman/providers_native/*.
 
 // ── classify_composio_failure_tag ──────────────────────────────
 //
