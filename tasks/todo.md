@@ -59,9 +59,12 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
 ### Phase 2 — Native OAuth domain (feature-flagged, alongside Composio)
 
 - [ ] **2.1** Create `src/openhuman/oauth/` domain following the controller-only pattern (`mod.rs`, `schemas.rs`, `ops.rs`, `loopback.rs`, `pkce.rs`, providers/`google.rs`, providers/`github.rs`).
-- [ ] **2.2** Loopback redirect server in `oauth/loopback.rs` — binds `127.0.0.1:0`, captures the `code` + `state` query params, hands them back to the pending flow via `oneshot`. Closes after one request. Per-flow random port.
+- [x] **2.2** Loopback redirect server in `oauth/loopback.rs` — binds `127.0.0.1:0`, captures the `code` + `state` query params, hands them back to the pending flow via `oneshot`. Closes after one request. Per-flow random port. **9 tests green** (6 pure-parse branches + 3 end-to-end over reqwest including timeout).
 - [x] **2.3** PKCE helpers in `oauth/pkce.rs` — `code_verifier` (32 random bytes → 43-char base64url-no-pad), `code_challenge` (SHA-256 + base64url-no-pad), `state` (16 random bytes). 9 unit tests in `pkce_tests.rs` including RFC 7636 Appendix B fixed test vector. **All green.**
 - [ ] **2.4** Google provider — single OAuth client_id baked at build time via build-script env var (`OPENHUMAN_GOOGLE_OAUTH_CLIENT_ID`, with a placeholder for local dev). Scopes: `gmail.readonly`, `gmail.send`, `calendar`, `calendar.events`, `drive.file`. Refresh token plumbing.
+  - [x] **2.4a** `build_auth_url(&AuthUrlParams)` + `AUTH_ENDPOINT` / `TOKEN_ENDPOINT` / `DEFAULT_SCOPES` constants. 8 tests green (param pinning, percent-encoding, custom-scope override).
+  - [ ] **2.4b** `GoogleClient::{exchange_code, refresh_token}` + `TokenResponse` + `TokenError`.
+  - [ ] **2.4c** Build-time client_id discovery via `option_env!` + runtime guard returning a typed error when unset.
 - [ ] **2.5** GitHub provider — OAuth app or GitHub App client_id at build time. Scopes: `repo`, `read:user`, plus whatever Composio currently asks for.
 - [ ] **2.6** Persistence — call `AuthService::store_provider_token("google", "default", access_token, metadata{refresh_token, expires_at, scopes, ...}, true)`. Mirror for GitHub.
 - [ ] **2.7** RPC surface — `openhuman.oauth_start({provider})` → returns `{auth_url}` and the loopback handle; `openhuman.oauth_status({provider})` → connected/expired/disconnected; `openhuman.oauth_disconnect({provider})`. Frontend opens `auth_url` in system browser (Tauri shell).
