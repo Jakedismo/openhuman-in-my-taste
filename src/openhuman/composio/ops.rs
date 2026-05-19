@@ -570,12 +570,108 @@ async fn filter_list_tools_response_for_direct(resp: &mut ComposioToolsResponse)
 
 // ── Execute ─────────────────────────────────────────────────────────
 
+/// Phase 3.3 native-dispatch helper. Returns `Some(RpcOutcome)` when
+/// the native provider client handled the request (success OR typed
+/// failure); `None` means "no native impl, fall through to Composio".
+/// Caller is expected to gate this with
+/// `native_dispatch::is_enabled()` so the AuthService construction is
+/// not paid on the hot path when the flag is off.
+async fn try_native_dispatch(
+    config: &Config,
+    tool: &str,
+    arguments: Option<&serde_json::Value>,
+) -> Option<RpcOutcome<ComposioExecuteResponse>> {
+    let auth_service = crate::openhuman::credentials::AuthService::from_config(config);
+    let http = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let dispatched = crate::openhuman::oauth::native_dispatch::try_dispatch_native(
+        &http,
+        &auth_service,
+        tool,
+        arguments,
+    )
+    .await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match dispatched {
+        Ok(data) => {
+            tracing::debug!(
+                tool = %tool,
+                elapsed_ms,
+                "[composio][native] dispatch ok"
+            );
+            crate::core::event_bus::publish_global(
+                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
+                    tool: tool.to_string(),
+                    success: true,
+                    error: None,
+                    cost_usd: 0.0,
+                    elapsed_ms,
+                },
+            );
+            Some(RpcOutcome::new(
+                ComposioExecuteResponse {
+                    data,
+                    successful: true,
+                    error: None,
+                    cost_usd: 0.0,
+                    markdown_formatted: None,
+                },
+                vec![format!(
+                    "composio: executed {tool} via native dispatch ({elapsed_ms}ms)"
+                )],
+            ))
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::debug!(
+                tool = %tool,
+                elapsed_ms,
+                error = %err_msg,
+                "[composio][native] dispatch failed"
+            );
+            crate::core::event_bus::publish_global(
+                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
+                    tool: tool.to_string(),
+                    success: false,
+                    error: Some(err_msg.clone()),
+                    cost_usd: 0.0,
+                    elapsed_ms,
+                },
+            );
+            Some(RpcOutcome::new(
+                ComposioExecuteResponse {
+                    data: serde_json::Value::Null,
+                    successful: false,
+                    error: Some(err_msg),
+                    cost_usd: 0.0,
+                    markdown_formatted: None,
+                },
+                vec![format!(
+                    "composio: native dispatch failed for {tool} ({elapsed_ms}ms)"
+                )],
+            ))
+        }
+    }
+}
+
 pub async fn composio_execute(
     config: &Config,
     tool: &str,
     arguments: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioExecuteResponse>> {
     tracing::debug!(tool = %tool, "[composio] rpc execute");
+
+    // Phase 3.3 — native-OAuth dispatch shim. When
+    // OPENHUMAN_NATIVE_OAUTH=1 and the slug has a native impl, route
+    // to the direct provider client and skip the Composio path
+    // entirely. Falls through silently when the flag is off or the
+    // slug is not yet covered natively, so partial rollout is safe.
+    if crate::openhuman::oauth::native_dispatch::is_enabled() {
+        if let Some(result) = try_native_dispatch(config, tool, arguments.as_ref()).await {
+            return Ok(result);
+        }
+    }
+
     // Route through the mode-aware factory so direct-mode users hit
     // their personal Composio tenant for tool execution. Mirrors the
     // agent-tool path's `ComposioExecuteTool::execute` (commit
