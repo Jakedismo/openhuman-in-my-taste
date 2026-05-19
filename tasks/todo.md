@@ -73,10 +73,13 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
 
 ### Phase 3 — Provider clients (replace Composio data calls)
 
-- [ ] **3.1** `src/openhuman/providers_native/google/{gmail.rs, calendar.rs, drive.rs}` — direct HTTPS clients. Pull tokens from `AuthService`. Refresh on 401. Implement only the operations Composio currently provides (enumerate from `composio/tools.rs` + `googlecalendar_args.rs`).
-- [ ] **3.2** `src/openhuman/providers_native/github.rs` — same shape. Implement only what current Composio call sites consume.
-- [ ] **3.3** Replace one Composio call site at a time behind `feature.native_oauth_enabled`. Tests stay green at every step.
-- [ ] **3.4** RPC: existing `composio_*` methods get a dispatch shim — when `native_oauth_enabled` and provider has a native client, route there; else fall through to Composio.
+- [x] **3.1** `src/openhuman/providers_native/google/{gmail.rs, calendar.rs, drive.rs}` — direct HTTPS clients. Pull tokens from `AuthService` via shared `bearer::AuthedClient`. Refresh on 401 surfaced as typed error (auto-retry deferred to a later slice). Operations covered:
+  - **Gmail**: `send_message`, `list_messages`, `delete_message`, `add_label`
+  - **Calendar**: `list_events` (with the singleEvents=true / timeZone defaulting from issue #1714), `get_event`, `create_event`
+  - **Drive**: `list_files`, `create_file_metadata`, `get_file_metadata` (under `drive.file` scope)
+- [x] **3.2** `src/openhuman/providers_native/github.rs`: `get_authenticated_user`, `list_authenticated_repos`, `create_issue`.
+- [ ] **3.3** Replace one Composio call site at a time behind `feature.native_oauth_enabled`. Tests stay green at every step. **Not yet started** — Composio agent-tool wiring lives in `composio/action_tool.rs`, `composio/ops.rs`, `composio/execute_dispatch.rs`; cutover is invasive and warrants its own focused session.
+- [ ] **3.4** RPC: existing `composio_*` methods get a dispatch shim — when `native_oauth_enabled` and provider has a native client, route there; else fall through to Composio. Pairs with 3.3.
 
 ### Phase 4 — Validate end-to-end (gate before cutover)
 
