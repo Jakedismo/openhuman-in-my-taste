@@ -289,13 +289,13 @@ pub async fn composio_authorize(
     extra_params: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioAuthorizeResponse>> {
     tracing::debug!(toolkit = %toolkit, has_extra_params = extra_params.is_some(), "[composio] rpc authorize");
-    // Route through the mode-aware factory so direct-mode users get a
-    // hosted Composio OAuth URL for THEIR personal tenant — not the
-    // backend tinyhumans tenant's OAuth proxy (#1710). The pre-factory
-    // path hard-routed through `staging-api.tinyhumans.ai`, so a user
-    // toggled into Direct mode would silently complete OAuth against
-    // the wrong tenant and never see the new connection in their
-    // own Composio account.
+    return Err(format!(
+        "[composio] authorize is disabled — Composio OAuth aggregator was removed \
+         in the local-OAuth refactor. Use the native flow via the `oauth-connect` \
+         CLI (Google/GitHub) or add a native arm for toolkit '{toolkit}'."
+    ));
+
+    #[allow(unreachable_code)]
     let kind = create_composio_client(config).map_err(|e| format!("[composio] authorize: {e}"))?;
     let resp = match kind {
         ComposioClientKind::Backend(client) => {
@@ -661,90 +661,18 @@ pub async fn composio_execute(
 ) -> OpResult<RpcOutcome<ComposioExecuteResponse>> {
     tracing::debug!(tool = %tool, "[composio] rpc execute");
 
-    // Phase 3.3 — native-OAuth dispatch shim. When
-    // OPENHUMAN_NATIVE_OAUTH=1 and the slug has a native impl, route
-    // to the direct provider client and skip the Composio path
-    // entirely. Falls through silently when the flag is off or the
-    // slug is not yet covered natively, so partial rollout is safe.
-    if crate::openhuman::oauth::native_dispatch::is_enabled() {
-        if let Some(result) = try_native_dispatch(config, tool, arguments.as_ref()).await {
-            return Ok(result);
-        }
+    // Native-OAuth dispatch is the ONLY execution path. The Composio
+    // backend proxy was removed in the local-OAuth refactor — any slug
+    // without a native arm hard-errors here so callers don't silently
+    // depend on a third-party tool runner.
+    if let Some(result) = try_native_dispatch(config, tool, arguments.as_ref()).await {
+        return Ok(result);
     }
-
-    // Route through the mode-aware factory so direct-mode users hit
-    // their personal Composio tenant for tool execution. Mirrors the
-    // agent-tool path's `ComposioExecuteTool::execute` (commit
-    // 814fdd97); the shared `direct_execute` helper in `client.rs`
-    // keeps the envelope identical between backend and direct so the
-    // `ComposioActionExecuted` event-bus payload, markdown-vs-JSON
-    // body preference, and cost-USD log line all stay uniform (#1710).
-    let kind = create_composio_client(config).map_err(|e| format!("[composio] execute: {e}"))?;
-    let started = std::time::Instant::now();
-    // Centralized prepare → retry → error-mapping pipeline (#1797),
-    // mode-aware over the backend/direct split (#1710). The dispatcher
-    // returns pre-formatted `[composio:error:<class>] …` strings so the
-    // frontend formatter at `app/src/lib/composio/formatters.ts` can
-    // parse the class regardless of which mode produced the failure.
-    let result = super::execute_dispatch::execute_composio_action_kind(
-        kind,
-        tool,
-        arguments,
-        &config.composio.entity_id,
-    )
-    .await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(resp) => {
-            crate::core::event_bus::publish_global(
-                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
-                    tool: tool.to_string(),
-                    success: resp.successful,
-                    error: resp.error.clone(),
-                    cost_usd: resp.cost_usd,
-                    elapsed_ms,
-                },
-            );
-            // Backend (tinyhumansai/backend#683) now parses all composio
-            // payloads server-side and returns a `markdownFormatted`
-            // string for known tools, so callers should consume that
-            // directly. Core no longer reshapes `resp.data` here. Memory
-            // ingestion paths still call `post_process_action_result`
-            // explicitly when they need the structured slim envelope.
-            Ok(RpcOutcome::new(
-                resp,
-                vec![format!("composio: executed {tool} ({elapsed_ms}ms)")],
-            ))
-        }
-        Err(e) => {
-            crate::core::event_bus::publish_global(
-                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
-                    tool: tool.to_string(),
-                    success: false,
-                    error: Some(e.to_string()),
-                    cost_usd: 0.0,
-                    elapsed_ms,
-                },
-            );
-            report_composio_op_error("execute", &e);
-            // Preserve already-classified errors from the dispatcher
-            // (`[composio:error:<class>] …`) so the frontend formatter at
-            // `app/src/lib/composio/formatters.ts` can still parse the class.
-            let is_classified = e.starts_with("[composio:error:");
-            tracing::debug!(
-                tool = %tool,
-                elapsed_ms,
-                classified = is_classified,
-                "[composio] rpc execute error mapped"
-            );
-            if is_classified {
-                Err(e)
-            } else {
-                Err(format!("[composio] execute failed: {e}"))
-            }
-        }
-    }
+    Err(format!(
+        "[composio] tool '{tool}' has no native dispatcher. \
+         Add a native arm in src/openhuman/oauth/native_dispatch.rs \
+         to support this slug."
+    ))
 }
 
 // ── GitHub repos + trigger provisioning ─────────────────────────────
@@ -1505,18 +1433,23 @@ pub async fn fetch_connected_integrations_status(
 
 /// The actual backend fetch, called on cache miss.
 ///
-/// Returns `Some(vec)` when the backend was reachable. The returned
-/// vector is the merged **integration overview** — every toolkit in
-/// the backend allowlist appears as one entry, with a `connected`
-/// flag indicating whether the user has an active OAuth connection.
-/// Connected entries also carry the per-action tool catalogue
-/// (fetched in a single batched call).
-///
-/// Returns `None` when we couldn't even build a client (no auth),
-/// signalling the caller should NOT cache this result.
+/// **Stubbed for the local-OAuth refactor**: returns `Unavailable`
+/// (`None`) without making a network call. Composio backend access
+/// was removed; the agent's "connected integrations" surface is
+/// expected to be re-sourced from `AuthService` profiles in a follow-up
+/// (it currently sees zero connections, which prompts the user-visible
+/// "no connections" state in the agent prompt).
+#[allow(unused_variables)]
 async fn fetch_connected_integrations_uncached(
     config: &Config,
 ) -> Option<Vec<ConnectedIntegration>> {
+    tracing::debug!(
+        "[composio] fetch_connected_integrations: stubbed (Composio backend removed)"
+    );
+    return None;
+
+    #[allow(unreachable_code)]
+    {
     use super::client::{create_composio_client, direct_list_connections, ComposioClientKind};
     use super::providers::toolkit_description;
 
@@ -1782,6 +1715,7 @@ async fn fetch_connected_integrations_uncached(
     }
 
     Some(integrations)
+    }
 }
 
 /// Just-in-time fetch of every available action for a single Composio

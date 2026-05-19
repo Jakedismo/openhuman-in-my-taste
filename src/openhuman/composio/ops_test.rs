@@ -92,19 +92,17 @@ async fn composio_list_connections_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_authorize_errors_without_session() {
+async fn composio_authorize_is_disabled() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
     let err = composio_authorize(&config, "gmail", None)
         .await
         .unwrap_err();
-    // Backend mode (default) without a session — the mode-aware factory
-    // surfaces "no backend session token" once `composio_authorize`
-    // routes through `create_composio_client`. Accept either the
-    // legacy `composio unavailable` prefix or the new factory phrasing.
+    // After the local-OAuth refactor `composio_authorize` is a hard
+    // error — the Composio OAuth aggregator path was removed. New
+    // surface is the native `oauth-connect` CLI.
     assert!(
-        err.to_lowercase().contains("composio")
-            && (err.contains("no backend session") || err.contains("unavailable")),
+        err.contains("authorize is disabled"),
         "unexpected error: {err}"
     );
 }
@@ -133,15 +131,17 @@ async fn composio_list_tools_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_execute_errors_without_session() {
+async fn composio_execute_errors_for_unknown_slug() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
-    let err = composio_execute(&config, "GMAIL_SEND_EMAIL", None)
+    // Native dispatch isn't enabled (env var unset) and the Composio
+    // backend path was removed — so any execute now hard-errors with
+    // the "no native dispatcher" hint regardless of session state.
+    let err = composio_execute(&config, "UNKNOWN_SLUG_FOR_TEST", None)
         .await
         .unwrap_err();
     assert!(
-        err.to_lowercase().contains("composio")
-            && (err.contains("no backend session") || err.contains("unavailable")),
+        err.contains("no native dispatcher"),
         "unexpected error: {err}"
     );
 }
@@ -349,24 +349,9 @@ async fn composio_list_connections_via_mock_counts_active() {
     assert!(outcome.logs.iter().any(|l| l.contains("2 active")));
 }
 
-#[tokio::test]
-async fn composio_authorize_via_mock_publishes_event_and_returns_url() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/authorize",
-        post(|Json(_b): Json<Value>| async move {
-            Json(json!({
-                "success": true,
-                "data": {"connectUrl": "https://x", "connectionId": "c1"}
-            }))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let outcome = composio_authorize(&config, "gmail", None).await.unwrap();
-    assert_eq!(outcome.value.connect_url, "https://x");
-    assert_eq!(outcome.value.connection_id, "c1");
-}
+// `composio_authorize_via_mock_publishes_event_and_returns_url` was
+// removed alongside the Composio OAuth aggregator path. The disabled-
+// state behavior is covered by `composio_authorize_is_disabled`.
 
 #[tokio::test]
 async fn composio_delete_connection_via_mock() {
@@ -467,57 +452,12 @@ async fn composio_list_tools_via_mock_with_filter() {
     assert_eq!(outcome.value.tools.len(), 2);
 }
 
-#[tokio::test]
-async fn composio_execute_via_mock_succeeds_and_logs_elapsed() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/execute",
-        post(|Json(b): Json<Value>| async move {
-            Json(json!({
-                "success": true,
-                "data": {
-                    "data": {"echo": b["tool"]},
-                    "successful": true,
-                    "error": null,
-                    "costUsd": 0.001
-                }
-            }))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let outcome = composio_execute(&config, "GMAIL_SEND", Some(json!({"to": "a"})))
-        .await
-        .unwrap();
-    assert!(outcome.value.successful);
-    assert!(outcome
-        .logs
-        .iter()
-        .any(|l| l.contains("executed GMAIL_SEND")));
-}
-
-#[tokio::test]
-async fn composio_execute_via_mock_propagates_backend_error() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/execute",
-        post(|| async { Json(json!({"success": false, "error": "rate limited"})) }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let err = composio_execute(&config, "ANY_TOOL", None)
-        .await
-        .unwrap_err();
-    // The dispatcher (`execute_composio_action`) classifies transport
-    // failures and prefixes them with `[composio:error:<class>] …`; ops.rs
-    // preserves that prefix so the frontend formatter can parse the class.
-    // For an unrecognised tool slug and a 502-shaped envelope the only
-    // signal we get is the backend error text, so assert on its contents.
-    assert!(
-        err.starts_with("[composio:error:") && err.contains("rate limited"),
-        "got: {err}"
-    );
-}
+// `composio_execute_via_mock_succeeds_and_logs_elapsed` and
+// `composio_execute_via_mock_propagates_backend_error` were removed
+// alongside the Composio HTTP execute path. The native-dispatch
+// behavior is covered by the `openhuman::oauth::native_dispatch` suite,
+// and the "no native dispatcher" hard-error is covered by
+// `composio_execute_errors_for_unknown_slug`.
 
 #[tokio::test]
 async fn composio_sync_gmail_via_mock_archives_raw_email_and_updates_outcome() {
@@ -639,158 +579,14 @@ async fn composio_sync_gmail_via_mock_archives_raw_email_and_updates_outcome() {
     );
 }
 
-#[tokio::test]
-async fn fetch_connected_integrations_via_mock_aggregates_tools() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    // Connections: gmail + notion. Tools: filtered to those toolkits
-    // and prefixed with the uppercased slug. The toolkits route
-    // backs the `list_toolkits()` allowlist gate that
-    // `fetch_connected_integrations_uncached` calls before touching
-    // connections — without it the function bails out at the first
-    // step and returns an empty vec.
-    let app = Router::new()
-        .route(
-            "/agent-integrations/composio/toolkits",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"toolkits": ["gmail", "notion"]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/connections",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"connections": [
-                        {"id":"c1","toolkit":"gmail","status":"ACTIVE"},
-                        {"id":"c2","toolkit":"notion","status":"CONNECTED"}
-                    ]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/tools",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"tools": [
-                        {"type":"function","function":{
-                            "name":"GMAIL_SEND_EMAIL",
-                            "description":"Send"
-                        }},
-                        {"type":"function","function":{
-                            "name":"NOTION_CREATE_PAGE",
-                            "description":"Create"
-                        }}
-                    ]}
-                }))
-            }),
-        );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    // Use a fresh cache key by isolating config_path.
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-    let integrations = fetch_connected_integrations(&config).await;
-    assert_eq!(integrations.len(), 2);
-    // Sorted by toolkit name
-    assert_eq!(integrations[0].toolkit, "gmail");
-    assert_eq!(integrations[1].toolkit, "notion");
-    assert_eq!(integrations[0].tools.len(), 1);
-    assert_eq!(integrations[0].tools[0].name, "GMAIL_SEND_EMAIL");
-}
-
-#[tokio::test]
-async fn fetch_connected_integrations_treats_slack_and_telegram_status_like_ui() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let app = Router::new()
-        .route(
-            "/agent-integrations/composio/toolkits",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"toolkits": [" Slack ", "telegram"]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/connections",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"connections": [
-                        {"id":"c-slack","toolkit":" Slack ","status":"connected"},
-                        {"id":"c-telegram","toolkit":"telegram","status":" active "}
-                    ]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/tools",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"tools": [
-                        {"type":"function","function":{
-                            "name":"SLACK_FETCH_CONVERSATION_HISTORY",
-                            "description":"Read Slack channel history"
-                        }},
-                        {"type":"function","function":{
-                            "name":"TELEGRAM_GET_CHAT_HISTORY",
-                            "description":"Read Telegram chat history"
-                        }},
-                        {"type":"function","function":{
-                            "name":"SLACK_DELETE_CHANNEL",
-                            "description":"Delete a channel"
-                        }}
-                    ]}
-                }))
-            }),
-        );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-
-    let integrations = fetch_connected_integrations(&config).await;
-
-    let slack = integrations
-        .iter()
-        .find(|i| i.toolkit == "slack")
-        .expect("slack integration should be present");
-    assert!(slack.connected);
-    assert_eq!(slack.tools.len(), 1);
-    assert_eq!(slack.tools[0].name, "SLACK_FETCH_CONVERSATION_HISTORY");
-
-    let telegram = integrations
-        .iter()
-        .find(|i| i.toolkit == "telegram")
-        .expect("telegram integration should be present");
-    assert!(telegram.connected);
-    assert_eq!(telegram.tools.len(), 1);
-    assert_eq!(telegram.tools[0].name, "TELEGRAM_GET_CHAT_HISTORY");
-}
-
-#[tokio::test]
-async fn fetch_connected_integrations_via_mock_returns_empty_with_no_active() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let app = Router::new().route(
-        "/agent-integrations/composio/connections",
-        get(|| async {
-            Json(json!({"success": true, "data": {"connections": [
-                {"id":"c1","toolkit":"gmail","status":"PENDING"}
-            ]}}))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-    let integrations = fetch_connected_integrations(&config).await;
-    assert!(integrations.is_empty());
-}
+// The `fetch_connected_integrations_via_mock_*` and
+// `fetch_connected_integrations_treats_slack_and_telegram_status_like_ui`
+// tests pinned the old Composio HTTP path. After the local-OAuth
+// refactor `fetch_connected_integrations_uncached` is a stub that
+// returns `None`, so the public function always yields an empty vec.
+// The stub behavior is covered by the cache-seeding tests further
+// down (which feed entries in directly and assert the diff/hash
+// helpers behave correctly).
 
 // ── Windows-observed sync regression coverage (issue #749) ────
 //
