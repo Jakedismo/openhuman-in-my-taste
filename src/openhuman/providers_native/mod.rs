@@ -22,6 +22,7 @@ use anyhow::{anyhow, Context, Result};
 use crate::openhuman::credentials::AuthService;
 
 pub mod bearer;
+pub mod github;
 pub mod google;
 
 #[cfg(test)]
