@@ -8,6 +8,7 @@
 
 pub mod loopback;
 pub mod pkce;
+pub mod providers;
 
 #[cfg(test)]
 mod loopback_tests;
