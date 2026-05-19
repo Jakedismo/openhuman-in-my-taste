@@ -2,9 +2,6 @@ import { useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useT } from '../lib/i18n/I18nContext';
-// [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
-// import { isWelcomeLocked } from '../lib/coreState/store';
-import { useCoreState } from '../providers/CoreStateProvider';
 import { useAppSelector } from '../store/hooks';
 import { selectUnreadCount } from '../store/notificationSlice';
 import { isAccountsFullscreen } from '../utils/accountsFullscreen';
@@ -131,16 +128,15 @@ const BottomTabBar = () => {
   const tabs = useMemo(() => makeTabs(t), [t]);
   const location = useLocation();
   const navigate = useNavigate();
-  const { snapshot } = useCoreState();
-  const token = snapshot.sessionToken;
   const [revealed, setRevealed] = useState(false);
 
   const activeAccountId = useAppSelector(state => state.accounts.activeAccountId);
   const unreadCount = useAppSelector(state => selectUnreadCount(state.notifications.items));
 
+  // `/` is the redirect-to-/home stub; `/login` is the legacy login
+  // path that no longer exists. Either way, no tab bar.
   const hiddenPaths = ['/', '/login'];
   if (
-    !token ||
     hiddenPaths.some(path => location.pathname === path || location.pathname.startsWith(`${path}/`))
   ) {
     return null;
