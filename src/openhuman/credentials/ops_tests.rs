@@ -362,54 +362,6 @@ async fn list_provider_credentials_sorts_by_provider_then_profile_name() {
     assert_eq!(all.value[2].provider, "zeta");
 }
 
-// ── oauth_* (validation paths that don't require network) ─────
-
-#[tokio::test]
-async fn oauth_connect_errors_without_session_token() {
-    let tmp = TempDir::new().unwrap();
-    let config = test_config(&tmp);
-    let err = oauth_connect(&config, "notion", None, None, None)
-        .await
-        .unwrap_err();
-    assert!(err.contains("session JWT required"));
-}
-
-#[tokio::test]
-async fn oauth_list_integrations_errors_without_session() {
-    let tmp = TempDir::new().unwrap();
-    let config = test_config(&tmp);
-    let err = oauth_list_integrations(&config).await.unwrap_err();
-    assert!(err.contains("session JWT required"));
-}
-
-#[tokio::test]
-async fn oauth_fetch_integration_tokens_errors_without_session() {
-    let tmp = TempDir::new().unwrap();
-    let config = test_config(&tmp);
-    let err = oauth_fetch_integration_tokens(&config, "int-1", "enc-key")
-        .await
-        .unwrap_err();
-    assert!(err.contains("session JWT required"));
-}
-
-#[tokio::test]
-async fn oauth_fetch_client_key_errors_without_session() {
-    let tmp = TempDir::new().unwrap();
-    let config = test_config(&tmp);
-    let err = oauth_fetch_client_key(&config, "int-1").await.unwrap_err();
-    assert!(err.contains("session JWT required"));
-}
-
-#[tokio::test]
-async fn oauth_revoke_integration_errors_without_session() {
-    let tmp = TempDir::new().unwrap();
-    let config = test_config(&tmp);
-    let err = oauth_revoke_integration(&config, "int-1")
-        .await
-        .unwrap_err();
-    assert!(err.contains("session JWT required"));
-}
-
 #[tokio::test]
 async fn auth_get_me_errors_without_session() {
     let tmp = TempDir::new().unwrap();

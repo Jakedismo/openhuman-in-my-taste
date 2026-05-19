@@ -7,7 +7,7 @@ fn catalog_counts_match() {
     let schemas = all_controller_schemas();
     let handlers = all_registered_controllers();
     assert_eq!(schemas.len(), handlers.len());
-    assert!(schemas.len() >= 13, "auth namespace should expose ≥13 fns");
+    assert!(schemas.len() >= 8, "auth namespace should expose ≥8 fns");
 }
 
 #[test]
@@ -57,11 +57,6 @@ fn every_known_schema_key_returns_a_non_unknown_schema() {
         "auth_store_provider_credentials",
         "auth_remove_provider_credentials",
         "auth_list_provider_credentials",
-        "auth_oauth_connect",
-        "auth_oauth_list_integrations",
-        "auth_oauth_fetch_integration_tokens",
-        "auth_oauth_fetch_client_key",
-        "auth_oauth_revoke_integration",
     ];
     for k in keys {
         let s = schemas(k);
@@ -80,13 +75,6 @@ fn list_provider_credentials_schema_has_optional_provider_filter() {
     let provider = s.inputs.iter().find(|f| f.name == "provider");
     assert!(provider.is_some(), "must expose `provider` input");
     assert!(!provider.unwrap().required);
-}
-
-#[test]
-fn oauth_connect_schema_requires_provider() {
-    let s = schemas("auth_oauth_connect");
-    let provider = s.inputs.iter().find(|f| f.name == "provider").unwrap();
-    assert!(provider.required);
 }
 
 #[test]
