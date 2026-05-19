@@ -45,10 +45,22 @@ pub async fn try_dispatch_native(
         }
         "GOOGLECALENDAR_EVENTS_GET" => Some(dispatch_calendar_get(http, service, &args).await),
         "GOOGLECALENDAR_CREATE_EVENT" => Some(dispatch_calendar_create(http, service, &args).await),
+        "GOOGLEDRIVE_LIST_FILES" | "GOOGLEDRIVE_FIND_FILE" => {
+            Some(dispatch_drive_list(http, service, &args).await)
+        }
+        "GOOGLEDRIVE_GET_FILE_METADATA" => {
+            Some(dispatch_drive_get(http, service, &args).await)
+        }
+        "GOOGLEDRIVE_CREATE_FILE" | "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT" => {
+            Some(dispatch_drive_create(http, service, &args).await)
+        }
         "GITHUB_USERS_GET_AUTHENTICATED" => {
             Some(dispatch_github_get_authenticated(http, service).await)
         }
         "GITHUB_CREATE_AN_ISSUE" => Some(dispatch_github_create_issue(http, service, &args).await),
+        "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER" => {
+            Some(dispatch_github_list_repos(http, service, &args).await)
+        }
         _ => None,
     }
 }
@@ -219,6 +231,62 @@ async fn dispatch_calendar_create(
     google::calendar::create_event(http, service, &calendar_id, &body).await
 }
 
+async fn dispatch_drive_list(
+    http: &reqwest::Client,
+    service: &AuthService,
+    args: &Value,
+) -> Result<Value> {
+    let query = str_field(args, "query")
+        .or_else(|_| str_field(args, "q"))
+        .ok();
+    let page_size = args
+        .get("page_size")
+        .or_else(|| args.get("pageSize"))
+        .and_then(Value::as_u64)
+        .map(|n| n.min(u32::MAX as u64) as u32);
+    let resp = google::drive::list_files(http, service, query.as_deref(), page_size).await?;
+    Ok(json!({
+        "files": resp.files,
+        "next_page_token": resp.next_page_token,
+    }))
+}
+
+async fn dispatch_drive_get(
+    http: &reqwest::Client,
+    service: &AuthService,
+    args: &Value,
+) -> Result<Value> {
+    let file_id = str_field(args, "file_id").or_else(|_| str_field(args, "fileId"))?;
+    let file = google::drive::get_file_metadata(http, service, &file_id).await?;
+    Ok(serde_json::to_value(file)?)
+}
+
+async fn dispatch_drive_create(
+    http: &reqwest::Client,
+    service: &AuthService,
+    args: &Value,
+) -> Result<Value> {
+    // Composio passes the file body either as an opaque metadata object
+    // or as separate `name` / `mimeType` / `parents` fields. Honor both
+    // shapes — if a `metadata` object is present, use it verbatim;
+    // otherwise rebuild it from top-level args.
+    let metadata = match args.get("metadata") {
+        Some(v) if v.is_object() => v.clone(),
+        _ => {
+            let mut obj = serde_json::Map::new();
+            for key in ["name", "mimeType", "mime_type", "parents", "description"] {
+                if let Some(v) = args.get(key) {
+                    let canonical = if key == "mime_type" { "mimeType" } else { key };
+                    obj.insert(canonical.to_string(), v.clone());
+                }
+            }
+            Value::Object(obj)
+        }
+    };
+    let file = google::drive::create_file_metadata(http, service, &metadata).await?;
+    Ok(serde_json::to_value(file)?)
+}
+
 async fn dispatch_github_create_issue(
     http: &reqwest::Client,
     service: &AuthService,
@@ -237,6 +305,20 @@ async fn dispatch_github_create_issue(
         "state": issue.state,
         "body": issue.body,
     }))
+}
+
+async fn dispatch_github_list_repos(
+    http: &reqwest::Client,
+    service: &AuthService,
+    args: &Value,
+) -> Result<Value> {
+    let per_page = args
+        .get("per_page")
+        .or_else(|| args.get("perPage"))
+        .and_then(Value::as_u64)
+        .map(|n| n.min(u32::MAX as u64) as u32);
+    let repos = gh_native::list_authenticated_repos(http, service, per_page).await?;
+    Ok(json!({ "repositories": repos }))
 }
 
 async fn dispatch_github_get_authenticated(
