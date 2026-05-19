@@ -1,5 +1,33 @@
 # Plan: Remove OpenHuman backend dependency and Composio, go local-first
 
+## Getting started (run it today)
+
+After the local-OAuth + OpenAI-default cut, a fresh launch needs three things wired up before chat works end-to-end:
+
+1. **Build the core + CLI**
+   ```bash
+   cargo build --bin openhuman-core --bin oauth-connect
+   ```
+
+2. **Store your OpenAI API key.** The `unify_ai_provider_settings` migration seeds a `cloud_providers` entry with slug `openai` on first launch; the key lives encrypted in `auth-profiles.json`:
+   ```bash
+   ./target/debug/openhuman-core rpc auth_store_provider_credentials \
+     --params '{"provider":"openai","token":"sk-..."}'
+   ```
+   The factory routes every workload through `DEFAULT_MODEL = "openai:gpt-5.4"` against `https://api.openai.com/v1/responses` with `reasoning.effort = "medium"`.
+
+3. **(Optional) Connect Gmail / Calendar / Drive / GitHub natively.** Run the loopback OAuth flow per provider — tokens land in the same `auth-profiles.json`:
+   ```bash
+   OPENHUMAN_GOOGLE_OAUTH_CLIENT_ID=<...> ./target/debug/oauth-connect --provider google
+   OPENHUMAN_GITHUB_OAUTH_CLIENT_ID=<...> ./target/debug/oauth-connect --provider github
+   ```
+   The 9 wired tool slugs (`GMAIL_*`, `GOOGLECALENDAR_*`, `GOOGLEDRIVE_*`, `GITHUB_*`) then resolve through `oauth/native_dispatch.rs` and never touch any third-party broker.
+
+4. **Run the Tauri shell** as usual: `pnpm dev:app`.
+
+---
+
+
 ## Goal
 
 Eliminate the privacy risk where the OpenHuman backend and Composio sit between the user and their OAuth tokens. After this work, OAuth tokens for connected providers are obtained directly from the provider (no third party in the handshake), stored locally in the existing on-disk-encrypted `AuthService`, and used directly from the Rust core. Local replacements for backend-proxied tools (web search, scraping, maps, finance, telephony). LLM calls routed to Ollama by default.
