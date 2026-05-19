@@ -6,7 +6,10 @@
 //! never traverse any third party. See `tasks/todo.md` Phase 2 for the
 //! full deletion plan.
 
+pub mod loopback;
 pub mod pkce;
 
+#[cfg(test)]
+mod loopback_tests;
 #[cfg(test)]
 mod pkce_tests;
