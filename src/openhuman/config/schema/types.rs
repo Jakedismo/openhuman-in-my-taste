@@ -18,16 +18,23 @@ pub const MODEL_REASONING_V1: &str = "reasoning-v1";
 /// reasoning is needed.
 pub const MODEL_REASONING_QUICK_V1: &str = "reasoning-quick-v1";
 pub const MODEL_CODING_V1: &str = "coding-v1";
-/// Default model used when no explicit model is configured.
+/// Slug of the built-in OpenAI cloud-provider entry that gets seeded
+/// into [`Config::cloud_providers`] by default. The user stores their
+/// API key against this slug via `auth_store_provider_credentials`.
+pub const DEFAULT_OPENAI_SLUG: &str = "openai";
+
+/// Default chat model used when no explicit model is configured.
 ///
-/// The main (user-facing) agent is a planner/router: its job is to read the
-/// user request, decide which sub-agent to delegate to via `spawn_subagent`,
-/// and synthesise the final answer from sub-agent outputs. Reasoning-tier
-/// models are tuned for that decision-heavy workload, so we pin the main
-/// agent to `reasoning-v1` by default. Sub-agents that actually execute tool
-/// calls (e.g. `integrations_agent`) explicitly ride on the `agentic` tier via
-/// their `ModelSpec::Hint("agentic")` — see `builtin_definitions.rs`.
-pub const DEFAULT_MODEL: &str = MODEL_REASONING_V1;
+/// Routes through the seeded OpenAI cloud provider (see
+/// [`DEFAULT_OPENAI_SLUG`]) via the `/v1/responses` endpoint with
+/// `reasoning.effort = "medium"` (see
+/// [`crate::openhuman::inference::provider::compatible_types::ResponsesReasoning`]).
+///
+/// The main (user-facing) agent is a planner/router and benefits from
+/// the medium-effort reasoning tier. Sub-agents that ride on the
+/// `agentic` workload pick their own provider via the
+/// per-workload `*_provider` fields on `Config`.
+pub const DEFAULT_MODEL: &str = "openai:gpt-5.4";
 
 /// Top-level configuration (config.toml root).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

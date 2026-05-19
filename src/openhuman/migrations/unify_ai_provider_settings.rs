@@ -40,7 +40,7 @@
 //!   URL doesn't look like the OpenHuman backend.
 
 use crate::openhuman::config::schema::cloud_providers::{
-    generate_provider_id, AuthStyle, CloudProviderCreds, CloudProviderType,
+    generate_provider_id, AuthStyle, CloudProviderCreds,
 };
 use crate::openhuman::config::Config;
 
@@ -74,8 +74,9 @@ pub fn run(config: &mut Config) -> anyhow::Result<MigrationStats> {
     Ok(stats)
 }
 
-/// Seed `cloud_providers` with an OpenHuman entry (and optionally a Custom
-/// entry derived from a legacy `inference_url`).
+/// Seed `cloud_providers` with the built-in OpenAI entry the user can
+/// route against by storing their key under the `openai` slug, plus a
+/// Custom entry derived from any legacy `inference_url`.
 fn seed_cloud_providers(config: &mut Config, stats: &mut MigrationStats) {
     if !config.cloud_providers.is_empty() {
         log::debug!(
@@ -85,25 +86,17 @@ fn seed_cloud_providers(config: &mut Config, stats: &mut MigrationStats) {
         return;
     }
 
-    // Always seed the OpenHuman entry — even if api_url is None, the factory
-    // resolves a sensible default at runtime.
-    let oh_endpoint = config
-        .api_url
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| CloudProviderType::Openhuman.default_endpoint().to_string());
-    let oh_default_model = config
-        .default_model
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "reasoning-v1".to_string());
+    // After the local-OAuth refactor the OpenHuman backend is gone; the
+    // single default entry is OpenAI, matching `DEFAULT_MODEL =
+    // "openai:gpt-5.4"`. User stores their key against this slug via
+    // `auth_store_provider_credentials`.
     config.cloud_providers.push(CloudProviderCreds {
-        id: generate_provider_id("openhuman"),
-        slug: "openhuman".to_string(),
-        label: "OpenHuman".to_string(),
-        endpoint: oh_endpoint,
-        auth_style: AuthStyle::OpenhumanJwt,
-        default_model: Some(oh_default_model),
+        id: generate_provider_id("openai"),
+        slug: "openai".to_string(),
+        label: "OpenAI".to_string(),
+        endpoint: "https://api.openai.com/v1".to_string(),
+        auth_style: AuthStyle::Bearer,
+        default_model: Some("gpt-5.4".to_string()),
         ..Default::default()
     });
     stats.cloud_providers_seeded += 1;
@@ -143,21 +136,18 @@ fn seed_cloud_providers(config: &mut Config, stats: &mut MigrationStats) {
     }
 }
 
-/// Default `primary_cloud` to the OpenHuman entry (the first one we just
+/// Default `primary_cloud` to the OpenAI entry (the first one we just
 /// seeded, by construction). Idempotent — only sets if currently `None`.
 fn set_primary_cloud(config: &mut Config, stats: &mut MigrationStats) {
     if config.primary_cloud.is_some() {
         return;
     }
-    let oh = config
-        .cloud_providers
-        .iter()
-        .find(|e| e.slug == "openhuman" || e.legacy_type.as_deref() == Some("openhuman"));
-    if let Some(entry) = oh {
+    let entry = config.cloud_providers.iter().find(|e| e.slug == "openai");
+    if let Some(entry) = entry {
         config.primary_cloud = Some(entry.id.clone());
         stats.primary_cloud_set = true;
         log::debug!(
-            "[migrations][unify-ai] primary_cloud set to openhuman entry id={}",
+            "[migrations][unify-ai] primary_cloud set to openai entry id={}",
             entry.id
         );
     }

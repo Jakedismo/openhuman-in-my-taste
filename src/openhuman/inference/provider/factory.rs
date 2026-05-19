@@ -123,20 +123,11 @@ pub fn create_chat_provider_from_string(
         return make_openhuman_backend(config);
     }
 
-    // ── Session gate ──────────────────────────────────────────────────
-    // Custom providers (Ollama, <slug>:<model>) require an active
-    // OpenHuman session.  Without this check an unregistered user can
-    // point every workload at a custom provider and bypass the session
-    // requirement entirely.
-    //
-    // Gate is skipped under #[cfg(test)] so existing unit tests that
-    // create custom providers against a default Config continue to
-    // pass.  The verify_session_active function itself is tested
-    // explicitly with tempdir-backed auth profiles.
-    #[cfg(not(test))]
-    {
-        verify_session_active(config)?;
-    }
+    // (Removed) Session gate — the OpenHuman backend session is gone
+    // in the local-OAuth refactor; every workload now uses the user's
+    // own cloud provider (or local Ollama). The gate's purpose
+    // ("custom providers require an app-session JWT") no longer
+    // applies in a single-user local desktop.
 
     if let Some(model) = p.strip_prefix(OLLAMA_PROVIDER_PREFIX) {
         if model.trim().is_empty() {
@@ -226,41 +217,6 @@ fn make_openhuman_backend(config: &Config) -> anyhow::Result<(Box<dyn Provider>,
         &options,
     ));
     Ok((p, model))
-}
-
-/// Verify the user has an active OpenHuman backend session.
-///
-/// Without this check, an unregistered user can configure every workload
-/// to use a custom cloud provider and bypass the session requirement
-/// entirely.  This function ensures that custom providers (Ollama,
-/// `<slug>:<model>`) are only reachable when the workspace holds a valid
-/// `app-session` JWT.
-fn verify_session_active(config: &Config) -> anyhow::Result<()> {
-    // Fast path: the scheduler gate already knows the session is dead.
-    if crate::openhuman::scheduler_gate::is_signed_out() {
-        anyhow::bail!(
-            "SESSION_EXPIRED: backend session not active — sign in to use custom providers"
-        );
-    }
-    // Verify the app-session JWT actually exists in auth-profiles.
-    let state_dir = config
-        .config_path
-        .parent()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            directories::UserDirs::new()
-                .map(|d| d.home_dir().join(".openhuman"))
-                .unwrap_or_else(|| std::path::PathBuf::from(".openhuman"))
-        });
-    let auth = AuthService::new(&state_dir, config.secrets.encrypt);
-    let has_session = auth
-        .get_provider_bearer_token(crate::openhuman::credentials::APP_SESSION_PROVIDER, None)?
-        .filter(|s| !s.trim().is_empty())
-        .is_some();
-    if !has_session {
-        anyhow::bail!("SESSION_EXPIRED: no backend session — sign in to use OpenHuman")
-    }
-    Ok(())
 }
 
 /// Build an Ollama local provider.
