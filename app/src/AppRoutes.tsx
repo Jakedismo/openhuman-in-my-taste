@@ -2,7 +2,6 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import DefaultRedirect from './components/DefaultRedirect';
 import ProtectedRoute from './components/ProtectedRoute';
-import PublicRoute from './components/PublicRoute';
 import HumanPage from './features/human/HumanPage';
 import Accounts from './pages/Accounts';
 import Channels from './pages/Channels';
@@ -14,36 +13,32 @@ import Onboarding from './pages/onboarding/Onboarding';
 import Rewards from './pages/Rewards';
 import Settings from './pages/Settings';
 import Skills from './pages/Skills';
-import Welcome from './pages/Welcome';
 
 const AppRoutes = () => {
   return (
     <Routes>
-      {/* Public routes - redirect to /home if logged in */}
-      <Route
-        path="/"
-        element={
-          <PublicRoute>
-            <Welcome />
-          </PublicRoute>
-        }
-      />
+      {/* Single-user local app: root redirects straight to /home.
+          The old Welcome / login screen was removed in the local-OAuth
+          refactor (no user accounts, no session JWT). */}
+      <Route path="/" element={<Navigate to="/home" replace />} />
 
       {/* Onboarding (full-page stepper, gated by onboarding_completed) */}
       <Route
         path="/onboarding/*"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Onboarding />
           </ProtectedRoute>
         }
       />
 
-      {/* Protected routes */}
+      {/* Protected routes — `ProtectedRoute` now only waits for
+          CoreStateProvider to finish bootstrapping; the auth gate was
+          dropped. */}
       <Route
         path="/home"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Home />
           </ProtectedRoute>
         }
@@ -52,7 +47,7 @@ const AppRoutes = () => {
       <Route
         path="/human"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <HumanPage />
           </ProtectedRoute>
         }
@@ -61,7 +56,7 @@ const AppRoutes = () => {
       <Route
         path="/intelligence"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Intelligence />
           </ProtectedRoute>
         }
@@ -70,7 +65,7 @@ const AppRoutes = () => {
       <Route
         path="/skills"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Skills />
           </ProtectedRoute>
         }
@@ -81,7 +76,7 @@ const AppRoutes = () => {
       <Route
         path="/chat"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Accounts />
           </ProtectedRoute>
         }
@@ -90,7 +85,7 @@ const AppRoutes = () => {
       <Route
         path="/channels"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Channels />
           </ProtectedRoute>
         }
@@ -99,7 +94,7 @@ const AppRoutes = () => {
       <Route
         path="/invites"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Invites />
           </ProtectedRoute>
         }
@@ -108,7 +103,7 @@ const AppRoutes = () => {
       <Route
         path="/notifications"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Notifications />
           </ProtectedRoute>
         }
@@ -117,7 +112,7 @@ const AppRoutes = () => {
       <Route
         path="/rewards"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Rewards />
           </ProtectedRoute>
         }
@@ -128,7 +123,7 @@ const AppRoutes = () => {
       <Route
         path="/settings/*"
         element={
-          <ProtectedRoute requireAuth={true}>
+          <ProtectedRoute>
             <Settings />
           </ProtectedRoute>
         }

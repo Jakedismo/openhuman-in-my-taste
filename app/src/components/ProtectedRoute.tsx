@@ -1,29 +1,22 @@
-import { Navigate } from 'react-router-dom';
-
 import { useCoreState } from '../providers/CoreStateProvider';
 import RouteLoadingScreen from './RouteLoadingScreen';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
-  requireAuth?: boolean;
-  redirectTo?: string;
 }
 
 /**
- * Protected route component that handles authentication checks.
- * Onboarding gating is handled by the AppShell effect (see App.tsx)
- * which redirects between `/onboarding` and the rest of the app based
- * on `onboarding_completed`.
+ * Route wrapper that waits for `CoreStateProvider` to finish booting
+ * before rendering the page. After the local-OAuth refactor there is
+ * no user-account auth gate — single-user local desktop. The wrapper
+ * is kept so that pages depending on `useCoreState()` always see a
+ * populated snapshot.
  */
-const ProtectedRoute = ({ children, requireAuth = true, redirectTo }: ProtectedRouteProps) => {
-  const { isBootstrapping, snapshot } = useCoreState();
+const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
+  const { isBootstrapping } = useCoreState();
 
   if (isBootstrapping) {
     return <RouteLoadingScreen />;
-  }
-
-  if (requireAuth && !snapshot.sessionToken) {
-    return <Navigate to={redirectTo || '/'} replace />;
   }
 
   return <>{children}</>;

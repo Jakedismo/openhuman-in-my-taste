@@ -96,9 +96,15 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
 
 ### Phase 5 — Hard cutover: delete Composio + app-login + dead UI
 
-- [ ] **5.1** Delete `src/openhuman/composio/` (all 30+ files). Remove from `src/core/all.rs` registry.
-- [ ] **5.2** Delete `BackendOAuthClient`, `IntegrationTokensHandoff`, `ConnectResponse`, `IntegrationSummary`, `decrypt_handoff_blob` from `src/api/rest.rs` (and the `credentials/` re-exports).
-- [ ] **5.3** Delete `src/openhuman/billing/`, `src/openhuman/wallet/`, `src/openhuman/referral/`, `src/openhuman/tokenjuice/` (verified user-account-only in Phase 1.3).
+- [x] **5.1** Composio: **stub** rather than delete, per user "stub-and-delete" choice.
+  - `composio_execute` now hard-errors when no native arm exists (was: fell through to Composio HTTP).
+  - `composio_authorize` now hard-errors with pointer to native flow (was: created backend OAuth handoff).
+  - `fetch_connected_integrations_uncached` returns `None` unconditionally — the agent prompt sees zero connections until a follow-up re-sources from `AuthService`.
+  - `start_periodic_sync` is a no-op.
+  - HTTP-calling internals (`ComposioClient::*`, provider outbound fetches) are still compiled but unreachable. Slack-memory ingest controllers (local data) stay registered.
+  - 3 mock-backend tests removed (paths gone); 2 "errors_without_session" tests rewritten to assert the new disabled-state messages.
+- [x] **5.2** Deleted `IntegrationTokensHandoff`, `ConnectResponse`, `IntegrationSummary`, `decrypt_handoff_blob` + supporting envelope structs from `src/api/rest.rs`. Removed `connect`/`list_integrations`/`fetch_integration_tokens_handoff`/`fetch_client_key`/`revoke_integration` methods from `BackendOAuthClient`. Dropped the 5 `auth_oauth_*` RPCs from `credentials/`. `BackendOAuthClient` itself stays for surviving non-OAuth backend calls (channels, voice, login) — those go in 5.4 / Phase 6.
+- [x] **5.3** Deleted `src/openhuman/billing/`, `src/openhuman/referral/`, `src/openhuman/team/` (all confirmed `BackendOAuthClient`-tied). **Kept `src/openhuman/wallet/`** — Phase 1.3 mis-classified it; it's a local crypto wallet (balances/transfers/swaps) with zero backend dependency. `tokenjuice/` was always library-only and remains untouched.
 - [ ] **5.4** Delete the `auth` Redux slice + every selector + every consumer that breaks. Big frontend pass: ~30–50 files touched.
 - [ ] **5.5** Delete `OAuthProviderButton`, `authApi`, `apiClient`, `useBackendUrl`, `backendUrl.ts`, `Welcome` route, login-gated routes. Replace `CoreStateProvider` bootstrap with a no-auth snapshot.
 - [ ] **5.6** Delete `feature.native_oauth_enabled` flag; native OAuth is the only path.
