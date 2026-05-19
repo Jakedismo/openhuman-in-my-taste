@@ -81,7 +81,8 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
 - [x] **3.3** Replace one Composio call site at a time behind `OPENHUMAN_NATIVE_OAUTH=1`. **Part 1 done**: `src/openhuman/oauth/native_dispatch.rs` exposes `try_dispatch_native(http, service, tool, args) -> Option<Result<Value>>`. **Part 2 done**: wired into `composio/ops.rs::composio_execute` via a `try_native_dispatch` helper that short-circuits the Composio path entirely on native success, wrapping the result in `ComposioExecuteResponse` so callers and the `ComposioActionExecuted` event-bus payload see an identical shape. Full slug coverage:
   - **Gmail** — `GMAIL_SEND_EMAIL`, `GMAIL_FETCH_EMAILS`, `GMAIL_DELETE_EMAIL`, `GMAIL_ADD_LABEL_TO_EMAIL`
   - **Calendar** — `GOOGLECALENDAR_EVENTS_LIST` (+ `GOOGLECALENDAR_FIND_EVENT` alias), `GOOGLECALENDAR_EVENTS_GET`, `GOOGLECALENDAR_CREATE_EVENT`
-  - **GitHub** — `GITHUB_USERS_GET_AUTHENTICATED`
+  - **GitHub** — `GITHUB_USERS_GET_AUTHENTICATED`, `GITHUB_CREATE_AN_ISSUE`
+  - **Refresh primitive** — `oauth/refresh.rs::refresh_provider_token(http, service, provider)` trades the stored refresh_token for a fresh access_token + persists. Handles Google's "no fresh refresh_token on refresh-grant" quirk and GitHub's classic/expiring split. Not yet wired into `bearer::AuthedClient` — follow-up slice will catch 401 responses and call this transparently.
   Composio's 459-test integration suite still passes with the flag off — the fall-through path is the load-bearing regression guard.
 - [ ] **3.4** RPC: a proper `openhuman.oauth_*` JSON-RPC method via the controller registry — pairs with the eventual frontend OAuth UI. **Interim**: `oauth-connect` CLI binary (`src/bin/oauth_connect.rs`) drives the full Google / GitHub flow end-to-end and persists tokens locally, so Phase 4 validation is unblocked without waiting on the controller wiring. Pairs with 3.3 cutover.
 
