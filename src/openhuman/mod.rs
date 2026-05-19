@@ -49,6 +49,7 @@ pub mod memory;
 pub mod migration;
 pub mod migrations;
 pub mod notifications;
+pub mod oauth;
 pub mod overlay;
 pub mod people;
 pub mod prompt_injection;
