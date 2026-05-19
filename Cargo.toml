@@ -21,6 +21,10 @@ path = "src/bin/gmail_backfill_3d.rs"
 name = "inference-probe"
 path = "src/bin/inference_probe.rs"
 
+[[bin]]
+name = "oauth-connect"
+path = "src/bin/oauth_connect.rs"
+
 [lib]
 name = "openhuman_core"
 crate-type = ["rlib"]
