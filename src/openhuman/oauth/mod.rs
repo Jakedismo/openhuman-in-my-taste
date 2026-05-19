@@ -7,10 +7,13 @@
 //! full deletion plan.
 
 pub mod loopback;
+pub mod persistence;
 pub mod pkce;
 pub mod providers;
 
 #[cfg(test)]
 mod loopback_tests;
+#[cfg(test)]
+mod persistence_tests;
 #[cfg(test)]
 mod pkce_tests;

@@ -48,6 +48,25 @@ impl AuthService {
         Ok(profile)
     }
 
+    /// Upsert an OAuth profile with a full [`TokenSet`] (access +
+    /// refresh + expiry + scope). Symmetric counterpart to
+    /// [`AuthService::store_provider_token`]; used by the native-OAuth
+    /// flow in `crate::openhuman::oauth` to persist Google / GitHub
+    /// tokens after a successful PKCE handshake.
+    pub fn store_provider_oauth_tokens(
+        &self,
+        provider: &str,
+        profile_name: &str,
+        token_set: super::profiles::TokenSet,
+        metadata: HashMap<String, String>,
+        set_active: bool,
+    ) -> Result<AuthProfile> {
+        let mut profile = AuthProfile::new_oauth(provider, profile_name, token_set);
+        profile.metadata.extend(metadata);
+        self.store.upsert_profile(profile.clone(), set_active)?;
+        Ok(profile)
+    }
+
     pub fn set_active_profile(&self, provider: &str, requested_profile: &str) -> Result<String> {
         let provider = normalize_provider(provider)?;
         let data = self.store.load()?;
