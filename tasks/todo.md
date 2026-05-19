@@ -78,8 +78,8 @@ Full report: [`tasks/phase-1-inventory.md`](phase-1-inventory.md) (419 lines).
   - **Calendar**: `list_events` (with the singleEvents=true / timeZone defaulting from issue #1714), `get_event`, `create_event`
   - **Drive**: `list_files`, `create_file_metadata`, `get_file_metadata` (under `drive.file` scope)
 - [x] **3.2** `src/openhuman/providers_native/github.rs`: `get_authenticated_user`, `list_authenticated_repos`, `create_issue`.
-- [ ] **3.3** Replace one Composio call site at a time behind `feature.native_oauth_enabled`. Tests stay green at every step. **Not yet started** — Composio agent-tool wiring lives in `composio/action_tool.rs`, `composio/ops.rs`, `composio/execute_dispatch.rs`; cutover is invasive and warrants its own focused session.
-- [ ] **3.4** RPC: existing `composio_*` methods get a dispatch shim — when `native_oauth_enabled` and provider has a native client, route there; else fall through to Composio. Pairs with 3.3.
+- [~] **3.3** Replace one Composio call site at a time behind `feature.native_oauth_enabled`. **Part 1 done**: `src/openhuman/oauth/native_dispatch.rs` exposes `try_dispatch_native(http, service, tool, args) -> Option<Result<Value>>` over the env-var flag `OPENHUMAN_NATIVE_OAUTH=1`. Slug coverage: `GMAIL_SEND_EMAIL`, `GMAIL_FETCH_EMAILS`, `GITHUB_USERS_GET_AUTHENTICATED`. **Part 2 pending**: wire the dispatcher into `composio/ops.rs::composio_execute` so the agent loop actually routes through it (small but invasive surgery; deferred to its own commit so this slice stays a pure additive surface).
+- [ ] **3.4** RPC: a proper `openhuman.oauth_*` JSON-RPC method via the controller registry — pairs with the eventual frontend OAuth UI. **Interim**: `oauth-connect` CLI binary (`src/bin/oauth_connect.rs`) drives the full Google / GitHub flow end-to-end and persists tokens locally, so Phase 4 validation is unblocked without waiting on the controller wiring. Pairs with 3.3 cutover.
 
 ### Phase 4 — Validate end-to-end (gate before cutover)
 
