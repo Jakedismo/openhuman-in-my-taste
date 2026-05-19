@@ -4,8 +4,6 @@ import { useNavigate } from 'react-router-dom';
 import { useT } from '../../lib/i18n/I18nContext';
 import { useCoreState } from '../../providers/CoreStateProvider';
 import { clearAllAppData } from '../../utils/clearAllAppData';
-import { BILLING_DASHBOARD_URL } from '../../utils/links';
-import { openUrl } from '../../utils/openUrl';
 import LanguageSelect from '../LanguageSelect';
 import SettingsHeader from './components/SettingsHeader';
 import SettingsMenuItem from './components/SettingsMenuItem';
@@ -163,29 +161,8 @@ const SettingsHome = () => {
     // Features tile (Screen Awareness / Messaging Channels / Notifications /
     // Tools) used to live here. Everything under it moved into Advanced
     // (DeveloperOptionsPanel), so the section is gone from the home menu.
-    {
-      label: t('settings.billingAndRewards'),
-      items: [
-        {
-          id: 'billing',
-          title: t('settings.billingUsage'),
-          description: t('settings.billingUsageDesc'),
-          icon: (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H5a3 3 0 00-3 3v8a3 3 0 003 3z"
-              />
-            </svg>
-          ),
-          onClick: () => {
-            openUrl(BILLING_DASHBOARD_URL).catch(() => {});
-          },
-        },
-      ],
-    },
+    // Billing & rewards tiles also lived here — removed alongside the
+    // backend cutover (single-user local desktop has no billing).
     {
       label: t('settings.advanced'),
       items: [
