@@ -23,7 +23,15 @@ import {
 import SettingsHeader from '../components/SettingsHeader';
 import { useSettingsNavigation } from '../hooks/useSettingsNavigation';
 
-const POLL_INTERVAL_MS = 4000;
+// Two polling cadences. While the tunnel is in a transient state
+// (`connecting` or `idle` after a save) we want the UI to surface the
+// flip to `ready` quickly — the ngrok control-plane connect usually
+// finishes within 1–3 seconds, so a 4-second poll can make the user
+// think the Test button is permanently disabled (Jokke hit exactly
+// that — tunnel went Ready 1s after the status RPC returned, but the
+// next poll wasn't due for another 3s and the button stayed greyed).
+const POLL_INTERVAL_FAST_MS = 800;
+const POLL_INTERVAL_SLOW_MS = 4000;
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type TestStatus = 'idle' | 'testing' | 'ok' | 'failed';
@@ -86,13 +94,28 @@ const TriggersPanel = () => {
       await refreshStatus();
       if (isMounted) setLoading(false);
     })();
-    pollTimer.current = setInterval(refreshStatus, POLL_INTERVAL_MS);
     return () => {
       isMounted = false;
       if (pollTimer.current !== null) clearInterval(pollTimer.current);
       if (saveStatusTimer.current !== null) clearTimeout(saveStatusTimer.current);
     };
   }, [refreshStatus]);
+
+  // Switch the poll cadence based on what the tunnel is doing.
+  // `connecting` / `idle` → fast (the user is waiting for the flip);
+  // `ready` / `error` → slow (state is stable, no need to hammer the
+  // status RPC).
+  useEffect(() => {
+    const interval =
+      status?.tunnel_state === 'ready' || status?.tunnel_state === 'error'
+        ? POLL_INTERVAL_SLOW_MS
+        : POLL_INTERVAL_FAST_MS;
+    if (pollTimer.current !== null) clearInterval(pollTimer.current);
+    pollTimer.current = setInterval(refreshStatus, interval);
+    return () => {
+      if (pollTimer.current !== null) clearInterval(pollTimer.current);
+    };
+  }, [status?.tunnel_state, refreshStatus]);
 
   // Reset form drafts to the persisted values whenever a fresh status
   // arrives and the user hasn't started editing. Avoids the panel
@@ -364,13 +387,9 @@ const TriggersPanel = () => {
             <button
               type="button"
               onClick={handleTest}
-              disabled={testStatus === 'testing' || status?.tunnel_state !== 'ready'}
+              disabled={testStatus === 'testing'}
               className="rounded border border-stone-300 dark:border-neutral-600 px-4 py-2 text-sm disabled:opacity-50"
-              title={
-                status?.tunnel_state !== 'ready'
-                  ? 'Start the tunnel first'
-                  : 'Send a healthz probe through ngrok back to loopback'
-              }
+              title="Send a healthz probe through ngrok back to loopback. Backend reports if the tunnel is not ready."
             >
               {testStatus === 'testing' ? 'Testing…' : 'Test tunnel'}
             </button>
