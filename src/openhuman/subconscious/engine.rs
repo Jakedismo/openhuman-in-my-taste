@@ -20,7 +20,7 @@ use super::types::{
     TaskRecurrence, TaskSource, TickDecision, TickResult,
 };
 use crate::openhuman::memory::tree::chat::{
-    build_chat_provider, ChatConsumer, ChatPrompt, ChatProvider,
+    build_chat_provider_for_role, ChatPrompt, ChatProvider,
 };
 use crate::openhuman::memory::MemoryClientRef;
 use anyhow::Result;
@@ -534,14 +534,18 @@ impl SubconsciousEngine {
             }
         };
 
-        // Build the cloud chat provider. The subconscious tick uses
-        // `ChatConsumer::Summarise` because the per-tick payload is
-        // closer in shape to a structured-summary call than a per-chunk
-        // entity extraction. No local fallback (per #623): if cloud is
-        // unreachable, return empty results so the tick is treated as a
-        // skip rather than a malformed advance.
+        // Build the chat provider for the subconscious workload —
+        // routes via `subconscious_provider` (Settings → AI). Previous
+        // code went through `build_chat_provider(_, ChatConsumer::Summarise)`
+        // which hardcodes the memory-tree workload (`memory_provider`),
+        // so a user with `chat_provider = ollama:<lm-studio-model>`
+        // but no `memory_provider` set saw subconscious ticks fall
+        // through to whatever cloud workload answered first (typically
+        // an NVIDIA NIM row). The new helper reads `subconscious_provider`
+        // directly. 60s timeout — same default the memory summariser
+        // uses for cloud calls; subconscious payloads are similar in size.
         let provider: Arc<dyn ChatProvider> =
-            match build_chat_provider(&config, ChatConsumer::Summarise) {
+            match build_chat_provider_for_role(&config, "subconscious", 60_000) {
                 Ok(p) => p,
                 Err(e) => {
                     warn!("[subconscious] cloud chat provider init failed: {e}");

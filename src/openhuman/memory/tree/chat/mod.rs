@@ -214,6 +214,67 @@ pub fn build_chat_provider(
     }
 }
 
+/// Build a chat provider routed by an arbitrary workload role
+/// (e.g. `"subconscious"`, `"reasoning"`). Differs from
+/// [`build_chat_provider`] in two ways:
+///
+/// 1. Reads `config.<role>_provider` directly via
+///    `config.workload_local_model(role)` /
+///    `factory::provider_for_role(role, config)` — so a workload
+///    that sets `subconscious_provider = "ollama:<model>"` actually
+///    routes locally, instead of inheriting the memory workload's
+///    setting like [`build_chat_provider`] does.
+/// 2. Has no Local-vs-Cloud endpoint indirection: when local, uses
+///    the default ollama endpoint from `local_ai.base_url` (the same
+///    one the factory's `make_ollama_provider` consumes for every
+///    other `ollama:*` workload). Per-role endpoint overrides aren't
+///    a thing outside the memory-tree.
+///
+/// Use this for workloads that ship with a dedicated `*_provider`
+/// config knob (subconscious, reasoning, agentic, …) so the user's
+/// "Settings → AI" selection is respected.
+pub fn build_chat_provider_for_role(
+    config: &Config,
+    role: &str,
+    timeout_ms: u64,
+) -> Result<Arc<dyn ChatProvider>> {
+    use crate::openhuman::inference::provider::factory;
+
+    if let Some(local_model) = config.workload_local_model(role) {
+        log::debug!(
+            "[memory_tree::chat] building Local (Ollama) provider for role={} model={}",
+            role,
+            local_model
+        );
+        return Ok(Arc::new(local::OllamaChatProvider::new(
+            config.local_ai.base_url.clone(),
+            Some(local_model),
+            std::time::Duration::from_millis(timeout_ms),
+        )?));
+    }
+    let resolved = factory::provider_for_role(role, config);
+    log::debug!(
+        "[memory_tree::chat] building workload-routed provider for role={} resolved={}",
+        role,
+        resolved
+    );
+    if resolved == PROVIDER_OPENHUMAN {
+        anyhow::bail!(
+            "[memory_tree::chat] no provider configured for the {role} workload — \
+             add a `cloud_providers` entry or set `{role}_provider` to an explicit \
+             `slug:model` (e.g. `ollama:gpt-oss:20b`) under Settings → AI"
+        );
+    }
+    let (inner, model) = create_chat_provider_from_string(role, &resolved, config)?;
+    let slug_hint = resolved
+        .find(':')
+        .map(|i| &resolved[..i])
+        .unwrap_or(resolved.as_str());
+    Ok(Arc::new(workload::WorkloadChatProvider::new(
+        inner, model, slug_hint,
+    )))
+}
+
 /// Which memory-tree consumer is requesting a chat provider. Determines
 /// which `llm_*_endpoint` / `llm_*_model` config fields are read in the
 /// `Local` branch. Both consumers share the same cloud model.
