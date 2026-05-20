@@ -150,24 +150,111 @@ Phase 5.1 made native dispatch the only execution path — every slug without a 
 - [x] **5.6** Dropped the `OPENHUMAN_NATIVE_OAUTH` env-var gate on `try_dispatch_native`. Native dispatch is unconditional now — partial-rollout scaffolding gone. Outdated test note + 3 obsolete routing regression tests removed.
 - [ ] **5.7** Verify `pnpm test`, `pnpm test:rust`, `pnpm typecheck`, `pnpm lint`, `pnpm test:e2e:all:flows` all green. **Status**: `cargo test --lib` runs 7,579 green. Frontend `pnpm compile` blocked locally on `app/node_modules` not being installed in this session; needs a fresh `pnpm install` to verify. E2E + lint still pending.
 
-### Phase 6 — Local replacements for A3–A7
+### Phase 5.5 — Post-cutover stabilisation log
 
-Can run in parallel with Phase 5 (or after, to keep Phase 5 a clean diff).
+Not part of the original phase ladder. Tracks fixes that surfaced **after**
+Phase 5 landed, while the backend-free build was being shaken down in
+day-to-day use. Each bullet is a green commit on
+`feat/local-oauth-no-backend`; the SHAs are stable references for
+post-mortem grepping. Grouped thematically (commit-time order within each
+group).
 
-- [ ] **6.1** Web search (A3) — `tools/impl/network/web_search.rs` rewritten to call DuckDuckGo HTML directly (no key) OR Brave Search with BYO key from settings. Drop `WebSearchTool::client: Option<Arc<IntegrationClient>>`.
-- [ ] **6.2** Apify (A4) — replace with `tools/impl/network/local_crawler.rs` using the existing CEF infrastructure for headless page fetch + extraction.
-- [ ] **6.3** Twilio (A5) — `integrations/twilio.rs` rewritten as direct API; settings UI for BYO credentials.
-- [ ] **6.4** Google Places (A6) — `integrations/google_places.rs` rewritten as direct API; settings UI for BYO API key.
-- [ ] **6.5** Financial APIs (A7) — `integrations/stock_prices.rs` rewritten against free direct APIs (Yahoo Finance, CoinGecko, ExchangeRate-API).
-- [ ] **6.6** LinkedIn enrichment (`learning/linkedin_enrichment.rs`) — either drop or fold into the webview/CDP scraping pattern.
+#### Dev-env / packaging
 
-### Phase 7 — Defaults & cleanup
+- [x] **5.5.1** Fix `tauri:ensure` invocation runbook docs (`5588242e`).
+- [x] **5.5.2** Silence `ERR_PNPM_IGNORED_BUILDS` for dev-only binaries (`7dc6b73f`).
+- [x] **5.5.3** Fix `allowBuilds` entries so `pnpm install` passes (`8df718b2`).
+- [x] **5.5.4** Drop hard-coded Apple Signing Identity from `dev:app` (`fa2a55ef`).
+- [x] **5.5.5** `cargo fmt` collapse single-arm match in `native_dispatch` (`6edc3444`).
 
-- [ ] **7.1** Default LLM config → `ollama:<sensible-default>` (e.g. `ollama:llama3.1:8b` or whatever the current `inference/model_ids.rs` defaults indicate). Cloud-LLM providers stay supported but opt-in.
-- [ ] **7.2** Shrink `IntegrationClient` to a tunnels-only shim (A8 stays). Rename to `TunnelClient`? Confirm with Jokke.
-- [ ] **7.3** Remove `VITE_BACKEND_URL` from `app/.env.example` and `.env.example`; document the tunnels-only base URL var separately.
-- [ ] **7.4** Update `CLAUDE.md` and `AGENTS.md` to reflect the new architecture (no Composio, no user accounts, native OAuth, Ollama-first).
-- [ ] **7.5** Update `src/openhuman/about_app/catalog.rs` capability matrix to reflect dropped surfaces.
+#### Routes / UI dead surfaces
+
+- [x] **5.5.6** Route `/` through `DefaultRedirect` so onboarding fires (`ffa026aa`).
+- [x] **5.5.7** Drop dead "Reconnecting to backend" overlay; flip local-ai default to enabled (`2f7fbe2e`).
+- [x] **5.5.8** Gut `useUsageState` — stop spamming deleted team/billing RPCs (`0776d308`).
+- [x] **5.5.9** Open vault content folder via OS file manager (Obsidian "Unable to find vault" workaround, `c50bcbd3`).
+
+#### Local AI / Ollama posture
+
+- [x] **5.5.10** Stop silently rewriting user-chosen model IDs (`34c9f993`).
+- [x] **5.5.11** Allow `ollama` / `lmstudio` as cloud-provider slugs in AI panel (`36034cd6`).
+- [x] **5.5.12** Recognise Qwen3 embedding family as 1024-dim safe (`9d50bb29`).
+- [x] **5.5.13** Drop over-eager Ollama runner probe (false positive, `e3d20500`).
+- [x] **5.5.14** Bypass proxy for loopback URLs in `list_models`; surface URL/source in errors (`88aa2910`).
+- [x] **5.5.15** Stop re-injecting dead OpenHuman backend defaults into `config.toml` (`a0b931c5`).
+
+#### Chat / inference
+
+- [x] **5.5.16** Unblock chat in local-OAuth fork by killing dead backend gates (`24e3d6f7`).
+- [x] **5.5.17** Route channel + threads providers through workload factory (`6effa0d5`).
+- [x] **5.5.18** Route memory-tree chat through workload factory in non-Ollama mode (`0274a09c`).
+- [x] **5.5.19** Connect socket unconditionally — chat input was blocked on missing session JWT (`ec2f977b`).
+- [x] **5.5.20** Socket watchdog: re-attempt connect every 5s while `disconnected` (closes the >5s cold-restart hole the built-in `reconnectionAttempts: 5` × 1s leaves, `da7557d3`).
+- [x] **5.5.21** Bound cosmetic emoji-reaction await in `deliver_response` (closes the chat-stuck-at-"Thinking… (1)" hang when local Ollama is saturated by background vault sync, `b3f35bfe`).
+
+#### Memory / vault
+
+- [x] **5.5.22** Wire workspace embedder to user config + surface embed failures (`9781500e`).
+- [x] **5.5.23** Resolve `config.toml` path correctly for nested-user layout (`b2a1f78c`).
+- [x] **5.5.24** Fan vault sync out to memory-tree ingest path (chunks visible in tree visualisation, `402184de`).
+- [x] **5.5.25** Vault sync: async job worker + progress callback (`55a53544`).
+- [x] **5.5.26** Vault sync RPC: enqueue async + add `sync_status` + `sync_all` (`b8e32ec0`).
+- [x] **5.5.27** VaultPanel UI: polling + progress bar + Sync All button (`2cf30943`).
+
+#### OAuth / Composio direct mode
+
+- [x] **5.5.28** Thread Google `client_secret` through token exchange + refresh (`0789a121`).
+- [x] **5.5.29** Re-enable Composio direct mode for `authorize` / `execute` / `sync` + periodic loop (`f6b0012b`).
+- [x] **5.5.30** Route `composio_sync` through mode-aware factory (`021f755b`).
+- [x] **5.5.31** Route `composio_get_user_profile` + `composio_delete_connection` through mode-aware factory; new `direct_delete_connection` helper + `ComposioTool::delete_connected_account` (`9f285ec9`).
+- [x] **5.5.32** Route `composio_refresh_all_identities` through mode-aware factory — closes the last `resolve_client(config)?` gate on the public ops surface (`398612d5`).
+
+#### Channels
+
+- [x] **5.5.33** Hot-reload telegram / discord / imessage listeners on connect/disconnect (`b3400ece`).
+
+#### Mascot / voice
+
+- [x] **5.5.34** macOS-native `"system"` TTS provider via `/usr/bin/say` + `/usr/bin/afconvert` (works around upstream Piper macOS release shipping the binary without its dylib chain, `24dff5f1`).
+
+### Phase 6 — Local replacements for A3–A7 (opted out)
+
+**Status: opted out.** The fork's actual goal was to eliminate the
+**OpenHuman backend** as a privacy / availability intermediary — that's
+done. The user explicitly decided online usage with **their own API
+keys** against the first-party provider endpoints is fine: the keys
+are user-controlled, no third party sits in the handshake, and the
+data flow is the same as any other "BYO key" desktop app. Keeping the
+existing direct-API call paths through `IntegrationClient` is
+acceptable.
+
+None of the items below are blocking; revisit only if a specific
+provider's TOS, rate limits, or pricing becomes a problem.
+
+- [ ] ~~**6.1** Web search (A3) — `tools/impl/network/web_search.rs` rewritten to call DuckDuckGo HTML directly (no key) OR Brave Search with BYO key from settings. Drop `WebSearchTool::client: Option<Arc<IntegrationClient>>`.~~ *(opted out — direct API with BYO key is fine)*
+- [ ] ~~**6.2** Apify (A4) — replace with `tools/impl/network/local_crawler.rs` using the existing CEF infrastructure for headless page fetch + extraction.~~ *(opted out — direct API with BYO key is fine)*
+- [ ] ~~**6.3** Twilio (A5) — `integrations/twilio.rs` rewritten as direct API; settings UI for BYO credentials.~~ *(opted out — direct API with BYO key is fine)*
+- [ ] ~~**6.4** Google Places (A6) — `integrations/google_places.rs` rewritten as direct API; settings UI for BYO API key.~~ *(opted out — direct API with BYO key is fine)*
+- [ ] ~~**6.5** Financial APIs (A7) — `integrations/stock_prices.rs` rewritten against free direct APIs (Yahoo Finance, CoinGecko, ExchangeRate-API).~~ *(opted out — direct API with BYO key is fine)*
+- [ ] ~~**6.6** LinkedIn enrichment (`learning/linkedin_enrichment.rs`) — either drop or fold into the webview/CDP scraping pattern.~~ *(opted out)*
+
+### Phase 7 — Defaults & cleanup (opted out)
+
+**Status: opted out**, same reasoning as Phase 6. The local-first
+posture became "online usage with the user's own API keys is the
+default" rather than "force everything onto Ollama". 7.1's
+ollama-default pivot in particular is the wrong default for the
+actual decision — `config.toml` already defaults sanely
+(`embeddings_provider = "ollama"`, `bge-m3`, local-ai-enabled per
+`a0b931c5` + `9781500e`) and the user picks their LLM provider
+explicitly via Settings → AI. The remaining cleanup items below are
+still useful hygiene but are not blocking the fork's stated goal.
+
+- [ ] ~~**7.1** Default LLM config → `ollama:<sensible-default>`…~~ *(opted out — user-picked LLM provider is the new default model; embedder + memory-extraction defaults already point at local)*
+- [ ] ~~**7.2** Shrink `IntegrationClient` to a tunnels-only shim (A8 stays).~~ *(opted out — `IntegrationClient` still fronts the surviving direct-API tools per Phase 6 opt-out)*
+- [ ] ~~**7.3** Remove `VITE_BACKEND_URL` from `app/.env.example` and `.env.example`; document the tunnels-only base URL var separately.~~ *(opted out — tunnels + direct-API tools still rely on it)*
+- [ ] ~~**7.4** Update `CLAUDE.md` and `AGENTS.md` to reflect the new architecture (no Composio, no user accounts, native OAuth, Ollama-first).~~ *(opted out — revisit if onboarding new contributors. Today both files are accurate enough about the live state to be useful for AI agents working in the tree)*
+- [ ] ~~**7.5** Update `src/openhuman/about_app/catalog.rs` capability matrix to reflect dropped surfaces.~~ *(opted out — capability rows still match what's wired)*
 
 ## Deferred / Future work
 
