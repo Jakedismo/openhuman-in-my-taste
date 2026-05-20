@@ -70,18 +70,27 @@ const TriggersPanel = () => {
   const refreshStatus = useCallback(async () => {
     try {
       const res = await openhumanComposioLocalWebhookStatus();
-      const next = res.result?.status;
-      if (next) {
+      // The Rust op wraps the status payload via `to_json`, which
+      // produces `{result: <ComposioLocalWebhookStatus>, logs: [...]}`
+      // when the RpcOutcome carries log lines (this one does). The
+      // payload lives at `res.result` — NOT `res.result.status`.
+      // The original TS type erroneously implied a `{ status: … }`
+      // sub-object that the wire format does not produce, so the
+      // status display silently stayed empty after Save.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const raw = res as any;
+      const next: ComposioLocalWebhookStatus | undefined =
+        raw?.result?.status ?? raw?.result ?? raw?.status ?? raw;
+      if (next && typeof next === 'object' && 'tunnel_state' in next) {
         setStatus(next);
         if (!hasSeededForm.current) {
           setNgrokDomain(next.ngrok_domain);
           setPort(next.local_port);
-          // The receiver actually being up is the source of truth
-          // for the "enabled" form initial value; subsequent user
-          // edits are not overwritten.
           setEnabled(next.tunnel_state !== 'idle');
           hasSeededForm.current = true;
         }
+      } else {
+        console.warn('[TriggersPanel] unexpected status shape', res);
       }
     } catch (err) {
       console.warn('[TriggersPanel] failed to load status:', err);
@@ -171,12 +180,23 @@ const TriggersPanel = () => {
     setTestMessage(null);
     try {
       const res = await openhumanComposioLocalWebhookTest();
-      const ok = res.result?.result?.ok === true;
+      // The to_json wrapper produces `{result: T, logs: [...]}` when
+      // an RpcOutcome carries log lines; `callCoreRpc` returns that
+      // envelope as-is. So the actual payload may live at either
+      // `res.result` (single-wrap) or `res.result.result` (when an
+      // outer consumer further wrapped it). Probe both so a wire-shape
+      // change doesn't silently fall through to "non-ok".
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const raw = res as any;
+      const payload = raw?.result?.result ?? raw?.result ?? raw;
+      console.debug('[TriggersPanel] test response', { res, payload });
+      const ok = payload?.ok === true;
+      const url = payload?.url ?? 'unknown URL';
       setTestStatus(ok ? 'ok' : 'failed');
       setTestMessage(
         ok
-          ? `Round-trip OK at ${res.result?.result?.url ?? 'unknown URL'}`
-          : 'Test returned non-ok response'
+          ? `Round-trip OK at ${url}`
+          : `Test returned non-ok response: ${JSON.stringify(payload).slice(0, 200)}`
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
