@@ -11,12 +11,14 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::openhuman::embeddings::{self, EmbeddingProvider};
+use crate::openhuman::config::Config;
+use crate::openhuman::embeddings::{self, EmbeddingProvider, NoopEmbedding};
 use crate::openhuman::memory::ingestion::queue as ingestion_queue;
 use crate::openhuman::memory::ingestion::{
     IngestionJob, IngestionQueue, IngestionState, MemoryIngestionConfig, MemoryIngestionRequest,
     MemoryIngestionResult,
 };
+use crate::openhuman::memory::store::factories::effective_embedding_settings;
 use crate::openhuman::memory::store::types::{
     NamespaceDocumentInput, NamespaceMemoryHit, NamespaceRetrievalContext,
 };
@@ -104,14 +106,22 @@ impl MemoryClient {
         std::fs::create_dir_all(&workspace_dir)
             .map_err(|e| format!("Create workspace dir {}: {e}", workspace_dir.display()))?;
 
-        // Default to cloud embeddings (OpenHuman backend, Voyage-backed). The
-        // cloud embedder is lazy: JWT + API URL are resolved per call, so an
-        // unauthenticated session produces a clear error on first embed rather
-        // than blocking client construction. Callers that need the local
-        // Ollama path should build their memory store via
-        // `create_memory_with_storage_and_routes` with the appropriate
-        // `MemoryConfig.embedding_provider`.
-        let embedder: Arc<dyn EmbeddingProvider> = embeddings::default_embedding_provider();
+        // Local-OAuth fork: the previous behaviour was to hard-code
+        // `embeddings::default_embedding_provider()` here — the dead
+        // OpenHuman cloud embedder. Every vault ingest, document
+        // upsert, and memory write would call `embedder.embed_one()`,
+        // fail (no backend), get silently swallowed by `.ok()` in
+        // `upsert_document` and `vector_chunks` rows were inserted
+        // with NULL embeddings. Symptom: the user reports "chunks are
+        // present but no vectors", semantic search returns nothing.
+        //
+        // Read the workspace's `config.toml` synchronously, derive the
+        // embedder from the unified `embeddings_provider` workload
+        // field (or the legacy `memory.embedding_provider`), and fall
+        // back to `NoopEmbedding` with a LOUD warning when
+        // construction fails — never to the dead cloud embedder.
+        let embedder: Arc<dyn EmbeddingProvider> =
+            build_workspace_embedder(&workspace_dir);
 
         // Create the underlying UnifiedMemory instance.
         let memory =
@@ -458,6 +468,70 @@ impl MemoryClient {
                     .await
             }
             None => self.inner.graph_query_all(subject, predicate).await,
+        }
+    }
+}
+
+/// Build the embedder for `MemoryClient::from_workspace_dir` by reading
+/// the workspace's `config.toml` synchronously and resolving the
+/// embedding provider via the same `effective_embedding_settings`
+/// logic the agent harness uses.
+///
+/// Failure modes (each falls back to `NoopEmbedding` with a LOUD
+/// warning — never to the dead OpenHuman cloud embedder):
+/// - config.toml missing → Config::default() is used.
+/// - config.toml parse error → Config::default() with a warning.
+/// - embedder construction fails (e.g. unknown provider string,
+///   bad endpoint) → NoopEmbedding with a warning.
+///
+/// The fallback to `NoopEmbedding` keeps memory writes succeeding
+/// (chunks land in the namespace store, FTS / metadata search still
+/// works) while semantic search degrades to no-op rather than
+/// silently inserting NULL embeddings into `vector_chunks`. That
+/// silent-NULL behaviour was the original symptom: chunks present
+/// but no vectors.
+fn build_workspace_embedder(workspace_dir: &std::path::Path) -> Arc<dyn EmbeddingProvider> {
+    let config_path = workspace_dir.join("config.toml");
+    let config: Config = match std::fs::read_to_string(&config_path) {
+        Ok(text) => match toml::from_str::<Config>(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                log::warn!(
+                    "[memory:embedder] failed to parse {} ({e}); falling back to Config::default()",
+                    config_path.display()
+                );
+                Config::default()
+            }
+        },
+        Err(_) => {
+            log::debug!(
+                "[memory:embedder] {} not present yet; using Config::default()",
+                config_path.display()
+            );
+            Config::default()
+        }
+    };
+
+    let local_embedding_model = config.workload_local_model("embeddings");
+    let (provider, model, dims) =
+        effective_embedding_settings(&config.memory, local_embedding_model.as_deref());
+
+    log::info!(
+        "[memory:embedder] resolved provider={provider} model={model} dims={dims} \
+         (embeddings_provider={:?} memory.embedding_provider={:?})",
+        config.embeddings_provider,
+        config.memory.embedding_provider,
+    );
+
+    match embeddings::create_embedding_provider(&provider, &model, dims) {
+        Ok(boxed) => Arc::from(boxed),
+        Err(e) => {
+            log::warn!(
+                "[memory:embedder] failed to construct embedder provider={provider} \
+                 model={model} dims={dims} err={e}; falling back to NoopEmbedding. \
+                 Configure a valid embeddings provider in Settings → AI."
+            );
+            Arc::new(NoopEmbedding)
         }
     }
 }

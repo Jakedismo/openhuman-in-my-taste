@@ -144,13 +144,26 @@ impl UnifiedMemory {
         }
 
         let chunks = Self::chunk_document_content(&input.content, 225);
+        let total_chunks = chunks.len();
+        let mut embed_failures: usize = 0;
         for (idx, chunk) in chunks.iter().enumerate() {
-            let embedding = self
-                .embedder
-                .embed_one(chunk)
-                .await
-                .ok()
-                .map(|v| Self::vec_to_bytes(&v));
+            // Previously `.ok().map(...)` silently dropped every embed
+            // failure into a NULL embedding column — vault syncs against
+            // the dead OpenHuman cloud embedder produced thousands of
+            // chunks with no vectors and no audible failure signal.
+            // Surface each failure under a stable prefix so a real
+            // misconfiguration is visible in logs.
+            let embedding = match self.embedder.embed_one(chunk).await {
+                Ok(v) => Some(Self::vec_to_bytes(&v)),
+                Err(err) => {
+                    embed_failures += 1;
+                    log::warn!(
+                        "[memory:embed] embed_one failed namespace={namespace} \
+                         document_id={document_id} chunk_idx={idx}/{total_chunks} err={err:#}"
+                    );
+                    None
+                }
+            };
             let chunk_id = format!("{document_id}:{idx}");
             let conn = self.conn.lock();
             conn.execute(
@@ -169,6 +182,16 @@ impl UnifiedMemory {
                 ],
             )
             .map_err(|e| format!("insert vector chunk: {e}"))?;
+        }
+
+        if embed_failures > 0 {
+            log::warn!(
+                "[memory:embed] upsert_document persisted {total_chunks} chunk(s) but \
+                 {embed_failures} embed call(s) failed for namespace={namespace} \
+                 document_id={document_id} — those rows have NULL embeddings and won't \
+                 be reachable via semantic search. Check the embedder configuration \
+                 (Settings → AI → Embeddings)."
+            );
         }
 
         Ok(document_id)
