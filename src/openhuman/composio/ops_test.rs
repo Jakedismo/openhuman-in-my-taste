@@ -1289,6 +1289,84 @@ async fn composio_authorize_routes_through_direct_mode() {
 // The native-path coverage lives in src/openhuman/oauth/native_dispatch
 // and src/openhuman/providers_native/*.
 
+#[tokio::test]
+async fn composio_list_triggers_routes_through_direct_mode() {
+    // With composio.mode = "direct" the trigger-read paths now hit
+    // Composio v3's `/trigger_instances/active` directly via the
+    // factory's Direct arm. Previously these were gated on
+    // `resolve_client(config)?` which surfaced the misleading
+    // "no backend session token. Sign in first" error to users with
+    // a perfectly valid Composio API key — making the trigger UI
+    // unusable in local-only mode (the user reported "Couldn't load
+    // triggers: composio unavailable: no backend session token").
+    //
+    // Contract pinned here: (a) no backend-session leak, (b) the
+    // error still carries a composio prefix for observability. The
+    // outbound call against the real Composio host with a fake key
+    // fails on HTTP 401/403 — both shapes are acceptable.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_list_triggers(&config, Some("gmail".into()))
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_list_available_triggers_routes_through_direct_mode() {
+    // Sibling of composio_list_triggers_routes_through_direct_mode for
+    // the catalog read path (`/triggers_types?toolkit_slugs=…`). Same
+    // contract: no backend-session leak, composio-tagged error.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_list_available_triggers(&config, "gmail", None)
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_enable_trigger_explains_webhook_constraint_in_direct_mode() {
+    // Trigger *writes* (enable / disable / create) stay gated in
+    // direct mode because Composio's HMAC-verified webhook deliveries
+    // need a receiver — the OpenHuman backend supplies that today,
+    // and a local-only build has nowhere for trigger events to land.
+    //
+    // Before this commit, direct-mode users hit the generic
+    // `resolve_client` error ("composio unavailable: no backend
+    // session token. Sign in first (auth_store_session)."), which
+    // misled them into thinking auth was broken. The new gate
+    // explains the *real* constraint so a user can decide whether to
+    // sign in or accept that triggers won't fire in local-only mode.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_enable_trigger(&config, "c-1", "GMAIL_NEW_GMAIL_MESSAGE", None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("webhook"),
+        "trigger-write gate must explain the webhook-delivery constraint, got: {err}"
+    );
+    assert!(
+        !err.starts_with("composio unavailable:"),
+        "trigger-write gate must NOT reuse the generic resolve_client message, got: {err}"
+    );
+}
+
 // ── classify_composio_failure_tag ──────────────────────────────
 //
 // Pin the failure-tag routing for `report_composio_op_error` so the

@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use super::client::{
     build_composio_client, create_composio_client, direct_authorize, direct_delete_connection,
-    direct_list_connections, direct_list_tools, ComposioClient, ComposioClientKind,
+    direct_list_active_triggers, direct_list_available_triggers, direct_list_connections,
+    direct_list_tools, ComposioClient, ComposioClientKind,
 };
 use super::providers::{
     capability_matrix, get_provider, ProviderContext, ProviderUserProfile, SyncOutcome, SyncReason,
@@ -39,20 +40,44 @@ use super::types::{
 /// Resolve a backend-mode [`ComposioClient`] from the root config, or
 /// return an error string that the caller can surface over RPC.
 ///
-/// Used by the **backend-only** Composio ops — `delete_connection`,
-/// `list_github_repos`, the `triggers/*` family, and the provider
-/// dispatch paths (`get_user_profile`, `refresh_all_identities`,
-/// `sync`). These rely on the backend's bookkeeping
-/// (HMAC-verified trigger fan-out, per-user provider registry, GitHub
-/// repo enumeration) that the direct-mode v3 surface does not provide,
-/// so they intentionally remain backend-only for now. The "mode-aware"
-/// `composio_authorize` / `composio_execute` / `composio_list_*`
-/// handlers go through [`create_composio_client`] instead so the
+/// Used by the **backend-only** Composio ops — `list_github_repos`
+/// and the trigger *write* family
+/// (`create_trigger` / `enable_trigger` / `disable_trigger`). These
+/// rely on backend bookkeeping that the direct-mode v3 surface cannot
+/// provide on its own: GitHub repo enumeration (per-connection),
+/// and HMAC-verified Composio webhook *delivery* into the user's app
+/// (without a backend webhook receiver, an enabled trigger fires
+/// events into the void). Trigger *reads*
+/// (`list_triggers` / `list_available_triggers`) are mode-aware via
+/// [`create_composio_client`] so direct-mode users can still browse
+/// their tenant's catalog.
+///
+/// Sync, auth (`composio_authorize`), execution (`composio_execute`),
+/// the `composio_list_*` family, `composio_get_user_profile`,
+/// `composio_refresh_all_identities`, and `composio_delete_connection`
+/// also go through [`create_composio_client`] so the
 /// `config.composio.mode` toggle is honoured per call (#1710).
 fn resolve_client(config: &Config) -> OpResult<ComposioClient> {
     build_composio_client(config).ok_or_else(|| {
         "composio unavailable: no backend session token. Sign in first \
          (auth_store_session)."
+            .to_string()
+    })
+}
+
+/// Trigger-write specific gate: produce a clearer error than the generic
+/// `resolve_client` message when a direct-mode user (BYO Composio API
+/// key, no backend session) tries to enable / disable / create a
+/// trigger. The actual blocker is webhook *delivery*, not auth — the
+/// generic "Sign in first" message misleads users into thinking they
+/// have an auth problem.
+fn resolve_client_for_trigger_writes(config: &Config) -> OpResult<ComposioClient> {
+    build_composio_client(config).ok_or_else(|| {
+        "composio triggers: enabling / disabling triggers requires the \
+         OpenHuman backend to receive Composio's HMAC-verified webhook \
+         deliveries. Local-only mode can list triggers but cannot \
+         register a delivery target. Sign in to the OpenHuman backend \
+         (auth_store_session) to enable trigger writes."
             .to_string()
     })
 }
@@ -744,7 +769,7 @@ pub async fn composio_create_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioCreateTriggerResponse>> {
     tracing::debug!(slug = %slug, ?connection_id, "[composio] rpc create_trigger");
-    let client = resolve_client(config)?;
+    let client = resolve_client_for_trigger_writes(config)?;
     let resp = client
         .create_trigger(slug, connection_id.as_deref(), trigger_config)
         .await
@@ -769,14 +794,23 @@ pub async fn composio_list_available_triggers(
     connection_id: Option<String>,
 ) -> OpResult<RpcOutcome<ComposioAvailableTriggersResponse>> {
     tracing::debug!(toolkit = %toolkit, ?connection_id, "[composio] rpc list_available_triggers");
-    let client = resolve_client(config)?;
-    let resp = client
-        .list_available_triggers(toolkit, connection_id.as_deref())
-        .await
-        .map_err(|e| {
-            report_composio_op_error("list_available_triggers", &e);
-            format!("[composio] list_available_triggers failed: {e:#}")
-        })?;
+    let kind = create_composio_client(config)
+        .map_err(|e| format!("[composio] list_available_triggers: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .list_available_triggers(toolkit, connection_id.as_deref())
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_available_triggers", &e);
+                format!("[composio] list_available_triggers failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => direct_list_available_triggers(&direct, toolkit)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_available_triggers", &e);
+                format!("[composio] list_available_triggers failed: {e:#}")
+            })?,
+    };
     let count = resp.triggers.len();
     Ok(RpcOutcome::new(
         resp,
@@ -791,14 +825,25 @@ pub async fn composio_list_triggers(
     toolkit: Option<String>,
 ) -> OpResult<RpcOutcome<ComposioActiveTriggersResponse>> {
     tracing::debug!(?toolkit, "[composio] rpc list_triggers");
-    let client = resolve_client(config)?;
-    let resp = client
-        .list_active_triggers(toolkit.as_deref())
-        .await
-        .map_err(|e| {
-            report_composio_op_error("list_triggers", &e);
-            format!("[composio] list_triggers failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] list_triggers: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .list_active_triggers(toolkit.as_deref())
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_triggers", &e);
+                format!("[composio] list_triggers failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            direct_list_active_triggers(&direct, toolkit.as_deref())
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("list_triggers", &e);
+                    format!("[composio] list_triggers failed: {e:#}")
+                })?
+        }
+    };
     let count = resp.triggers.len();
     Ok(RpcOutcome::new(
         resp,
@@ -813,7 +858,7 @@ pub async fn composio_enable_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioEnableTriggerResponse>> {
     tracing::debug!(slug = %slug, connection_id = %connection_id, "[composio] rpc enable_trigger");
-    let client = resolve_client(config)?;
+    let client = resolve_client_for_trigger_writes(config)?;
     let resp = client
         .enable_trigger(connection_id, slug, trigger_config)
         .await
@@ -833,7 +878,7 @@ pub async fn composio_disable_trigger(
     trigger_id: &str,
 ) -> OpResult<RpcOutcome<ComposioDisableTriggerResponse>> {
     tracing::debug!(trigger_id = %trigger_id, "[composio] rpc disable_trigger");
-    let client = resolve_client(config)?;
+    let client = resolve_client_for_trigger_writes(config)?;
     let resp = client.disable_trigger(trigger_id).await.map_err(|e| {
         report_composio_op_error("disable_trigger", &e);
         format!("[composio] disable_trigger failed: {e:#}")

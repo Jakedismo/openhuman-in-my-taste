@@ -201,7 +201,12 @@ impl ComposioTool {
         entity_id: Option<&str>,
         connected_account_ref: Option<&str>,
     ) -> (String, serde_json::Value) {
-        let url = format!("{COMPOSIO_API_BASE_V3}/tools/{tool_slug}/execute");
+        // Composio v3 spec: POST /api/v3/tools/execute/{tool_slug}
+        // The pre-2025 path /tools/{tool_slug}/execute returns 404. See
+        // https://github.com/ComposioHQ/composio/blob/next/docs/public/openapi-v3.json
+        // and the v2→v3 migration table at
+        // https://docs.composio.dev/docs/migration-guide/new-sdk.
+        let url = format!("{COMPOSIO_API_BASE_V3}/tools/execute/{tool_slug}");
         let account_ref = connected_account_ref.and_then(|candidate| {
             let trimmed_candidate = candidate.trim();
             (!trimmed_candidate.is_empty()).then_some(trimmed_candidate)
@@ -490,6 +495,105 @@ impl ComposioTool {
         Ok(())
     }
 
+    /// List active trigger instances against the user's personal
+    /// Composio v3 tenant.
+    ///
+    /// Wire shape: `GET {COMPOSIO_API_BASE_V3}/trigger_instances/active`
+    /// with `limit=200&show_disabled=true` (we surface disabled rows so
+    /// the UI can show them with their state, matching the backend
+    /// `list_active_triggers` semantics).
+    ///
+    /// Returns raw `items` — the caller in
+    /// [`crate::openhuman::composio::client::direct_list_active_triggers`]
+    /// reshapes each row into the canonical
+    /// [`crate::openhuman::composio::types::ComposioActiveTrigger`] so
+    /// existing frontend type contracts keep working.
+    pub async fn list_active_triggers_v3(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        let url = format!("{COMPOSIO_API_BASE_V3}/trigger_instances/active");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .query(&[("limit", "200"), ("show_disabled", "true")])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 trigger_instances/active failed: {err}");
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 trigger_instances/active response")?;
+        let items = body
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        tracing::debug!(
+            count = items.len(),
+            "[composio-direct] list_active_triggers_v3: fetched trigger instances"
+        );
+        Ok(items)
+    }
+
+    /// List trigger *types* (the catalog of triggers the user could
+    /// enable) for a single toolkit against the user's personal
+    /// Composio v3 tenant.
+    ///
+    /// Wire shape: `GET {COMPOSIO_API_BASE_V3}/triggers_types?toolkit_slugs=<slug>&limit=200`.
+    /// Composio's `triggers_types` is the v3 replacement for the
+    /// backend's `/triggers/available?toolkit=…` endpoint.
+    ///
+    /// Returns raw `items` — the caller in
+    /// [`crate::openhuman::composio::client::direct_list_available_triggers`]
+    /// reshapes each row into the canonical
+    /// [`crate::openhuman::composio::types::ComposioAvailableTrigger`].
+    pub async fn list_trigger_types_v3(
+        &self,
+        toolkit_slug: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let toolkit_slug = toolkit_slug.trim();
+        if toolkit_slug.is_empty() {
+            anyhow::bail!("toolkit_slug must not be empty");
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/triggers_types");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .query(&[("toolkit_slugs", toolkit_slug), ("limit", "200")])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 triggers_types failed: {err}");
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 triggers_types response")?;
+        let items = body
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        tracing::debug!(
+            toolkit_slug,
+            count = items.len(),
+            "[composio-direct] list_trigger_types_v3: fetched trigger types"
+        );
+        Ok(items)
+    }
+
     async fn resolve_auth_config_id(&self, app_name: &str) -> anyhow::Result<String> {
         let url = format!("{COMPOSIO_API_BASE_V3}/auth_configs");
 
@@ -721,7 +825,13 @@ fn normalize_entity_id(entity_id: &str) -> String {
 }
 
 fn normalize_tool_slug(action_name: &str) -> String {
-    action_name.trim().replace('_', "-").to_ascii_lowercase()
+    // Composio v3 tool slugs are canonical upper-snake (e.g.
+    // `GMAIL_FETCH_EMAILS`, `GITHUB_CREATE_A_WORKFLOW_DISPATCH_EVENT`) — see
+    // the `Tool.slug` example in
+    // https://github.com/ComposioHQ/composio/blob/next/docs/public/openapi-v3.json.
+    // Accept legacy lower-kebab input (`gmail-fetch-emails`) as well so
+    // older internal callers keep working without churn.
+    action_name.trim().replace('-', "_").to_ascii_uppercase()
 }
 
 fn map_v3_tools_to_actions(items: Vec<ComposioV3Tool>) -> Vec<ComposioAction> {

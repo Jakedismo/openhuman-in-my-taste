@@ -173,14 +173,21 @@ fn normalize_entity_id_falls_back_to_default_when_blank() {
 }
 
 #[test]
-fn normalize_tool_slug_supports_legacy_action_name() {
+fn normalize_tool_slug_produces_canonical_upper_snake() {
+    // Composio v3 expects upper-snake slugs (`GMAIL_FETCH_EMAILS`). The
+    // legacy lower-kebab form (`gmail-fetch-emails`) is accepted as input
+    // for back-compat with older internal callers and normalized.
     assert_eq!(
         normalize_tool_slug("GMAIL_FETCH_EMAILS"),
-        "gmail-fetch-emails"
+        "GMAIL_FETCH_EMAILS"
     );
     assert_eq!(
         normalize_tool_slug(" github-list-repos "),
-        "github-list-repos"
+        "GITHUB_LIST_REPOS"
+    );
+    assert_eq!(
+        normalize_tool_slug("gmail_fetch_emails"),
+        "GMAIL_FETCH_EMAILS"
     );
 }
 
@@ -303,7 +310,7 @@ fn composio_api_base_url_is_v3() {
 #[test]
 fn build_execute_action_v3_request_uses_fixed_endpoint_and_body_account_id() {
     let (url, body) = ComposioTool::build_execute_action_v3_request(
-        "gmail-send-email",
+        "GMAIL_SEND_EMAIL",
         json!({"to": "test@example.com"}),
         Some("workspace-user"),
         Some("account-42"),
@@ -311,7 +318,7 @@ fn build_execute_action_v3_request_uses_fixed_endpoint_and_body_account_id() {
 
     assert_eq!(
         url,
-        "https://backend.composio.dev/api/v3/tools/gmail-send-email/execute"
+        "https://backend.composio.dev/api/v3/tools/execute/GMAIL_SEND_EMAIL"
     );
     assert_eq!(body["arguments"]["to"], json!("test@example.com"));
     assert_eq!(body["user_id"], json!("workspace-user"));
@@ -321,7 +328,7 @@ fn build_execute_action_v3_request_uses_fixed_endpoint_and_body_account_id() {
 #[test]
 fn build_execute_action_v3_request_drops_blank_optional_fields() {
     let (url, body) = ComposioTool::build_execute_action_v3_request(
-        "github-list-repos",
+        "GITHUB_LIST_REPOS",
         json!({}),
         None,
         Some("   "),
@@ -329,7 +336,7 @@ fn build_execute_action_v3_request_drops_blank_optional_fields() {
 
     assert_eq!(
         url,
-        "https://backend.composio.dev/api/v3/tools/github-list-repos/execute"
+        "https://backend.composio.dev/api/v3/tools/execute/GITHUB_LIST_REPOS"
     );
     assert_eq!(body["arguments"], json!({}));
     assert!(body.get("connected_account_id").is_none());
