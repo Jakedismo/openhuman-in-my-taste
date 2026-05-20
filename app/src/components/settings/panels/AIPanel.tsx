@@ -107,6 +107,14 @@ const BUILTIN_PROVIDER_META: Record<string, { tone: string; label: string }> = {
     label: 'OpenRouter',
     tone: 'bg-slate-100 dark:bg-slate-500/15 ring-slate-300 text-slate-900 dark:text-slate-100',
   },
+  ollama: {
+    label: 'Ollama',
+    tone: 'bg-violet-50 dark:bg-violet-500/10 ring-violet-200 text-violet-900 dark:text-violet-100',
+  },
+  lmstudio: {
+    label: 'LM Studio',
+    tone: 'bg-cyan-50 dark:bg-cyan-500/10 ring-cyan-200 text-cyan-900 dark:text-cyan-100',
+  },
   custom: {
     label: 'Custom',
     tone: 'bg-stone-100 dark:bg-neutral-800 ring-stone-300 text-stone-900 dark:text-neutral-100',
@@ -295,10 +303,10 @@ function useAISettings() {
   useEffect(() => {
     if (loading) return;
     const userProviders = draft.cloudProviders.filter(
-      p => !['', 'cloud', 'openhuman', 'ollama', 'pid'].includes(p.slug)
+      p => !['', 'cloud', 'openhuman', 'pid'].includes(p.slug)
     );
     const savedUserProviders = saved.cloudProviders.filter(
-      p => !['', 'cloud', 'openhuman', 'ollama', 'pid'].includes(p.slug)
+      p => !['', 'cloud', 'openhuman', 'pid'].includes(p.slug)
     );
     if (JSON.stringify(userProviders) === JSON.stringify(savedUserProviders)) return;
     const wire = userProviders.map(p => ({
@@ -2245,7 +2253,7 @@ const CloudProviderEditor = ({
   const { t } = useT();
   const defaultSlug: string =
     initial?.slug ??
-    (['openai', 'anthropic', 'openrouter', 'custom'] as const).find(
+    (['openai', 'anthropic', 'openrouter', 'ollama', 'lmstudio', 'custom'] as const).find(
       s => !existingSlugs.includes(s)
     ) ??
     'custom';
@@ -2290,7 +2298,9 @@ const CloudProviderEditor = ({
               }}
               disabled={!!initial}
               className="mt-1 w-full rounded-lg border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 disabled:opacity-60 focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-200">
-              {(['openai', 'anthropic', 'openrouter', 'custom'] as const)
+              {(
+                ['openai', 'anthropic', 'openrouter', 'ollama', 'lmstudio', 'custom'] as const
+              )
                 .filter(s => s === slug || !existingSlugs.includes(s))
                 .map(s => (
                   <option key={s} value={s}>
@@ -2394,6 +2404,10 @@ function defaultEndpointFor(slug: string): string {
       return 'https://api.anthropic.com/v1';
     case 'openrouter':
       return 'https://openrouter.ai/api/v1';
+    case 'ollama':
+      return 'http://127.0.0.1:11434/v1';
+    case 'lmstudio':
+      return 'http://127.0.0.1:1234/v1';
     default:
       return '';
   }

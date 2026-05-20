@@ -139,19 +139,10 @@ pub fn create_chat_provider_from_string(
     // ("custom providers require an app-session JWT") no longer
     // applies in a single-user local desktop.
 
-    if let Some(model) = p.strip_prefix(OLLAMA_PROVIDER_PREFIX) {
-        if model.trim().is_empty() {
-            anyhow::bail!(
-                "[chat-factory] provider string '{}' for role '{}' has an empty model — \
-                 use 'ollama:<model-id>'",
-                p,
-                role
-            );
-        }
-        return make_ollama_provider(model.trim(), config);
-    }
-
-    // New grammar: "<slug>:<model>"
+    // New grammar: "<slug>:<model>". Resolve cloud_providers slugs
+    // FIRST so a user-added entry (e.g. slug=ollama or slug=lmstudio
+    // pointing at a remote/non-default endpoint) wins over the legacy
+    // `ollama:<model>` → `local_ai.base_url` special path.
     if let Some(colon_pos) = p.find(':') {
         let slug = p[..colon_pos].trim();
         let model = p[colon_pos + 1..].trim();
@@ -162,6 +153,27 @@ pub fn create_chat_provider_from_string(
                 p,
                 role
             );
+        }
+
+        if config.cloud_providers.iter().any(|e| e.slug == slug) {
+            return make_cloud_provider_by_slug(role, slug, model, config);
+        }
+
+        // No cloud_providers entry — fall through to the legacy
+        // `ollama:<model>` path that targets `local_ai.base_url`. This
+        // preserves the default-config UX (Ollama models picked from
+        // the Local-runtime section work even without an explicit
+        // cloud_providers row).
+        if slug == "ollama" {
+            if model.is_empty() {
+                anyhow::bail!(
+                    "[chat-factory] provider string '{}' for role '{}' has an empty model — \
+                     use 'ollama:<model-id>'",
+                    p,
+                    role
+                );
+            }
+            return make_ollama_provider(model, config);
         }
 
         return make_cloud_provider_by_slug(role, slug, model, config);

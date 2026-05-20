@@ -99,8 +99,13 @@ impl Default for CloudProviderCreds {
 
 /// Reserved slugs that may not be used for user-configured providers.
 /// These are sentinels in the factory's routing grammar.
+///
+/// `ollama` and `lmstudio` are intentionally *not* reserved — users can
+/// add cloud-provider rows for local OpenAI-compatible runtimes. The
+/// factory checks `cloud_providers` first, so the row's endpoint wins
+/// over the legacy `ollama:<model>` → `local_ai.base_url` special path.
 pub fn is_slug_reserved(s: &str) -> bool {
-    matches!(s.trim(), "" | "cloud" | "openhuman" | "ollama" | "pid")
+    matches!(s.trim(), "" | "cloud" | "openhuman" | "pid")
 }
 
 /// Apply legacy field migration in-place.
