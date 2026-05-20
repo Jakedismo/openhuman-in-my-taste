@@ -698,6 +698,7 @@ const en: TranslationMap = {
 
   // Composio
   'composio.triageTitle': 'Integration Triggers',
+  'composio.triggersTitle': 'Composio Triggers',
   'composio.triageDesc':
     'When active, each incoming Composio trigger runs through an AI triage step that classifies the event and may kick off automated actions — one local LLM turn per trigger. Disable globally or per integration if you prefer manual review. If the environment variable',
   'composio.disableAllTriage': 'Disable AI triage for all triggers',

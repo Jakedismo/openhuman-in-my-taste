@@ -82,6 +82,13 @@ pub fn all_controller_schemas() -> Vec<ControllerSchema> {
         schemas("get_mode"),
         schemas("set_api_key"),
         schemas("clear_api_key"),
+        schemas("local_webhook_status"),
+        schemas("local_webhook_start"),
+        schemas("local_webhook_stop"),
+        schemas("local_webhook_test"),
+        schemas("set_ngrok_authtoken"),
+        schemas("clear_ngrok_authtoken"),
+        schemas("set_webhook_config"),
     ]
 }
 
@@ -174,6 +181,34 @@ pub fn all_registered_controllers() -> Vec<RegisteredController> {
         RegisteredController {
             schema: schemas("clear_api_key"),
             handler: handle_clear_api_key,
+        },
+        RegisteredController {
+            schema: schemas("local_webhook_status"),
+            handler: handle_local_webhook_status,
+        },
+        RegisteredController {
+            schema: schemas("local_webhook_start"),
+            handler: handle_local_webhook_start,
+        },
+        RegisteredController {
+            schema: schemas("local_webhook_stop"),
+            handler: handle_local_webhook_stop,
+        },
+        RegisteredController {
+            schema: schemas("local_webhook_test"),
+            handler: handle_local_webhook_test,
+        },
+        RegisteredController {
+            schema: schemas("set_ngrok_authtoken"),
+            handler: handle_set_ngrok_authtoken,
+        },
+        RegisteredController {
+            schema: schemas("clear_ngrok_authtoken"),
+            handler: handle_clear_ngrok_authtoken,
+        },
+        RegisteredController {
+            schema: schemas("set_webhook_config"),
+            handler: handle_set_webhook_config,
         },
     ]
 }
@@ -668,6 +703,135 @@ pub fn schemas(function: &str) -> ControllerSchema {
                 required: true,
             }],
         },
+        "local_webhook_status" => ControllerSchema {
+            namespace: "composio",
+            function: "local_webhook_status",
+            description:
+                "Snapshot of the local Composio webhook receiver: ngrok tunnel state, \
+                 configured static domain, persisted subscription ID, and whether an \
+                 ngrok authtoken has been stored. Powers the Settings → Triggers panel.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "status",
+                ty: TypeSchema::Json,
+                comment:
+                    "ComposioLocalWebhookStatus { tunnel_state, public_url, error, \
+                     subscription_id, local_port, ngrok_domain, has_authtoken }.",
+                required: true,
+            }],
+        },
+        "local_webhook_start" => ControllerSchema {
+            namespace: "composio",
+            function: "local_webhook_start",
+            description:
+                "Explicit start of the local webhook receiver + ngrok tunnel. \
+                 Idempotent — safe to call when already running. Returns the \
+                 post-start status.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "status",
+                ty: TypeSchema::Json,
+                comment: "Same shape as local_webhook_status.",
+                required: true,
+            }],
+        },
+        "local_webhook_stop" => ControllerSchema {
+            namespace: "composio",
+            function: "local_webhook_stop",
+            description:
+                "Drop the ngrok tunnel and abort the local listener. Trigger events \
+                 fired while stopped are lost (Composio retries a few times then drops). \
+                 Returns the post-stop status.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "status",
+                ty: TypeSchema::Json,
+                comment: "Same shape as local_webhook_status.",
+                required: true,
+            }],
+        },
+        "local_webhook_test" => ControllerSchema {
+            namespace: "composio",
+            function: "local_webhook_test",
+            description:
+                "Hit /healthz on the public ngrok URL to verify the tunnel round-trips \
+                 from the internet back to the loopback receiver. Independent of \
+                 Composio — used by the Settings → Triggers 'Test tunnel' button.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "result",
+                ty: TypeSchema::Json,
+                comment: "{ ok: true, url, body } on success; Err otherwise.",
+                required: true,
+            }],
+        },
+        "set_ngrok_authtoken" => ControllerSchema {
+            namespace: "composio",
+            function: "set_ngrok_authtoken",
+            description:
+                "Persist the user-provided ngrok authtoken into the encrypted credential \
+                 store (NGROK_AUTHTOKEN_PROVIDER). Token is never echoed back through any \
+                 RPC; only its presence is reported via local_webhook_status.has_authtoken.",
+            inputs: vec![FieldSchema {
+                name: "authtoken",
+                ty: TypeSchema::String,
+                comment: "ngrok authtoken from https://dashboard.ngrok.com/get-started/your-authtoken.",
+                required: true,
+            }],
+            outputs: vec![FieldSchema {
+                name: "result",
+                ty: TypeSchema::Json,
+                comment: "{ stored: true, provider: 'ngrok-tunnel' }.",
+                required: true,
+            }],
+        },
+        "clear_ngrok_authtoken" => ControllerSchema {
+            namespace: "composio",
+            function: "clear_ngrok_authtoken",
+            description:
+                "Remove the stored ngrok authtoken. The receiver stays running until the \
+                 next restart unless local_webhook_stop is also called.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "result",
+                ty: TypeSchema::Json,
+                comment: "{ removed: bool }.",
+                required: true,
+            }],
+        },
+        "set_webhook_config" => ControllerSchema {
+            namespace: "composio",
+            function: "set_webhook_config",
+            description:
+                "Patch the non-secret webhook config fields and persist to config.toml. \
+                 None of the inputs are required — pass only the ones you want to change.",
+            inputs: vec![
+                FieldSchema {
+                    name: "enabled",
+                    ty: TypeSchema::Bool,
+                    comment: "Toggle the local_receiver_enabled flag.",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "port",
+                    ty: TypeSchema::U64,
+                    comment: "Loopback port (1..=65535) the receiver binds to.",
+                    required: false,
+                },
+                FieldSchema {
+                    name: "ngrok_domain",
+                    ty: TypeSchema::String,
+                    comment: "Static ngrok domain (e.g. 'abc-123-xyz.ngrok-free.dev').",
+                    required: false,
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "status",
+                ty: TypeSchema::Json,
+                comment: "Same shape as local_webhook_status — reflects the saved values.",
+                required: true,
+            }],
+        },
         _other => ControllerSchema {
             namespace: "composio",
             function: "unknown",
@@ -977,6 +1141,69 @@ fn handle_clear_api_key(_params: Map<String, Value>) -> ControllerFuture {
         tracing::debug!("[composio-direct] rpc clear_api_key entry");
         let config = config_rpc::load_config_with_timeout().await?;
         to_json(super::ops::composio_clear_api_key(&config).await?)
+    })
+}
+
+fn handle_local_webhook_status(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(super::ops::composio_local_webhook_status(&config).await?)
+    })
+}
+
+fn handle_local_webhook_start(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(super::ops::composio_local_webhook_start(&config).await?)
+    })
+}
+
+fn handle_local_webhook_stop(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(super::ops::composio_local_webhook_stop(&config).await?)
+    })
+}
+
+fn handle_local_webhook_test(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(super::ops::composio_local_webhook_test(&config).await?)
+    })
+}
+
+fn handle_set_ngrok_authtoken(params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        let authtoken = read_required_non_empty(&params, "authtoken")?;
+        to_json(
+            crate::openhuman::credentials::ops::store_ngrok_authtoken(&config, &authtoken).await?,
+        )
+    })
+}
+
+fn handle_clear_ngrok_authtoken(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(crate::openhuman::credentials::ops::clear_ngrok_authtoken(&config).await?)
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SetWebhookConfigParams {
+    enabled: Option<bool>,
+    port: Option<u16>,
+    ngrok_domain: Option<String>,
+}
+
+fn handle_set_webhook_config(params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let typed: SetWebhookConfigParams = serde_json::from_value(Value::Object(params))
+            .map_err(|e| format!("invalid set_webhook_config params: {e}"))?;
+        to_json(
+            super::ops::composio_set_webhook_config(typed.enabled, typed.port, typed.ngrok_domain)
+                .await?,
+        )
     })
 }
 

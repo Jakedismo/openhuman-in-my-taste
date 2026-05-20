@@ -491,6 +491,71 @@ pub struct ComposioConfig {
     /// the keychain-backed value over this field. Default `None`.
     #[serde(default)]
     pub api_key: Option<String>,
+
+    /// Local webhook receiver settings (ngrok tunnel + Axum listener).
+    /// See [`ComposioWebhookConfig`] for field semantics.
+    #[serde(default)]
+    pub webhook: ComposioWebhookConfig,
+}
+
+/// Configuration for the local Composio webhook receiver that brings
+/// direct-mode triggers up without requiring the OpenHuman backend.
+///
+/// Lifecycle gate: receiver starts at app boot when
+/// `local_receiver_enabled = true` AND a non-empty `ngrok_domain` is
+/// set AND an ngrok authtoken is present in `AuthService` (under
+/// `NGROK_AUTHTOKEN_PROVIDER`). Any of those missing → receiver stays
+/// idle (trigger writes surface the existing gate error).
+///
+/// Secrets (ngrok authtoken, Composio webhook signing secret) are NOT
+/// stored here — they live in
+/// [`crate::openhuman::credentials::AuthService`] under
+/// `NGROK_AUTHTOKEN_PROVIDER` and `COMPOSIO_WEBHOOK_SECRET_PROVIDER`
+/// respectively. Only non-secret identifiers go into `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ComposioWebhookConfig {
+    /// Opt-in flag. When false, the receiver is not started even if
+    /// the other fields are populated — useful for temporarily
+    /// disabling without clearing the ngrok credentials.
+    #[serde(default)]
+    pub local_receiver_enabled: bool,
+
+    /// Loopback port the local Axum receiver binds to. ngrok forwards
+    /// inbound HTTPS traffic on the public domain to `127.0.0.1:<port>`.
+    /// Defaults to 8765 — change only if a port collision is reported
+    /// at startup.
+    #[serde(default = "default_local_receiver_port")]
+    pub local_receiver_port: u16,
+
+    /// Static ngrok domain (e.g. `"abc-123-xyz.ngrok-free.dev"`). The
+    /// user gets this once from their ngrok dashboard and pastes it
+    /// into Settings → Triggers. Persists across restarts so the
+    /// registered Composio webhook URL stays valid.
+    #[serde(default)]
+    pub ngrok_domain: String,
+
+    /// Remembered Composio webhook subscription ID. Populated on
+    /// first successful subscription create; reused on subsequent
+    /// restarts to avoid creating duplicate subscriptions at
+    /// app.composio.dev.
+    #[serde(default)]
+    pub composio_webhook_subscription_id: String,
+}
+
+fn default_local_receiver_port() -> u16 {
+    8765
+}
+
+impl Default for ComposioWebhookConfig {
+    fn default() -> Self {
+        Self {
+            local_receiver_enabled: false,
+            local_receiver_port: default_local_receiver_port(),
+            ngrok_domain: String::new(),
+            composio_webhook_subscription_id: String::new(),
+        }
+    }
 }
 
 fn default_entity_id() -> String {
@@ -506,6 +571,7 @@ impl Default for ComposioConfig {
             triage_disabled_toolkits: Vec::new(),
             mode: default_composio_mode(),
             api_key: None,
+            webhook: ComposioWebhookConfig::default(),
         }
     }
 }

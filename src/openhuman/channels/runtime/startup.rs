@@ -58,6 +58,21 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // is intentionally cheap and the loop body no-ops when there are
     // no connections.
     crate::openhuman::composio::start_periodic_sync();
+    // Bring up the Composio direct-mode webhook receiver if the user
+    // has opted in (ngrok authtoken stored + static domain set +
+    // local_receiver_enabled = true). The init call is gated
+    // internally and is a no-op when any prerequisite is missing —
+    // safe to call unconditionally here. Errors are logged and
+    // swallowed so the app continues to run if ngrok is unreachable.
+    {
+        let cfg_arc = std::sync::Arc::new(config.clone());
+        if let Err(e) = crate::openhuman::composio::webhook_receiver::init(&cfg_arc).await {
+            tracing::warn!(
+                error = %e,
+                "[composio-webhook] init at startup failed (non-fatal); trigger writes will surface a clearer error"
+            );
+        }
+    }
     // Native request handlers. Re-registering is safe (latest wins) so
     // this is idempotent even if `bootstrap_core_runtime` also runs.
     // Must happen before `run_message_dispatch_loop` begins, because

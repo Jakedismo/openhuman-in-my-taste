@@ -1074,6 +1074,156 @@ pub async fn direct_list_available_triggers(
     Ok(ComposioAvailableTriggersResponse { triggers })
 }
 
+/// Direct-mode counterpart to
+/// [`ComposioClient::enable_trigger`].
+///
+/// Calls Composio v3
+/// `POST /trigger_instances/{slug}/upsert` (via
+/// [`crate::openhuman::tools::ComposioTool::upsert_trigger_instance_v3`])
+/// and reshapes the response into the canonical
+/// [`ComposioEnableTriggerResponse`] envelope so the
+/// `composio_enable_trigger` op stays single-shape across both modes.
+///
+/// Composio's upsert returns either a freshly-created trigger row or
+/// the existing one updated in place — either way the response carries
+/// a `trigger_id` (v3 nano id) and the `trigger_name` we sent. We
+/// derive the canonical `slug` from the request when the response
+/// omits it; backend-mode callers see exactly the same field set so
+/// downstream consumers (log emitters, frontend state) don't branch on
+/// mode.
+pub async fn direct_enable_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    connection_id: &str,
+    slug: &str,
+    trigger_config: Option<serde_json::Value>,
+) -> anyhow::Result<ComposioEnableTriggerResponse> {
+    let connection_id = connection_id.trim();
+    let slug = slug.trim();
+    if connection_id.is_empty() {
+        anyhow::bail!("composio direct_enable_trigger: connection_id must not be empty");
+    }
+    if slug.is_empty() {
+        anyhow::bail!("composio direct_enable_trigger: slug must not be empty");
+    }
+    tracing::debug!(
+        connection_id,
+        slug,
+        "[composio-direct] enable_trigger: POST v3 /trigger_instances/{{slug}}/upsert"
+    );
+    let raw = direct
+        .upsert_trigger_instance_v3(slug, Some(connection_id), trigger_config)
+        .await?;
+
+    let trigger_id = raw
+        .get("trigger_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| raw.get("triggerId").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("id").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("uuid").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if trigger_id.is_empty() {
+        anyhow::bail!(
+            "composio direct_enable_trigger: Composio response is missing trigger_id ({raw})"
+        );
+    }
+
+    Ok(ComposioEnableTriggerResponse {
+        trigger_id,
+        slug: slug.to_string(),
+        connection_id: connection_id.to_string(),
+    })
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::disable_trigger`].
+///
+/// Calls Composio v3
+/// `DELETE /trigger_instances/manage/{trigger_id}` (via
+/// [`crate::openhuman::tools::ComposioTool::delete_trigger_instance_v3`])
+/// and returns `ComposioDisableTriggerResponse { deleted: true }` on
+/// success — same single-shape contract the backend path emits so the
+/// op layer doesn't branch on mode.
+///
+/// We use DELETE rather than PATCH(status=disable) here because the
+/// `composio_disable_trigger` op semantically means "remove this
+/// trigger entirely" (the user has un-toggled it in the UI). Callers
+/// who want pause-without-delete can use the PATCH path via
+/// [`crate::openhuman::tools::ComposioTool::manage_trigger_instance_v3`]
+/// directly — no op layer exposes it today.
+pub async fn direct_disable_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    trigger_id: &str,
+) -> anyhow::Result<ComposioDisableTriggerResponse> {
+    let trigger_id = trigger_id.trim();
+    if trigger_id.is_empty() {
+        anyhow::bail!("composio direct_disable_trigger: trigger_id must not be empty");
+    }
+    tracing::debug!(
+        trigger_id,
+        "[composio-direct] disable_trigger: DELETE v3 /trigger_instances/manage/{{id}}"
+    );
+    direct.delete_trigger_instance_v3(trigger_id).await?;
+    Ok(ComposioDisableTriggerResponse { deleted: true })
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::create_trigger`].
+///
+/// `create_trigger` is semantically equivalent to `enable_trigger`
+/// when the trigger does not yet exist — both end up at v3's
+/// `upsert` endpoint. The difference is the op-layer shape:
+/// `enable_trigger` returns `{ trigger_id, slug, connection_id }`;
+/// `create_trigger` returns `{ trigger_id, status }`.
+///
+/// We reuse the same upstream call (via
+/// [`crate::openhuman::tools::ComposioTool::upsert_trigger_instance_v3`])
+/// and emit the `create`-shaped envelope. The `status` field is
+/// always `"active"` in direct mode because the upsert path always
+/// activates — Composio has no notion of a "pending"
+/// upsert-but-not-yet-active state for v3 instances.
+pub async fn direct_create_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    slug: &str,
+    connection_id: Option<&str>,
+    trigger_config: Option<serde_json::Value>,
+) -> anyhow::Result<ComposioCreateTriggerResponse> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        anyhow::bail!("composio direct_create_trigger: slug must not be empty");
+    }
+    let trimmed_connection = connection_id.map(str::trim).filter(|c| !c.is_empty());
+    tracing::debug!(
+        slug,
+        connection_id = trimmed_connection,
+        "[composio-direct] create_trigger: POST v3 /trigger_instances/{{slug}}/upsert"
+    );
+    let raw = direct
+        .upsert_trigger_instance_v3(slug, trimmed_connection, trigger_config)
+        .await?;
+
+    let trigger_id = raw
+        .get("trigger_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| raw.get("triggerId").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("id").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("uuid").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if trigger_id.is_empty() {
+        anyhow::bail!(
+            "composio direct_create_trigger: Composio response is missing trigger_id ({raw})"
+        );
+    }
+
+    Ok(ComposioCreateTriggerResponse {
+        trigger_id,
+        status: Some("active".to_string()),
+    })
+}
+
 /// Direct-mode counterpart to [`ComposioClient::list_tools`]. Calls
 /// Composio v3 `/tools?toolkits=<csv>` via
 /// [`crate::openhuman::tools::ComposioTool::list_tool_schemas_v3`] and

@@ -57,6 +57,18 @@ rand = "0.10"
 dirs = "5"
 sha2 = "0.10"
 hmac = "0.12"
+# Constant-time byte comparison for HMAC signature verification in
+# `composio::webhook_receiver::hmac`. Already a transitive dep of
+# `hmac`/`sha2`/`aes-gcm`; pulled in as a direct dep so the receiver
+# can reach for `ConstantTimeEq` without leaning on a re-export.
+subtle = "2"
+# ngrok agent SDK for the local Composio webhook receiver tunnel. Embeds
+# the agent in-process and forwards public HTTPS traffic on the user's
+# free `<id>.ngrok-free.dev` static domain to our loopback Axum server.
+# `axum` feature gives us `listen_and_forward` directly against the
+# router we build in `composio::webhook_receiver::server`. Cross-platform
+# pure Rust — no system dependencies.
+ngrok = { version = "0.18", features = ["axum"] }
 # Archive extraction for the Node.js runtime bootstrap. Unix Node
 # distributions ship as .tar.xz, Windows as .zip. `xz2` with `static`
 # bundles liblzma so we don't need it as a system dependency.

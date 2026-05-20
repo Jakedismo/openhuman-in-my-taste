@@ -276,7 +276,45 @@ To upgrade `UnifiedMemory::upsert_document` to LLM-driven graph extraction:
 
 **Do this after** the Phase 6 local replacements + Phase 7 defaults settle — chat / memory tree / channels are all wired now, but the namespace graph isn't on the critical path for everyday retrieval (`query_namespace` reads chunks via vector search, not the graph). The tree extractor already covers the "show me entities in this doc" UX through the Intelligence drill-down, so users have a working entity surface today; this entry is about making `graph_query_namespace` first-class for callers (agent prompts, knowledge graph viz) that want explicit subject/predicate/object queries.
 
-### Composio direct-mode triggers (Option D)
+### Composio direct-mode triggers (Option D) — shipped 2026-05-20
+
+**Status (2026-05-20):** Fully shipped end-to-end via the local webhook receiver. ngrok + Axum + HMAC + bus dispatch lands in this branch. Trigger reads stayed on the mode-aware factory from `26af2474`; writes now also go through it, with the receiver bringing up a public URL that gets registered as a Composio webhook subscription on first enable.
+
+What landed:
+
+* **HMAC verifier** (`src/openhuman/composio/webhook_receiver/hmac.rs`): Svix-style signature check (`webhook-id` / `webhook-timestamp` / `webhook-signature` headers, HMAC-SHA256 over `{id}.{timestamp}.{body}`, constant-time compare via `subtle::ConstantTimeEq`, 5-minute timestamp tolerance). 12 known-vector tests.
+* **Webhook server** (`webhook_receiver/server.rs`): Axum router with POST `/webhook` (HMAC-verify → parse `ComposioTriggerEvent` → `publish_global(DomainEvent::ComposioTriggerReceived)`) and GET `/healthz` (no-auth probe for tunnel testing). 7 integration tests including a real bus-dispatch round-trip.
+* **ngrok tunnel** (`webhook_receiver/tunnel.rs`): wraps the ngrok agent SDK in-process; connects with the user's authtoken, forwards the static `<id>.ngrok-free.dev` domain to the loopback listener. `TunnelState { Idle, Connecting, Ready, Error }` for status RPC consumption.
+* **Subscription helper** (`webhook_receiver/subscription.rs`): `ensure_subscription` — checks AuthService for stored subscription id+secret, creates one via Composio v3 `/webhook_subscriptions` if absent, PATCHes `enabled_events` when a new trigger's event type isn't yet covered. Returns `(ResolvedSubscription, EnsureOutcome { Created, ReusedExisting, Patched })`.
+* **Lifecycle façade** (`webhook_receiver/mod.rs`): `init(config)` gates on `local_receiver_enabled` + `ngrok_domain` + authtoken; `stop()` aborts both; `public_webhook_url()` + `tunnel_state()` for the status RPC.
+* **v3 client extensions** (`tools/impl/network/composio.rs`): 7 new methods — webhook subscription CRUD (`create_webhook_subscription_v3`, `get_webhook_subscription_v3`, `update_webhook_subscription_v3`, `delete_webhook_subscription_v3`) + trigger writes (`upsert_trigger_instance_v3`, `manage_trigger_instance_v3`, `delete_trigger_instance_v3`).
+* **Direct-mode trigger writes** (`composio/client.rs`): `direct_enable_trigger`, `direct_disable_trigger`, `direct_create_trigger` mirror the existing read-side direct helpers.
+* **Op rewiring** (`composio/ops.rs`): `composio_enable_trigger` / `composio_disable_trigger` / `composio_create_trigger` go through `create_composio_client` + `ComposioClientKind` matching just like the rest of the migrated ops. The Direct arm calls `ensure_subscription_for_trigger_write` first so the webhook URL is registered before Composio fires anything; subscription ID is persisted into `config.composio.webhook.composio_webhook_subscription_id` on the create path. Removed the now-dead `resolve_client_for_trigger_writes` gate.
+* **New RPC ops**: `composio_local_webhook_status` / `_start` / `_stop` / `_test` / `set_ngrok_authtoken` / `clear_ngrok_authtoken` / `set_webhook_config`. All registered in `composio/schemas.rs`.
+* **Config schema** (`config/schema/tools.rs`): `ComposioWebhookConfig` (`local_receiver_enabled`, `local_receiver_port`, `ngrok_domain`, `composio_webhook_subscription_id`) nested under `ComposioConfig`. Secrets stay in `AuthService` under new provider keys `NGROK_AUTHTOKEN_PROVIDER` and `COMPOSIO_WEBHOOK_SECRET_PROVIDER`.
+* **Credentials ops** (`credentials/ops.rs`): `store_ngrok_authtoken`, `get_ngrok_authtoken`, `clear_ngrok_authtoken`; `store_composio_webhook_secret`, `get_composio_webhook_secret`, `clear_composio_webhook_secret`. Tokens never echoed back through RPC.
+* **Boot lifecycle** (`channels/runtime/startup.rs`): receiver `init` is called after the bus + subscribers are wired but before message dispatch. Non-fatal — logged and swallowed if ngrok is unreachable.
+* **Frontend** (`app/src/components/settings/panels/TriggersPanel.tsx`): new Settings → Triggers panel. Form for authtoken + static domain + enabled toggle + advanced port. Status block with tunnel state, public URL, subscription ID, error message (when present), bandwidth note. "Test tunnel" button hits `/healthz` via the public URL. Token write-only — never returned. Wired into `Settings.tsx`, `DeveloperOptionsPanel.tsx`, `useSettingsNavigation.ts`.
+* **Dependency**: `ngrok = "0.18"` with `axum` feature. Cross-platform, pure Rust. `subtle = "2"` promoted to a direct dep for the HMAC constant-time compare.
+
+What's still out of scope (won't be done in this fork):
+
+* History-replay sync — events fired while the receiver was down are lost. Composio retries on a backoff for ~5 min; beyond that, dropped. Personal-use trade-off vs. additional state machinery.
+* Cloudflare Tunnel alternative — would need a `TunnelProvider` trait + cloudflared subprocess management. Re-evaluate if a user actively asks for it.
+* `composio_list_github_repos` direct-mode migration — separate from triggers. Still legitimately backend-only because direct mode has no equivalent for per-connection GitHub repo enumeration; would need a separate direct-mode GitHub API client.
+
+**Verification (manual end-to-end) — what Jokke needs to do:**
+
+1. Settings → Triggers → paste ngrok authtoken + static `<id>.ngrok-free.dev` domain → check "Enable local webhook receiver" → Save.
+2. Confirm tunnel state goes Idle → Connecting → Ready within ~5 seconds.
+3. Click "Test tunnel" → expect "Round-trip OK" message.
+4. Open the per-toolkit Manage dialog (gmail) → enable a trigger → verify the trigger toggles on without the "receiver not running" error.
+5. Trigger an actual event (e.g. send yourself an email if you enabled `GMAIL_NEW_GMAIL_MESSAGE`) → verify a `[composio-webhook] dispatching verified trigger to event bus` log line within seconds → verify the existing `trigger_triage` agent picks it up downstream.
+6. Optional: kill the app → restart → confirm subscription ID persists in `config.toml`, secret persists in `AuthService`, tunnel reconnects on the same domain.
+
+---
+
+### Composio direct-mode triggers (Option D) — earlier interim state
 
 **Status (2026-05-20, commit `26af2474`):** Read paths migrated, write paths intentionally still gated. Interim pre-work from the original entry is **done**: read ops surface real catalog data instead of empty / misleading-error stubs, and writes surface a clear "needs backend webhook receiver" gate.
 

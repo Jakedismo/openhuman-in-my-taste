@@ -594,6 +594,364 @@ impl ComposioTool {
         Ok(items)
     }
 
+    /// Upsert a trigger instance against the user's personal
+    /// Composio v3 tenant.
+    ///
+    /// Wire shape: `POST {COMPOSIO_API_BASE_V3}/trigger_instances/{slug}/upsert`.
+    /// Body carries `connected_account_id` (when present) and the
+    /// trigger-specific `trigger_config` object. Composio responds with
+    /// `{ trigger_id }` plus the rehydrated config.
+    ///
+    /// Used by the direct arm of
+    /// [`crate::openhuman::composio::ops::composio_enable_trigger`] and
+    /// `composio_create_trigger`.
+    pub async fn upsert_trigger_instance_v3(
+        &self,
+        slug: &str,
+        connected_account_id: Option<&str>,
+        trigger_config: Option<serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            anyhow::bail!("composio upsert_trigger_instance_v3: slug must not be empty");
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/trigger_instances/{slug}/upsert");
+        ensure_https(&url)?;
+
+        let mut body = json!({});
+        if let Some(account) = connected_account_id
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            body["connected_account_id"] = json!(account);
+        }
+        if let Some(cfg) = trigger_config {
+            body["trigger_config"] = cfg;
+        }
+
+        let resp = self
+            .client()
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 trigger_instances upsert failed: {err}");
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 trigger_instances upsert response")?;
+        tracing::debug!(
+            slug,
+            connected_account_id,
+            "[composio-direct] upsert_trigger_instance_v3: trigger upserted"
+        );
+        Ok(result)
+    }
+
+    /// Enable or disable an existing trigger instance against the
+    /// user's personal Composio v3 tenant.
+    ///
+    /// Wire shape:
+    /// `PATCH {COMPOSIO_API_BASE_V3}/trigger_instances/manage/{trigger_id}`.
+    /// Body: `{ "status": "enable" | "disable" }`. Composio responds
+    /// with the updated trigger envelope (or `{ updated: true }`
+    /// depending on payload version).
+    ///
+    /// Used by the direct arm of
+    /// [`crate::openhuman::composio::ops::composio_enable_trigger`] when
+    /// the trigger already exists and just needs to be re-enabled.
+    pub async fn manage_trigger_instance_v3(
+        &self,
+        trigger_id: &str,
+        enable: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        let trigger_id = trigger_id.trim();
+        if trigger_id.is_empty() {
+            anyhow::bail!("composio manage_trigger_instance_v3: trigger_id must not be empty");
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/trigger_instances/manage/{trigger_id}");
+        ensure_https(&url)?;
+
+        let status = if enable { "enable" } else { "disable" };
+        let body = json!({ "status": status });
+
+        let resp = self
+            .client()
+            .patch(&url)
+            .header("x-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 trigger_instances manage failed: {err}");
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 trigger_instances manage response")?;
+        tracing::debug!(
+            trigger_id,
+            enable,
+            "[composio-direct] manage_trigger_instance_v3: trigger state updated"
+        );
+        Ok(result)
+    }
+
+    /// Delete a trigger instance against the user's personal Composio
+    /// v3 tenant.
+    ///
+    /// Wire shape:
+    /// `DELETE {COMPOSIO_API_BASE_V3}/trigger_instances/manage/{trigger_id}`.
+    /// Returns `Ok(())` on 2xx (Composio returns 200 with a
+    /// `{"deleted": true}` body or 204 No Content).
+    ///
+    /// Used by the direct arm of
+    /// [`crate::openhuman::composio::ops::composio_disable_trigger`].
+    pub async fn delete_trigger_instance_v3(&self, trigger_id: &str) -> anyhow::Result<()> {
+        let trigger_id = trigger_id.trim();
+        if trigger_id.is_empty() {
+            anyhow::bail!("composio delete_trigger_instance_v3: trigger_id must not be empty");
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/trigger_instances/manage/{trigger_id}");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .delete(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 trigger_instances delete failed: {err}");
+        }
+        tracing::debug!(
+            trigger_id,
+            "[composio-direct] delete_trigger_instance_v3: trigger removed"
+        );
+        Ok(())
+    }
+
+    /// Create a webhook subscription against the user's personal
+    /// Composio v3 tenant.
+    ///
+    /// Wire shape: `POST {COMPOSIO_API_BASE_V3}/webhook_subscriptions`
+    /// with `{ webhook_url, enabled_events, version: "V3" }`.
+    /// Composio responds with `{ id, secret, enabled_events, … }` —
+    /// the `secret` is the HMAC signing key the receiver uses to
+    /// verify subsequent deliveries (see
+    /// [`crate::openhuman::composio::webhook_receiver::hmac::verify`]).
+    ///
+    /// The `secret` is returned only on creation. The caller MUST
+    /// persist it (via `AuthService`) — Composio will NOT echo it on
+    /// subsequent GETs. Lose it and you must rotate by deleting the
+    /// subscription and recreating.
+    pub async fn create_webhook_subscription_v3(
+        &self,
+        webhook_url: &str,
+        enabled_events: &[String],
+    ) -> anyhow::Result<serde_json::Value> {
+        let webhook_url = webhook_url.trim();
+        if webhook_url.is_empty() {
+            anyhow::bail!("composio create_webhook_subscription_v3: webhook_url must not be empty");
+        }
+        if !webhook_url.starts_with("https://") {
+            // Composio rejects non-HTTPS subscriptions outright, but
+            // surface the constraint here so the receiver doesn't
+            // accidentally register the loopback URL during testing.
+            anyhow::bail!(
+                "composio create_webhook_subscription_v3: webhook_url must be HTTPS, got: {webhook_url}"
+            );
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/webhook_subscriptions");
+        ensure_https(&url)?;
+
+        let body = json!({
+            "webhook_url": webhook_url,
+            "enabled_events": enabled_events,
+            "version": "V3",
+        });
+
+        let resp = self
+            .client()
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 webhook_subscriptions create failed: {err}");
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 webhook_subscriptions response")?;
+        tracing::debug!(
+            webhook_url,
+            event_count = enabled_events.len(),
+            "[composio-direct] create_webhook_subscription_v3: subscription created"
+        );
+        Ok(result)
+    }
+
+    /// Update a webhook subscription's `enabled_events` list (and
+    /// optionally rotate the URL).
+    ///
+    /// Wire shape:
+    /// `PATCH {COMPOSIO_API_BASE_V3}/webhook_subscriptions/{id}` with
+    /// the same body shape as create (any field absent → unchanged).
+    ///
+    /// Used by
+    /// [`crate::openhuman::composio::webhook_receiver::subscription::ensure_subscription`]
+    /// to add a new event type to an existing subscription when the
+    /// user enables a trigger whose event type wasn't in the original
+    /// `enabled_events` list.
+    pub async fn update_webhook_subscription_v3(
+        &self,
+        subscription_id: &str,
+        webhook_url: Option<&str>,
+        enabled_events: Option<&[String]>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let subscription_id = subscription_id.trim();
+        if subscription_id.is_empty() {
+            anyhow::bail!(
+                "composio update_webhook_subscription_v3: subscription_id must not be empty"
+            );
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/webhook_subscriptions/{subscription_id}");
+        ensure_https(&url)?;
+
+        let mut body = serde_json::Map::new();
+        if let Some(u) = webhook_url.map(str::trim).filter(|u| !u.is_empty()) {
+            if !u.starts_with("https://") {
+                anyhow::bail!(
+                    "composio update_webhook_subscription_v3: webhook_url must be HTTPS, got: {u}"
+                );
+            }
+            body.insert("webhook_url".to_string(), json!(u));
+        }
+        if let Some(events) = enabled_events {
+            body.insert("enabled_events".to_string(), json!(events));
+        }
+        if body.is_empty() {
+            anyhow::bail!(
+                "composio update_webhook_subscription_v3: no fields to update — pass webhook_url or enabled_events"
+            );
+        }
+
+        let resp = self
+            .client()
+            .patch(&url)
+            .header("x-api-key", &self.api_key)
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 webhook_subscriptions update failed: {err}");
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 webhook_subscriptions update response")?;
+        tracing::debug!(
+            subscription_id,
+            "[composio-direct] update_webhook_subscription_v3: subscription updated"
+        );
+        Ok(result)
+    }
+
+    /// Fetch an existing webhook subscription by id.
+    ///
+    /// Wire shape:
+    /// `GET {COMPOSIO_API_BASE_V3}/webhook_subscriptions/{id}`.
+    /// Used by the lifecycle init to confirm a remembered subscription
+    /// still exists at app.composio.dev — if Composio returns 404 we
+    /// know we need to create a fresh one.
+    pub async fn get_webhook_subscription_v3(
+        &self,
+        subscription_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let subscription_id = subscription_id.trim();
+        if subscription_id.is_empty() {
+            anyhow::bail!(
+                "composio get_webhook_subscription_v3: subscription_id must not be empty"
+            );
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/webhook_subscriptions/{subscription_id}");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 webhook_subscriptions get failed: {err}");
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to decode Composio v3 webhook_subscriptions get response")?;
+        Ok(result)
+    }
+
+    /// Delete a webhook subscription.
+    ///
+    /// Wire shape:
+    /// `DELETE {COMPOSIO_API_BASE_V3}/webhook_subscriptions/{id}`.
+    /// Used by the receiver's "reset subscription" flow when the user
+    /// rotates the ngrok domain or wants to start clean.
+    pub async fn delete_webhook_subscription_v3(
+        &self,
+        subscription_id: &str,
+    ) -> anyhow::Result<()> {
+        let subscription_id = subscription_id.trim();
+        if subscription_id.is_empty() {
+            anyhow::bail!(
+                "composio delete_webhook_subscription_v3: subscription_id must not be empty"
+            );
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/webhook_subscriptions/{subscription_id}");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .delete(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 webhook_subscriptions delete failed: {err}");
+        }
+        tracing::debug!(
+            subscription_id,
+            "[composio-direct] delete_webhook_subscription_v3: subscription removed"
+        );
+        Ok(())
+    }
+
     async fn resolve_auth_config_id(&self, app_name: &str) -> anyhow::Result<String> {
         let url = format!("{COMPOSIO_API_BASE_V3}/auth_configs");
 

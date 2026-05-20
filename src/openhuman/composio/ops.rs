@@ -22,7 +22,8 @@ type OpResult<T> = std::result::Result<T, String>;
 use std::sync::Arc;
 
 use super::client::{
-    build_composio_client, create_composio_client, direct_authorize, direct_delete_connection,
+    build_composio_client, create_composio_client, direct_authorize, direct_create_trigger,
+    direct_delete_connection, direct_disable_trigger, direct_enable_trigger,
     direct_list_active_triggers, direct_list_available_triggers, direct_list_connections,
     direct_list_tools, ComposioClient, ComposioClientKind,
 };
@@ -36,6 +37,7 @@ use super::types::{
     ComposioExecuteResponse, ComposioGithubReposResponse, ComposioToolkitsResponse,
     ComposioToolsResponse, ComposioTriggerHistoryResult,
 };
+use super::webhook_receiver;
 
 /// Resolve a backend-mode [`ComposioClient`] from the root config, or
 /// return an error string that the caller can surface over RPC.
@@ -61,23 +63,6 @@ fn resolve_client(config: &Config) -> OpResult<ComposioClient> {
     build_composio_client(config).ok_or_else(|| {
         "composio unavailable: no backend session token. Sign in first \
          (auth_store_session)."
-            .to_string()
-    })
-}
-
-/// Trigger-write specific gate: produce a clearer error than the generic
-/// `resolve_client` message when a direct-mode user (BYO Composio API
-/// key, no backend session) tries to enable / disable / create a
-/// trigger. The actual blocker is webhook *delivery*, not auth — the
-/// generic "Sign in first" message misleads users into thinking they
-/// have an auth problem.
-fn resolve_client_for_trigger_writes(config: &Config) -> OpResult<ComposioClient> {
-    build_composio_client(config).ok_or_else(|| {
-        "composio triggers: enabling / disabling triggers requires the \
-         OpenHuman backend to receive Composio's HMAC-verified webhook \
-         deliveries. Local-only mode can list triggers but cannot \
-         register a delivery target. Sign in to the OpenHuman backend \
-         (auth_store_session) to enable trigger writes."
             .to_string()
     })
 }
@@ -769,14 +754,26 @@ pub async fn composio_create_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioCreateTriggerResponse>> {
     tracing::debug!(slug = %slug, ?connection_id, "[composio] rpc create_trigger");
-    let client = resolve_client_for_trigger_writes(config)?;
-    let resp = client
-        .create_trigger(slug, connection_id.as_deref(), trigger_config)
-        .await
-        .map_err(|e| {
-            report_composio_op_error("create_trigger", &e);
-            format!("[composio] create_trigger failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] create_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .create_trigger(slug, connection_id.as_deref(), trigger_config)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("create_trigger", &e);
+                format!("[composio] create_trigger failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            ensure_subscription_for_trigger_write(config, &direct, slug).await?;
+            direct_create_trigger(&direct, slug, connection_id.as_deref(), trigger_config)
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("create_trigger", &e);
+                    format!("[composio] create_trigger failed: {e:#}")
+                })?
+        }
+    };
     let trigger_id = resp.trigger_id.clone();
     Ok(RpcOutcome::new(
         resp,
@@ -858,14 +855,26 @@ pub async fn composio_enable_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioEnableTriggerResponse>> {
     tracing::debug!(slug = %slug, connection_id = %connection_id, "[composio] rpc enable_trigger");
-    let client = resolve_client_for_trigger_writes(config)?;
-    let resp = client
-        .enable_trigger(connection_id, slug, trigger_config)
-        .await
-        .map_err(|e| {
-            report_composio_op_error("enable_trigger", &e);
-            format!("[composio] enable_trigger failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] enable_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .enable_trigger(connection_id, slug, trigger_config)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("enable_trigger", &e);
+                format!("[composio] enable_trigger failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            ensure_subscription_for_trigger_write(config, &direct, slug).await?;
+            direct_enable_trigger(&direct, connection_id, slug, trigger_config)
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("enable_trigger", &e);
+                    format!("[composio] enable_trigger failed: {e:#}")
+                })?
+        }
+    };
     let trigger_id = resp.trigger_id.clone();
     Ok(RpcOutcome::new(
         resp,
@@ -878,17 +887,273 @@ pub async fn composio_disable_trigger(
     trigger_id: &str,
 ) -> OpResult<RpcOutcome<ComposioDisableTriggerResponse>> {
     tracing::debug!(trigger_id = %trigger_id, "[composio] rpc disable_trigger");
-    let client = resolve_client_for_trigger_writes(config)?;
-    let resp = client.disable_trigger(trigger_id).await.map_err(|e| {
-        report_composio_op_error("disable_trigger", &e);
-        format!("[composio] disable_trigger failed: {e:#}")
-    })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] disable_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            client.disable_trigger(trigger_id).await.map_err(|e| {
+                report_composio_op_error("disable_trigger", &e);
+                format!("[composio] disable_trigger failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => direct_disable_trigger(&direct, trigger_id)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("disable_trigger", &e);
+                format!("[composio] disable_trigger failed: {e:#}")
+            })?,
+    };
     let message = if resp.deleted {
         format!("composio: disabled trigger {trigger_id}")
     } else {
         format!("composio: trigger {trigger_id} was not active")
     };
     Ok(RpcOutcome::new(resp, vec![message]))
+}
+
+/// Direct-mode pre-flight: ensure the Composio webhook subscription
+/// at app.composio.dev is registered with the receiver's current
+/// public URL and includes the event type we're about to enable.
+///
+/// Called once per trigger-write operation (enable / create). The
+/// helper is cheap on the reuse path (one GET) and only does a POST
+/// or PATCH when something genuinely changed.
+///
+/// Fails the op if:
+///
+/// - The receiver isn't running (`public_webhook_url()` returns None).
+///   The user must configure ngrok in Settings → Triggers first.
+/// - Composio's subscription endpoints are unreachable.
+async fn ensure_subscription_for_trigger_write(
+    config: &Config,
+    direct: &std::sync::Arc<crate::openhuman::tools::ComposioTool>,
+    slug: &str,
+) -> OpResult<()> {
+    let webhook_url = webhook_receiver::public_webhook_url().ok_or_else(|| {
+        "composio direct-mode triggers: the local webhook receiver is not running. \
+         Open Settings → Triggers, paste your ngrok authtoken + static domain, and try again."
+            .to_string()
+    })?;
+    let desired_events = vec![slug.to_string()];
+    let (resolved, outcome) = webhook_receiver::ensure_subscription(
+        config,
+        direct,
+        &webhook_url,
+        &desired_events,
+        &config.composio.webhook.composio_webhook_subscription_id,
+    )
+    .await
+    .map_err(|e| {
+        report_composio_op_error("ensure_subscription", &e);
+        format!("[composio] ensure_subscription failed: {e:#}")
+    })?;
+    tracing::debug!(
+        outcome = ?outcome,
+        subscription_id = %resolved.id,
+        "[composio] direct-mode trigger write: webhook subscription resolved"
+    );
+    if outcome == webhook_receiver::EnsureOutcome::Created
+        && config.composio.webhook.composio_webhook_subscription_id != resolved.id
+    {
+        if let Err(e) = persist_subscription_id(&resolved.id).await {
+            tracing::warn!(
+                error = %e,
+                subscription_id = %resolved.id,
+                "[composio] failed to persist new subscription id; future restarts will recreate it"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load → mutate → save the subscription ID into `config.toml`.
+///
+/// Used right after [`webhook_receiver::ensure_subscription`] returns
+/// [`EnsureOutcome::Created`] so the ID survives the next restart.
+/// On reuse / patch outcomes we already had the ID persisted (the
+/// caller pulled it from config), so no write is needed.
+async fn persist_subscription_id(new_id: &str) -> Result<(), String> {
+    let mut on_disk = Config::load_or_init().await.map_err(|e| e.to_string())?;
+    if on_disk.composio.webhook.composio_webhook_subscription_id == new_id {
+        return Ok(()); // raced with another writer; nothing to do
+    }
+    on_disk.composio.webhook.composio_webhook_subscription_id = new_id.to_string();
+    on_disk.save().await.map_err(|e| e.to_string())
+}
+
+// ── Local webhook receiver (direct-mode trigger delivery) ─────────
+
+/// Status payload returned by [`composio_local_webhook_status`].
+///
+/// Shape is deliberately flat so the React Settings → Triggers panel
+/// can render it without a schema mapper.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComposioLocalWebhookStatus {
+    /// `"idle"`, `"connecting"`, `"ready"`, or `"error"` — driven by
+    /// [`webhook_receiver::tunnel_state`].
+    pub tunnel_state: String,
+    /// Currently registered Composio webhook URL (e.g.
+    /// `"https://abc-123.ngrok-free.dev/webhook"`). `None` when the
+    /// receiver is not active.
+    pub public_url: Option<String>,
+    /// Last observed tunnel error string (if any). Useful for the
+    /// settings panel to surface "ngrok said X".
+    pub error: Option<String>,
+    /// Composio webhook subscription id persisted in
+    /// `config.composio.webhook.composio_webhook_subscription_id`.
+    /// Surfaced read-only so the user can see "is this hooked up at
+    /// app.composio.dev yet?".
+    pub subscription_id: String,
+    /// Local loopback port the receiver binds to.
+    pub local_port: u16,
+    /// The static ngrok domain configured in
+    /// `config.composio.webhook.ngrok_domain`.
+    pub ngrok_domain: String,
+    /// True iff the user has stored an ngrok authtoken. The token
+    /// itself is never returned.
+    pub has_authtoken: bool,
+}
+
+/// Patch the non-secret webhook config fields and persist to disk.
+///
+/// Used by Settings → Triggers. The ngrok authtoken and Composio
+/// webhook signing secret never come through here — those go through
+/// dedicated credential setters because they belong in AuthService,
+/// not config.toml.
+pub async fn composio_set_webhook_config(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    ngrok_domain: Option<String>,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let mut on_disk = Config::load_or_init().await.map_err(|e| e.to_string())?;
+    if let Some(e) = enabled {
+        on_disk.composio.webhook.local_receiver_enabled = e;
+    }
+    if let Some(p) = port {
+        on_disk.composio.webhook.local_receiver_port = p;
+    }
+    if let Some(d) = ngrok_domain {
+        on_disk.composio.webhook.ngrok_domain = d.trim().to_string();
+    }
+    on_disk.save().await.map_err(|e| e.to_string())?;
+    composio_local_webhook_status(&on_disk).await
+}
+
+pub async fn composio_local_webhook_status(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let state = webhook_receiver::tunnel_state();
+    let (tunnel_state, error) = match &state {
+        webhook_receiver::TunnelState::Idle => ("idle".to_string(), None),
+        webhook_receiver::TunnelState::Connecting => ("connecting".to_string(), None),
+        webhook_receiver::TunnelState::Ready { .. } => ("ready".to_string(), None),
+        webhook_receiver::TunnelState::Error(msg) => ("error".to_string(), Some(msg.clone())),
+    };
+    let public_url = webhook_receiver::public_webhook_url();
+    let has_authtoken = crate::openhuman::credentials::ops::get_ngrok_authtoken(config)
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    let payload = ComposioLocalWebhookStatus {
+        tunnel_state,
+        public_url,
+        error,
+        subscription_id: config
+            .composio
+            .webhook
+            .composio_webhook_subscription_id
+            .clone(),
+        local_port: config.composio.webhook.local_receiver_port,
+        ngrok_domain: config.composio.webhook.ngrok_domain.clone(),
+        has_authtoken,
+    };
+    let log = format!(
+        "composio webhook: tunnel={}, sub_id={}",
+        payload.tunnel_state,
+        if payload.subscription_id.is_empty() {
+            "(none)"
+        } else {
+            payload.subscription_id.as_str()
+        },
+    );
+    Ok(RpcOutcome::new(payload, vec![log]))
+}
+
+/// Explicit (re)start of the local webhook receiver.
+///
+/// Idempotent: a successful start when the receiver is already up
+/// returns the current state with `"ready"`. Use this after pasting
+/// in a new ngrok authtoken or rotating the static domain — the
+/// receiver doesn't auto-restart on config-change events for v1.
+pub async fn composio_local_webhook_start(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let config_arc = std::sync::Arc::new(config.clone());
+    webhook_receiver::init(&config_arc)
+        .await
+        .map_err(|e| format!("[composio] local webhook start: {e}"))?;
+    let mut outcome = composio_local_webhook_status(config).await?;
+    outcome.logs.insert(
+        0,
+        "composio webhook: start requested (idempotent — no-op if already running)".to_string(),
+    );
+    Ok(outcome)
+}
+
+/// Explicit stop. Drops the tunnel + aborts the local listener.
+/// Returns the post-stop status (`"idle"`).
+pub async fn composio_local_webhook_stop(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    webhook_receiver::stop();
+    let mut outcome = composio_local_webhook_status(config).await?;
+    outcome
+        .logs
+        .insert(0, "composio webhook: stop requested".to_string());
+    Ok(outcome)
+}
+
+/// Round-trip self-test: hit the receiver's loopback `/healthz` via
+/// the ngrok public URL. Verifies the tunnel is reachable from the
+/// outside world without depending on Composio. Used by the
+/// "Test tunnel" button in Settings → Triggers.
+///
+/// Returns `Ok` with a single log line on success, or `Err` with the
+/// HTTP error / network error on failure.
+pub async fn composio_local_webhook_test(
+    _config: &Config,
+) -> OpResult<RpcOutcome<serde_json::Value>> {
+    let url = webhook_receiver::public_webhook_url().ok_or_else(|| {
+        "[composio] local webhook test: receiver is not running. Start it from \
+         Settings → Triggers first."
+            .to_string()
+    })?;
+    // The `public_webhook_url()` value ends in `/webhook`; swap to
+    // `/healthz` for the public reachability probe.
+    let probe_url = url.trim_end_matches("/webhook").to_string() + "/healthz";
+    let client = crate::openhuman::config::build_runtime_proxy_client_with_timeouts(
+        "composio.webhook.test",
+        15,
+        5,
+    );
+    let resp = client
+        .get(&probe_url)
+        .send()
+        .await
+        .map_err(|e| format!("[composio] local webhook test: GET {probe_url} failed: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+    if !status.is_success() {
+        return Err(format!(
+            "[composio] local webhook test: GET {probe_url} returned {status}: {body}"
+        ));
+    }
+    Ok(RpcOutcome::new(
+        serde_json::json!({ "ok": true, "url": probe_url, "body": body }),
+        vec![format!("composio webhook: round-trip OK via {probe_url}")],
+    ))
 }
 
 // ── Trigger history ────────────────────────────────────────────────

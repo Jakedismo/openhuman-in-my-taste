@@ -36,7 +36,8 @@ export type SettingsRoute =
   | 'intelligence'
   | 'webhooks-triggers'
   | 'composio-triggers'
-  | 'composio-routing';
+  | 'composio-routing'
+  | 'triggers';
 
 export interface BreadcrumbItem {
   label: string;
@@ -103,6 +104,7 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
     if (path.includes('/settings/webhooks-triggers')) return 'webhooks-triggers';
     if (path.includes('/settings/composio-triggers')) return 'composio-triggers';
     if (path.includes('/settings/composio-routing')) return 'composio-routing';
+    if (path.includes('/settings/triggers')) return 'triggers';
     if (path.includes('/settings/intelligence')) return 'intelligence';
     if (path.includes('/settings/recovery-phrase')) return 'recovery-phrase';
     if (path.includes('/settings/agent-chat')) return 'agent-chat';
@@ -218,6 +220,7 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
       case 'webhooks-triggers':
       case 'composio-triggers':
       case 'composio-routing':
+      case 'triggers':
       case 'notification-routing':
         return [settingsCrumb, developerCrumb];
 

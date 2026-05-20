@@ -1340,30 +1340,30 @@ async fn composio_list_available_triggers_routes_through_direct_mode() {
 }
 
 #[tokio::test]
-async fn composio_enable_trigger_explains_webhook_constraint_in_direct_mode() {
-    // Trigger *writes* (enable / disable / create) stay gated in
-    // direct mode because Composio's HMAC-verified webhook deliveries
-    // need a receiver — the OpenHuman backend supplies that today,
-    // and a local-only build has nowhere for trigger events to land.
-    //
-    // Before this commit, direct-mode users hit the generic
-    // `resolve_client` error ("composio unavailable: no backend
-    // session token. Sign in first (auth_store_session)."), which
-    // misled them into thinking auth was broken. The new gate
-    // explains the *real* constraint so a user can decide whether to
-    // sign in or accept that triggers won't fire in local-only mode.
+async fn composio_enable_trigger_points_at_settings_when_receiver_is_idle_in_direct_mode() {
+    // Direct-mode trigger writes now go through the local webhook
+    // receiver instead of the legacy backend-only gate. When the
+    // receiver isn't running (no ngrok authtoken / domain configured
+    // yet), the op surfaces a user-actionable error pointing at
+    // Settings → Triggers — NOT the old "composio unavailable / Sign
+    // in first" message that misled people into thinking auth was
+    // broken.
     let tmp = tempfile::tempdir().unwrap();
     let config = direct_mode_config(&tmp);
     let err = composio_enable_trigger(&config, "c-1", "GMAIL_NEW_GMAIL_MESSAGE", None)
         .await
         .unwrap_err();
     assert!(
-        err.contains("webhook"),
-        "trigger-write gate must explain the webhook-delivery constraint, got: {err}"
+        err.contains("local webhook receiver is not running"),
+        "error must surface the receiver-not-running diagnosis, got: {err}"
+    );
+    assert!(
+        err.contains("Settings → Triggers"),
+        "error must point the user at the Settings panel they need, got: {err}"
     );
     assert!(
         !err.starts_with("composio unavailable:"),
-        "trigger-write gate must NOT reuse the generic resolve_client message, got: {err}"
+        "must not regress to the legacy 'Sign in first' message, got: {err}"
     );
 }
 

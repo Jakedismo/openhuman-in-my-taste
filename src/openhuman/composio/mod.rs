@@ -50,6 +50,7 @@ pub mod schemas;
 pub mod tools;
 pub mod trigger_history;
 pub mod types;
+pub mod webhook_receiver;
 
 pub use action_tool::ComposioActionTool;
 pub use bus::{

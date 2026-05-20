@@ -72,10 +72,11 @@ pub use storage_memory::{
     StorageProviderSection, DEFAULT_CLOUD_LLM_MODEL,
 };
 pub use tools::{
-    BrowserComputerUseConfig, BrowserConfig, ComposioConfig, ComputerControlConfig, CurlConfig,
-    GitbooksConfig, HttpRequestConfig, IntegrationToggle, IntegrationsConfig, McpAuthConfig,
-    McpClientConfig, McpClientIdentityConfig, McpServerConfig, MultimodalConfig, SecretsConfig,
-    SeltzConfig, WebSearchConfig, COMPOSIO_MODE_BACKEND, COMPOSIO_MODE_DIRECT,
+    BrowserComputerUseConfig, BrowserConfig, ComposioConfig, ComposioWebhookConfig,
+    ComputerControlConfig, CurlConfig, GitbooksConfig, HttpRequestConfig, IntegrationToggle,
+    IntegrationsConfig, McpAuthConfig, McpClientConfig, McpClientIdentityConfig, McpServerConfig,
+    MultimodalConfig, SecretsConfig, SeltzConfig, WebSearchConfig, COMPOSIO_MODE_BACKEND,
+    COMPOSIO_MODE_DIRECT,
 };
 pub use update::{UpdateConfig, UpdateRestartStrategy};
 mod voice_server;
