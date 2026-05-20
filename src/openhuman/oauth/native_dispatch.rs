@@ -48,9 +48,7 @@ pub async fn try_dispatch_native(
         "GOOGLEDRIVE_LIST_FILES" | "GOOGLEDRIVE_FIND_FILE" => {
             Some(dispatch_drive_list(http, service, &args).await)
         }
-        "GOOGLEDRIVE_GET_FILE_METADATA" => {
-            Some(dispatch_drive_get(http, service, &args).await)
-        }
+        "GOOGLEDRIVE_GET_FILE_METADATA" => Some(dispatch_drive_get(http, service, &args).await),
         "GOOGLEDRIVE_CREATE_FILE" | "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT" => {
             Some(dispatch_drive_create(http, service, &args).await)
         }
