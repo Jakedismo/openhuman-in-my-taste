@@ -934,7 +934,25 @@ async fn ensure_subscription_for_trigger_write(
          Open Settings → Triggers, paste your ngrok authtoken + static domain, and try again."
             .to_string()
     })?;
-    let desired_events = vec![slug.to_string()];
+    // Composio's webhook subscriptions take a fixed set of canonical
+    // `composio.*` event types, NOT per-trigger slugs. ALL trigger
+    // deliveries arrive under `composio.trigger.message` — the actual
+    // trigger slug (e.g. `GMAIL_NEW_GMAIL_MESSAGE`) lives inside the
+    // payload metadata. Source of truth:
+    // https://github.com/ComposioHQ/composio/blob/next/ts/packages/core/src/types/webhookEvents.types.ts
+    //   export const WebhookEventTypes = {
+    //     CONNECTION_EXPIRED: 'composio.connected_account.expired',
+    //     TRIGGER_MESSAGE:    'composio.trigger.message',
+    //   };
+    //
+    // We subscribe to BOTH so the receiver can also react to
+    // OAuth-token-expired events later if we want — they cost nothing
+    // extra at the subscription layer.
+    let _ = slug; // event-type is fixed; slug only matters for the trigger instance upsert
+    let desired_events = vec![
+        "composio.trigger.message".to_string(),
+        "composio.connected_account.expired".to_string(),
+    ];
     let (resolved, outcome) = webhook_receiver::ensure_subscription(
         config,
         direct,

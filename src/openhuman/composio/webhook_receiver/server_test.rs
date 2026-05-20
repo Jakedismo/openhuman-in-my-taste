@@ -194,11 +194,23 @@ async fn webhook_with_valid_signature_dispatches_to_bus_and_returns_200() {
         let _ = tx.send(false);
     });
 
+    // Composio v3 envelope shape: {id, timestamp, type, metadata, data}
+    // where `type = "composio.trigger.message"` and the actual trigger
+    // slug lives in `metadata.trigger_slug`. See `WebhookTriggerPayloadV3`
+    // in https://github.com/ComposioHQ/composio/blob/next/python/composio/core/models/triggers.py
     let body = serde_json::json!({
-        "toolkit": "gmail",
-        "trigger": "GMAIL_NEW_GMAIL_MESSAGE",
-        "payload": {"messageId": "12345"},
-        "metadata": {"id": "evt_unit_test", "uuid": "uuid_unit_test"}
+        "id": "evt_unit_test",
+        "timestamp": "2026-05-20T22:00:00Z",
+        "type": "composio.trigger.message",
+        "metadata": {
+            "log_id": "log_unit_test",
+            "trigger_slug": "GMAIL_NEW_GMAIL_MESSAGE",
+            "trigger_id": "ti_unit_test",
+            "connected_account_id": "ca_unit_test",
+            "auth_config_id": "ac_unit_test",
+            "user_id": "u_unit_test"
+        },
+        "data": {"messageId": "12345"}
     });
     let body_str = serde_json::to_string(&body).unwrap();
     let ts = unix_now_secs().to_string();
@@ -226,27 +238,32 @@ async fn webhook_with_valid_signature_dispatches_to_bus_and_returns_200() {
 }
 
 #[tokio::test]
-async fn webhook_with_valid_signature_but_empty_toolkit_returns_400() {
+async fn webhook_with_valid_signature_but_empty_trigger_slug_returns_400() {
+    // v3 envelope with type=trigger.message but an empty
+    // `metadata.trigger_slug` — the receiver has no way to derive a
+    // useful toolkit/trigger pair, so it must reject rather than
+    // publish a malformed event onto the bus.
     let tmp = tempfile::tempdir().unwrap();
     let config = config_with_secret(&tmp);
     let (base, _h) = spawn_receiver(config).await;
     let body = serde_json::json!({
-        "toolkit": "",
-        "trigger": "GMAIL_NEW_GMAIL_MESSAGE",
-        "payload": {},
-        "metadata": {"id": "evt", "uuid": "uuid"}
+        "id": "evt_empty",
+        "timestamp": "2026-05-20T22:00:00Z",
+        "type": "composio.trigger.message",
+        "metadata": {"trigger_slug": ""},
+        "data": {}
     });
     let body_str = serde_json::to_string(&body).unwrap();
     let ts = unix_now_secs().to_string();
     let sig = sign(
-        "msg_empty_toolkit",
+        "msg_empty_slug",
         &ts,
         body_str.as_bytes(),
         SECRET.as_bytes(),
     );
     let resp = reqwest::Client::new()
         .post(format!("{base}/webhook"))
-        .header("webhook-id", "msg_empty_toolkit")
+        .header("webhook-id", "msg_empty_slug")
         .header("webhook-timestamp", ts)
         .header("webhook-signature", sig)
         .body(body_str)
@@ -254,6 +271,39 @@ async fn webhook_with_valid_signature_but_empty_toolkit_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn webhook_with_connected_account_expired_event_returns_200_without_dispatch() {
+    // Currently we only wire trigger events onto the bus. Connection-
+    // expired events are acknowledged with 200 (so Composio doesn't
+    // retry) but not dispatched — a future commit can add a domain
+    // event for them. This test pins that contract so accidentally
+    // dispatching the wrong shape onto ComposioTriggerReceived
+    // surfaces immediately.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = config_with_secret(&tmp);
+    let (base, _h) = spawn_receiver(config).await;
+    let body = serde_json::json!({
+        "id": "evt_expired",
+        "timestamp": "2026-05-20T22:00:00Z",
+        "type": "composio.connected_account.expired",
+        "metadata": {},
+        "data": {}
+    });
+    let body_str = serde_json::to_string(&body).unwrap();
+    let ts = unix_now_secs().to_string();
+    let sig = sign("msg_expired", &ts, body_str.as_bytes(), SECRET.as_bytes());
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/webhook"))
+        .header("webhook-id", "msg_expired")
+        .header("webhook-timestamp", ts)
+        .header("webhook-signature", sig)
+        .body(body_str)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
 #[tokio::test]
