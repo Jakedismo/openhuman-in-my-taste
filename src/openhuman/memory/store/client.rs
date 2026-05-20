@@ -491,26 +491,57 @@ impl MemoryClient {
 /// silent-NULL behaviour was the original symptom: chunks present
 /// but no vectors.
 fn build_workspace_embedder(workspace_dir: &std::path::Path) -> Arc<dyn EmbeddingProvider> {
-    let config_path = workspace_dir.join("config.toml");
-    let config: Config = match std::fs::read_to_string(&config_path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                log::warn!(
-                    "[memory:embedder] failed to parse {} ({e}); falling back to Config::default()",
-                    config_path.display()
-                );
-                Config::default()
+    // The OpenHuman layout puts the config one directory up from the
+    // workspace (`~/.openhuman/users/<user_id>/config.toml` with
+    // workspace at `<user_id>/workspace`). Older / dev layouts kept
+    // config inside the workspace. Try both, in priority order.
+    let candidates: Vec<std::path::PathBuf> = std::iter::empty()
+        .chain(
+            workspace_dir
+                .parent()
+                .map(|p| p.join("config.toml"))
+                .into_iter(),
+        )
+        .chain(std::iter::once(workspace_dir.join("config.toml")))
+        .collect();
+    let mut loaded_from: Option<std::path::PathBuf> = None;
+    let mut config = Config::default();
+    for candidate in &candidates {
+        match std::fs::read_to_string(candidate) {
+            Ok(text) => match toml::from_str::<Config>(&text) {
+                Ok(cfg) => {
+                    config = cfg;
+                    loaded_from = Some(candidate.clone());
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[memory:embedder] failed to parse {} ({e}); trying next candidate",
+                        candidate.display()
+                    );
+                }
+            },
+            Err(_) => {
+                // Not present — try the next candidate.
             }
-        },
-        Err(_) => {
-            log::debug!(
-                "[memory:embedder] {} not present yet; using Config::default()",
-                config_path.display()
-            );
-            Config::default()
         }
-    };
+    }
+    if loaded_from.is_none() {
+        log::debug!(
+            "[memory:embedder] no config.toml found near workspace_dir={} \
+             (tried {:?}); using Config::default()",
+            workspace_dir.display(),
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        );
+    } else {
+        log::debug!(
+            "[memory:embedder] loaded config from {}",
+            loaded_from.as_ref().unwrap().display()
+        );
+    }
 
     let local_embedding_model = config.workload_local_model("embeddings");
     let (provider, model, dims) =
