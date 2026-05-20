@@ -278,19 +278,26 @@ To upgrade `UnifiedMemory::upsert_document` to LLM-driven graph extraction:
 
 ### Composio direct-mode triggers (Option D)
 
-The trigger family — `composio_list_available_triggers`, `composio_list_triggers`, `composio_enable_trigger`, `composio_disable_trigger`, `composio_create_trigger`, `composio_list_github_repos` — still routes through the **backend-only** `resolve_client` helper in `src/openhuman/composio/ops.rs:52`. In direct mode this surfaces the misleading "composio unavailable: no backend session token. Sign in first (auth_store_session)." error in the per-toolkit Manage dialog (`<TriggerToggles>`), because the helper has no direct-mode arm.
+**Status (2026-05-20, commit `26af2474`):** Read paths migrated, write paths intentionally still gated. Interim pre-work from the original entry is **done**: read ops surface real catalog data instead of empty / misleading-error stubs, and writes surface a clear "needs backend webhook receiver" gate.
 
-A working direct-mode trigger implementation needs:
+What landed in `26af2474`:
 
-1. **Composio v3 trigger client** in `src/openhuman/composio/client.rs` — `direct_list_triggers`, `direct_list_active_triggers`, `direct_enable_trigger`, `direct_disable_trigger`. Modeled on `direct_list_connections` / `direct_authorize`. Hits `backend.composio.dev/api/v3/triggers_types*` and `/triggers/instances*` with the user's own API key.
-2. **Local webhook receiver** — Composio delivers trigger events to a public HTTPS URL. This is the structural blocker: in direct mode there is no OpenHuman backend fronting the receiver. Needs either ngrok / cloudflare-tunnel auto-provisioning, a relay tied to the existing A8 tunnels surface, or a user-supplied public URL.
-3. **HMAC verification** of inbound webhook payloads using the per-user webhook secret from app.composio.dev.
-4. **Webhook → event_bus dispatch** so the existing `trigger_triage` / `trigger_reactor` agents pick up the event.
-5. **Op rewiring** — replace `resolve_client(config)?` in the trigger ops with `create_composio_client(config)` + `ComposioClientKind::{Backend, Direct}` branching (same pattern as `composio_authorize` / `composio_list_connections`).
+* `composio_list_triggers` and `composio_list_available_triggers` route through `create_composio_client(config)` + `ComposioClientKind::{Backend, Direct}` matching the rest of the migrated ops.
+* New v3 helpers in `src/openhuman/tools/impl/network/composio.rs`: `list_active_triggers_v3` (GET `/api/v3/trigger_instances/active`) and `list_trigger_types_v3` (GET `/api/v3/triggers_types?toolkit_slugs=…`).
+* New mapper helpers in `src/openhuman/composio/client.rs`: `direct_list_active_triggers` (reshapes v3 trigger instances into canonical `ComposioActiveTriggersResponse`, derives `toolkit` from slug prefix, maps `disabled_at` → `state`) and `direct_list_available_triggers` (reshapes v3 trigger types into canonical `ComposioAvailableTriggersResponse`, extracts `required_config_keys` from the v3 `config` JSON-Schema-style descriptor).
+* New `resolve_client_for_trigger_writes` gate on `composio_enable_trigger` / `composio_disable_trigger` / `composio_create_trigger`: the error explains the *real* constraint ("requires the OpenHuman backend to receive Composio's HMAC-verified webhook deliveries") instead of the misleading "Sign in first (auth_store_session)".
 
-Pre-work that closes the misleading-error gap without doing the full feature (interim, ~1h): make the trigger ops return an empty list in direct mode for the read paths and a clear "not yet supported in direct mode — see todo" error for the write paths. The UI's `<TriggerToggles>` already handles the empty-list case gracefully.
+What's left for full direct-mode trigger writes (still deferred):
 
-**Do this after** the rest of the local-first goals settle (Phase 6 local replacements + Phase 7 defaults/cleanup). The trigger surface is not on the critical path for chat / memory / channels / native OAuth working.
+1. **Local webhook receiver** — Composio delivers trigger events to a public HTTPS URL. This is the structural blocker: in direct mode there is no OpenHuman backend fronting the receiver. Needs either ngrok / cloudflare-tunnel auto-provisioning, a relay tied to the existing A8 tunnels surface, or a user-supplied public URL.
+2. **HMAC verification** of inbound webhook payloads using the per-user webhook secret from app.composio.dev.
+3. **Webhook → event_bus dispatch** so the existing `trigger_triage` / `trigger_reactor` agents pick up the event.
+4. **Direct-mode write helpers** in `src/openhuman/composio/client.rs` — `direct_enable_trigger`, `direct_disable_trigger`, `direct_create_trigger` (hits `PATCH /api/v3/trigger_instances/manage/{triggerId}`, `POST /api/v3/trigger_instances/{slug}/upsert`). Cheap once the webhook receiver lands.
+5. **Op rewiring** — swap `resolve_client_for_trigger_writes(config)?` for the same factory match as the reads.
+
+`composio_list_github_repos` still uses the original `resolve_client` gate (legitimately backend-only — direct mode has no equivalent for the per-connection GitHub repo enumeration; would need a separate direct-mode GitHub API client).
+
+**Do the remaining work after** the rest of the local-first goals settle. The read-side fix in `26af2474` is enough to unblock the trigger UI for direct-mode users in browse/inspect mode; writes will surface the new clearer error.
 
 ## Risks & open questions
 
