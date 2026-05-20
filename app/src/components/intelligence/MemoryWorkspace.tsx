@@ -29,6 +29,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { useT } from '../../lib/i18n/I18nContext';
 import type { ToastNotification } from '../../types/intelligence';
+import { openPath } from '@tauri-apps/plugin-opener';
+
 import { openUrl } from '../../utils/openUrl';
 import {
   type GraphExportResponse,
@@ -61,24 +63,57 @@ interface MemoryWorkspaceProps {
 const SYNCABLE_TOOLKITS: ReadonlySet<string> = new Set(['gmail']);
 
 /**
- * Trigger the `obsidian://open?path=<abs>` deep link via the OS shell.
+ * Open the memory-tree content folder.
  *
- * We deliberately route through `openUrl` (which delegates to
- * `tauri-plugin-opener`) rather than setting `window.location.href`.
- * The webview-host intent handler intercepts in-app navigations and
- * does NOT punt custom schemes to the OS, so a direct
- * `window.location.href = "obsidian://…"` either no-ops or navigates
- * the React app away from the Memory tab. The opener plugin hands the
- * URL straight to the system handler so Obsidian launches as a
- * separate process.
+ * Previous behaviour fired only the `obsidian://open?path=<abs>` deep
+ * link. That URI scheme requires the directory to be already
+ * registered in Obsidian's vault picker — the deep link cannot
+ * register a new vault, it can only open vaults Obsidian already
+ * knows about. Users who clicked the button on a fresh install saw
+ * Obsidian pop up with "Unable to find a vault for the URL …" even
+ * though the folder existed on disk and was correctly seeded with
+ * `.obsidian/graph.json` + `types.json`.
+ *
+ * New behaviour: open the folder in the OS file manager
+ * (Finder / Explorer / xdg-open). The user sees the chunks /
+ * summaries / wiki tree immediately. If they want the Obsidian
+ * graph-view, they can drag the folder onto Obsidian once
+ * ("Open folder as vault") and the deep link will work on every
+ * subsequent click. We also fire the obsidian:// URL in parallel —
+ * it's a no-op for unregistered vaults but lights up the
+ * already-registered case with no extra round-trip.
+ *
+ * `openPath` from `tauri-plugin-opener` is the cross-platform
+ * filesystem-path opener; falls back to `xdg-open` / `start` /
+ * `open` per platform.
  */
-async function openVaultInObsidian(contentRootAbs: string): Promise<void> {
-  const url = `obsidian://open?path=${encodeURIComponent(contentRootAbs)}`;
-  console.debug('[ui-flow][memory-workspace] open vault in Obsidian url=%s', url);
+async function openVaultContentFolder(contentRootAbs: string): Promise<void> {
+  console.debug(
+    '[ui-flow][memory-workspace] open vault content folder path=%s',
+    contentRootAbs
+  );
+  // Open the folder in the OS file manager — always works.
   try {
+    await openPath(contentRootAbs);
+  } catch (err) {
+    console.error(
+      '[ui-flow][memory-workspace] openPath failed for %s',
+      contentRootAbs,
+      err
+    );
+  }
+  // Best-effort: also try the Obsidian deep link. If Obsidian has the
+  // vault registered, this lights up the graph-view alongside Finder.
+  // If not, Obsidian shows its own "Unable to find a vault" toast
+  // (cosmetic only — Finder still opens the folder).
+  try {
+    const url = `obsidian://open?path=${encodeURIComponent(contentRootAbs)}`;
     await openUrl(url);
   } catch (err) {
-    console.error('[ui-flow][memory-workspace] openUrl failed', err);
+    console.debug(
+      '[ui-flow][memory-workspace] obsidian deep-link skipped (non-fatal): %o',
+      err
+    );
   }
 }
 
@@ -310,7 +345,7 @@ export function MemoryWorkspace({ onToast }: MemoryWorkspaceProps) {
           {graph && (
             <button
               type="button"
-              onClick={() => void openVaultInObsidian(graph.content_root_abs)}
+              onClick={() => void openVaultContentFolder(graph.content_root_abs)}
               data-testid="memory-open-in-obsidian"
               className="inline-flex items-center gap-2 rounded-lg
                          bg-violet-500 px-4 py-2 text-sm font-semibold text-white
