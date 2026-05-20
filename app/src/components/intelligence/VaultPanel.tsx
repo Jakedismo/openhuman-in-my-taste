@@ -2,51 +2,159 @@
  * Knowledge vaults — point the assistant at a local folder and have its
  * files mirrored into memory under namespace `vault:<id>`. Sits inside
  * the Intelligence ▸ Memory tab.
+ *
+ * Sync is async: the panel enqueues a job via `openhumanVaultSync` and
+ * polls `openhumanVaultSyncStatus(job_id)` every 2 s until the snapshot
+ * reaches `completed` or `failed`. While running, the row shows a
+ * progress bar with `processed / total` (or just `processed` when the
+ * walk hasn't populated `total`) plus a tooltip with the current file
+ * path. Spam-clicking Sync is safe — the backend coalesces duplicate
+ * enqueues for the same vault and the panel just resumes polling.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ToastNotification } from '../../types/intelligence';
 import {
   type CoreVault,
-  type CoreVaultSyncReport,
+  type CoreVaultSyncJobSnapshot,
   openhumanVaultCreate,
   openhumanVaultList,
   openhumanVaultRemove,
   openhumanVaultSync,
+  openhumanVaultSyncAll,
+  openhumanVaultSyncStatus,
 } from '../../utils/tauriCommands/vault';
 
 interface VaultPanelProps {
   onToast?: (toast: Omit<ToastNotification, 'id'>) => void;
 }
 
+/** How often we re-poll an in-flight sync job. */
+const POLL_INTERVAL_MS = 2_000;
+
 export function VaultPanel({ onToast }: VaultPanelProps) {
   const [vaults, setVaults] = useState<CoreVault[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<Record<string, 'sync' | 'remove' | undefined>>({});
+  const [busy, setBusy] = useState<Record<string, 'remove' | undefined>>({});
   const [creating, setCreating] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [syncingAll, setSyncingAll] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPath, setNewPath] = useState('');
   const [newExcludes, setNewExcludes] = useState('');
+  /** Per-vault current job snapshot. `null` when no sync is in flight. */
+  const [syncJobs, setSyncJobs] = useState<Record<string, CoreVaultSyncJobSnapshot | null>>(
+    {}
+  );
+  /**
+   * Active poll timers, keyed by `job_id`. Held in a ref because we
+   * never want a re-render just because we set/clear a timeout —
+   * `useState` would loop us through the effect cleanup.
+   */
+  const pollTimers = useRef<Record<string, number>>({});
+  /** Mounted guard so async resolves don't try to setState after unmount. */
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const id of Object.keys(pollTimers.current)) {
+        window.clearTimeout(pollTimers.current[id]);
+      }
+      pollTimers.current = {};
+    };
+  }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
       const resp = await openhumanVaultList();
+      if (!mounted.current) return;
       setVaults(resp.result);
     } catch (err) {
       console.error('[ui-flow][vault-panel] list failed', err);
-      setLoadError(err instanceof Error ? err.message : String(err));
+      if (mounted.current) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  /**
+   * Poll `vault_sync_status` once. If still queued/running, schedule
+   * the next tick. On completion, surface a toast, clear the in-flight
+   * state, and refresh the vault list (file_count + last_synced_at
+   * land via the underlying touch in `sync_vault`).
+   */
+  const pollSync = useCallback(
+    async (jobId: string, vaultId: string, vaultName: string) => {
+      try {
+        const resp = await openhumanVaultSyncStatus(jobId);
+        if (!mounted.current) return;
+        const snap = resp.result;
+        if (!snap) {
+          // Job id unknown — likely a process restart cleared the
+          // registry. Drop the in-flight state silently.
+          setSyncJobs(prev => ({ ...prev, [vaultId]: null }));
+          delete pollTimers.current[jobId];
+          return;
+        }
+        setSyncJobs(prev => ({ ...prev, [vaultId]: snap }));
+
+        if (snap.status === 'queued' || snap.status === 'running') {
+          pollTimers.current[jobId] = window.setTimeout(() => {
+            void pollSync(jobId, vaultId, vaultName);
+          }, POLL_INTERVAL_MS);
+          return;
+        }
+
+        // Terminal: completed | failed. Surface a toast with the
+        // final report counts if we have one.
+        delete pollTimers.current[jobId];
+        const r = snap.report;
+        if (snap.status === 'completed' && r) {
+          onToast?.({
+            type: r.failed > 0 ? 'info' : 'success',
+            title: `Synced "${vaultName}"`,
+            message:
+              `Ingested ${r.ingested}, unchanged ${r.unchanged}, removed ${r.removed}` +
+              (r.failed > 0 ? `, failed ${r.failed}` : '') +
+              (r.skipped_unsupported > 0 ? `, skipped ${r.skipped_unsupported}` : '') +
+              ` · ${(r.duration_ms / 1000).toFixed(1)}s`,
+          });
+        } else if (snap.status === 'failed') {
+          onToast?.({
+            type: 'error',
+            title: `Sync failed for "${vaultName}"`,
+            message: snap.errors.slice(-1)[0] ?? 'Sync job failed without a recorded error.',
+          });
+        }
+        // Clear the in-flight snapshot a beat after the toast so the
+        // progress bar collapses on the next render.
+        setSyncJobs(prev => ({ ...prev, [vaultId]: null }));
+        await reload();
+      } catch (err) {
+        console.error('[ui-flow][vault-panel] sync status poll failed', err);
+        if (!mounted.current) return;
+        delete pollTimers.current[jobId];
+        setSyncJobs(prev => ({ ...prev, [vaultId]: null }));
+        onToast?.({
+          type: 'error',
+          title: 'Sync polling failed',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [onToast, reload]
+  );
 
   const handleCreate = useCallback(
     async (event: React.FormEvent) => {
@@ -87,40 +195,92 @@ export function VaultPanel({ onToast }: VaultPanelProps) {
 
   const handleSync = useCallback(
     async (vault: CoreVault) => {
-      setBusy(b => ({ ...b, [vault.id]: 'sync' }));
       try {
         const resp = await openhumanVaultSync(vault.id);
-        const r: CoreVaultSyncReport = resp.result;
-        onToast?.({
-          type: r.failed > 0 ? 'info' : 'success',
-          title: `Synced "${vault.name}"`,
-          message:
-            `Ingested ${r.ingested}, unchanged ${r.unchanged}, removed ${r.removed}` +
-            (r.failed > 0 ? `, failed ${r.failed}` : '') +
-            (r.skipped_unsupported > 0 ? `, skipped ${r.skipped_unsupported}` : '') +
-            ` · ${(r.duration_ms / 1000).toFixed(1)}s`,
-        });
-        await reload();
+        const handle = resp.result;
+        // Seed an immediate snapshot from the handle so the progress
+        // affordance lights up without waiting for the first poll
+        // round-trip. `processed`/`total` are 0/null at this point.
+        setSyncJobs(prev => ({
+          ...prev,
+          [vault.id]: {
+            job_id: handle.job_id,
+            vault_id: handle.vault_id,
+            status: handle.status,
+            processed: 0,
+            total: null,
+            current_file: null,
+            errors: [],
+            report: null,
+            queued_at: new Date().toISOString(),
+            started_at: null,
+            completed_at: null,
+          },
+        }));
+        void pollSync(handle.job_id, vault.id, vault.name);
       } catch (err) {
-        console.error('[ui-flow][vault-panel] sync failed', err);
+        console.error('[ui-flow][vault-panel] sync enqueue failed', err);
         onToast?.({
           type: 'error',
-          title: 'Sync failed',
+          title: 'Sync failed to start',
           message: err instanceof Error ? err.message : String(err),
         });
-      } finally {
-        setBusy(b => ({ ...b, [vault.id]: undefined }));
       }
     },
-    [onToast, reload]
+    [onToast, pollSync]
   );
+
+  const handleSyncAll = useCallback(async () => {
+    setSyncingAll(true);
+    try {
+      const resp = await openhumanVaultSyncAll();
+      // Seed per-vault snapshots from the handles, then start
+      // polling each. Coalesce already deduped on the backend; the
+      // returned handles cover every registered vault.
+      const seeded: Record<string, CoreVaultSyncJobSnapshot> = {};
+      const now = new Date().toISOString();
+      for (const h of resp.result) {
+        seeded[h.vault_id] = {
+          job_id: h.job_id,
+          vault_id: h.vault_id,
+          status: h.status,
+          processed: 0,
+          total: null,
+          current_file: null,
+          errors: [],
+          report: null,
+          queued_at: now,
+          started_at: null,
+          completed_at: null,
+        };
+      }
+      setSyncJobs(prev => ({ ...prev, ...seeded }));
+      const byVaultId = new Map(vaults.map(v => [v.id, v.name]));
+      for (const h of resp.result) {
+        void pollSync(h.job_id, h.vault_id, byVaultId.get(h.vault_id) ?? h.vault_id);
+      }
+      onToast?.({
+        type: 'success',
+        title: 'Sync all',
+        message: `Enqueued ${resp.result.length} sync job(s).`,
+      });
+    } catch (err) {
+      console.error('[ui-flow][vault-panel] sync_all failed', err);
+      onToast?.({
+        type: 'error',
+        title: 'Sync all failed',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSyncingAll(false);
+    }
+  }, [onToast, pollSync, vaults]);
 
   const handleRemove = useCallback(
     async (vault: CoreVault) => {
       const purge = window.confirm(
         `Remove vault "${vault.name}"?\n\nClick OK to also purge its memory (delete all ${vault.file_count} ingested document(s)).\nClick Cancel to keep the documents in memory.`
       );
-      // Confirm step #2: ensure the user actually meant to remove the vault row.
       const ok = window.confirm(`Really remove vault "${vault.name}"?`);
       if (!ok) return;
       setBusy(b => ({ ...b, [vault.id]: 'remove' }));
@@ -161,16 +321,32 @@ export function VaultPanel({ onToast }: VaultPanelProps) {
             Point at a local folder; files are chunked and mirrored into memory.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setShowForm(v => !v)}
-          className="inline-flex items-center gap-1 rounded-md border border-primary-300 bg-white dark:bg-neutral-900
-                     px-3 py-1.5 text-xs font-semibold text-primary-700 dark:text-primary-300 shadow-sm
-                     transition-colors hover:bg-primary-50 dark:hover:bg-primary-500/15
-                     focus:outline-none focus:ring-2 focus:ring-primary-200"
-          data-testid="vault-add-toggle">
-          {showForm ? 'Cancel' : '+ Add vault'}
-        </button>
+        <div className="flex items-center gap-2">
+          {vaults.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => void handleSyncAll()}
+              disabled={syncingAll}
+              className="inline-flex items-center gap-1 rounded-md border border-primary-300 bg-white dark:bg-neutral-900
+                         px-3 py-1.5 text-xs font-semibold text-primary-700 dark:text-primary-300 shadow-sm
+                         transition-colors hover:bg-primary-50 dark:hover:bg-primary-500/15
+                         focus:outline-none focus:ring-2 focus:ring-primary-200
+                         disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="vault-sync-all">
+              {syncingAll ? 'Queuing…' : 'Sync all'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => setShowForm(v => !v)}
+            className="inline-flex items-center gap-1 rounded-md border border-primary-300 bg-white dark:bg-neutral-900
+                       px-3 py-1.5 text-xs font-semibold text-primary-700 dark:text-primary-300 shadow-sm
+                       transition-colors hover:bg-primary-50 dark:hover:bg-primary-500/15
+                       focus:outline-none focus:ring-2 focus:ring-primary-200"
+            data-testid="vault-add-toggle">
+            {showForm ? 'Cancel' : '+ Add vault'}
+          </button>
+        </div>
       </div>
 
       {showForm ? (
@@ -246,6 +422,8 @@ export function VaultPanel({ onToast }: VaultPanelProps) {
         <ul className="divide-y divide-stone-100 dark:divide-neutral-800" data-testid="vault-list">
           {vaults.map(v => {
             const state = busy[v.id];
+            const snap = syncJobs[v.id] ?? null;
+            const syncing = snap?.status === 'queued' || snap?.status === 'running';
             return (
               <li key={v.id} className="flex items-center justify-between gap-3 py-2">
                 <div className="min-w-0 flex-1">
@@ -263,21 +441,40 @@ export function VaultPanel({ onToast }: VaultPanelProps) {
                       ? `synced ${formatRelative(v.last_synced_at)}`
                       : 'never synced'}
                   </div>
+                  {syncing && snap ? (
+                    <div
+                      className="mt-1 text-[11px] text-primary-700 dark:text-primary-300"
+                      data-testid={`vault-sync-progress-${v.id}`}>
+                      <span className="font-medium">
+                        {snap.status === 'queued' ? 'Queued' : 'Syncing'} —{' '}
+                        {snap.processed.toLocaleString()}
+                        {snap.total != null ? ` / ${snap.total.toLocaleString()}` : ''} file(s)
+                      </span>
+                      {snap.current_file ? (
+                        <span
+                          className="ml-1 truncate text-stone-500 dark:text-neutral-400"
+                          title={snap.current_file}>
+                          · {snap.current_file}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => void handleSync(v)}
-                    disabled={state === 'sync' || state === 'remove'}
+                    disabled={syncing || state === 'remove'}
                     className="rounded-md border border-primary-300 bg-white dark:bg-neutral-900 px-3 py-1.5 text-xs
                                font-semibold text-primary-700 dark:text-primary-300 shadow-sm transition-colors
-                               hover:bg-primary-50 dark:hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-50">
-                    {state === 'sync' ? 'Syncing…' : 'Sync'}
+                               hover:bg-primary-50 dark:hover:bg-primary-500/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    data-testid={`vault-sync-${v.id}`}>
+                    {syncing ? 'Syncing…' : 'Sync'}
                   </button>
                   <button
                     type="button"
                     onClick={() => void handleRemove(v)}
-                    disabled={state === 'sync' || state === 'remove'}
+                    disabled={syncing || state === 'remove'}
                     className="rounded-md border border-coral-200 dark:border-coral-500/30 bg-white dark:bg-neutral-900 px-3 py-1.5 text-xs
                                font-semibold text-coral-700 dark:text-coral-300 shadow-sm transition-colors
                                hover:bg-coral-50 dark:hover:bg-coral-500/10 disabled:cursor-not-allowed disabled:opacity-50">
