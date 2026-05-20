@@ -43,6 +43,7 @@ use super::cloud_transcribe::{transcribe_cloud, CloudTranscribeOptions, CloudTra
 use super::local_speech::{synthesize_piper, PiperOptions};
 use super::local_transcribe::{transcribe_whisper, WhisperTranscribeOptions};
 use super::reply_speech::{synthesize_reply, ReplySpeechOptions, ReplySpeechResult};
+use super::system_speech::{synthesize_system_say, SystemSpeechOptions};
 use crate::openhuman::config::Config;
 use crate::rpc::RpcOutcome;
 
@@ -301,6 +302,63 @@ impl TtsProvider for PiperTtsProvider {
 }
 
 // ---------------------------------------------------------------------------
+// System (host-native) TTS
+// ---------------------------------------------------------------------------
+
+/// System-native TTS. Currently macOS-only — wraps `/usr/bin/say` plus
+/// `/usr/bin/afconvert` (see [`super::system_speech`]). Exists primarily
+/// because the upstream Rhasspy Piper macOS release ships a broken
+/// dylib chain, so `"piper"` is unusable out-of-the-box on macOS until
+/// the user manually sources the missing `libespeak-ng.1.dylib` /
+/// `libonnxruntime.1.14.1.dylib` / `libpiper_phonemize.1.dylib`. The
+/// non-macOS `synthesize` call returns an explicit "macOS-only" error.
+pub struct SystemTtsProvider {
+    voice: Option<String>,
+}
+
+impl SystemTtsProvider {
+    pub fn new(voice: Option<String>) -> Self {
+        let voice = voice.and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        Self { voice }
+    }
+}
+
+#[async_trait]
+impl TtsProvider for SystemTtsProvider {
+    fn name(&self) -> &'static str {
+        "system"
+    }
+
+    async fn synthesize(
+        &self,
+        config: &Config,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<RpcOutcome<ReplySpeechResult>, String> {
+        let resolved_voice = voice
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.voice.clone());
+        debug!(
+            "{LOG_PREFIX} system TTS dispatch voice={} chars={}",
+            resolved_voice.as_deref().unwrap_or("<default>"),
+            text.len()
+        );
+        let opts = SystemSpeechOptions {
+            voice: resolved_voice,
+        };
+        synthesize_system_say(config, text, &opts).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Factory entry points (mirrors embeddings/factory.rs)
 // ---------------------------------------------------------------------------
 
@@ -346,6 +404,9 @@ pub fn create_stt_provider(
 /// Supported provider names:
 /// - `"cloud"` → backend ElevenLabs proxy with viseme alignment
 /// - `"piper"` → local Piper subprocess via `PIPER_BIN`
+/// - `"system"` → host-native TTS (macOS only — wraps `/usr/bin/say`).
+///   Falls back here when the broken upstream Piper macOS release would
+///   otherwise leave the user with no working local-TTS option.
 ///
 /// Kokoro is **not** implemented in this cut — the integration shipped with
 /// Piper because `PIPER_BIN` is already reserved in `.env.example` and the
@@ -358,20 +419,34 @@ pub fn create_tts_provider(
     _config: &Config,
 ) -> anyhow::Result<Box<dyn TtsProvider>> {
     debug!("{LOG_PREFIX} create_tts_provider provider={provider} voice={voice}");
-    let voice = if voice.trim().is_empty() {
+    let trimmed_voice = voice.trim();
+    let piper_voice = if trimmed_voice.is_empty() {
         DEFAULT_PIPER_VOICE
     } else {
-        voice
+        trimmed_voice
     };
     match provider.trim() {
-        "cloud" => Ok(Box::new(CloudTtsProvider::new(if voice.is_empty() {
+        "cloud" => Ok(Box::new(CloudTtsProvider::new(if trimmed_voice.is_empty() {
             None
         } else {
-            Some(voice.to_string())
+            Some(trimmed_voice.to_string())
         }))),
-        "piper" => Ok(Box::new(PiperTtsProvider::new(voice))),
+        "piper" => Ok(Box::new(PiperTtsProvider::new(piper_voice))),
+        // System TTS uses host-native voice IDs (e.g. macOS `say -v
+        // Samantha`), which don't share a namespace with Piper voice
+        // IDs. Only forward the voice argument when it looks non-Piper
+        // (no underscore, no dash-quality suffix) — otherwise let the
+        // OS pick its default voice rather than choke on an unknown
+        // `en_US-lessac-medium`.
+        "system" => Ok(Box::new(SystemTtsProvider::new(
+            if trimmed_voice.is_empty() || trimmed_voice.contains('_') {
+                None
+            } else {
+                Some(trimmed_voice.to_string())
+            },
+        ))),
         unknown => Err(anyhow::anyhow!(
-            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\""
+            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\", \"system\""
         )),
     }
 }
@@ -486,6 +561,38 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("kokoro"), "should name the provider: {msg}");
         assert!(msg.contains("unknown"), "should say unknown: {msg}");
+        // The error surfaces the supported list — make sure 'system' is in
+        // it so a user typo'd as "say" or "macos" gets pointed at the right
+        // provider id.
+        assert!(
+            msg.contains("system"),
+            "supported-provider list should advertise 'system': {msg}"
+        );
+    }
+
+    #[test]
+    fn tts_factory_system_branch() {
+        let p = create_tts_provider("system", "Samantha", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
+    }
+
+    #[test]
+    fn tts_factory_system_drops_piper_style_voice_id() {
+        // System TTS uses host-native voice ids (`"Samantha"`, `"Daniel"`)
+        // — not Piper ids. If the user previously had `tts_voice_id =
+        // "en_US-lessac-medium"` set for Piper and switches to system,
+        // we must drop the Piper id rather than feed it to `say -v
+        // en_US-lessac-medium` (which would fail with "Voice not
+        // available"). Construction succeeds either way — only the
+        // forwarded voice argument changes.
+        let p = create_tts_provider("system", "en_US-lessac-medium", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
+    }
+
+    #[test]
+    fn tts_factory_system_empty_voice_falls_back_to_default() {
+        let p = create_tts_provider("system", "", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { isMac } from '../../../lib/commands/shortcut';
 import { useT } from '../../../lib/i18n/I18nContext';
 import {
   installPiper,
@@ -59,7 +60,12 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
   // Local provider selectors — initialised from voice_status, persisted via
   // openhumanVoiceSetProviders on change. Empty string until first load.
   const [sttProvider, setSttProvider] = useState<'cloud' | 'whisper' | ''>('');
-  const [ttsProvider, setTtsProvider] = useState<'cloud' | 'piper' | ''>('');
+  // `'system'` is macOS-only — wraps /usr/bin/say + /usr/bin/afconvert
+  // (see src/openhuman/inference/voice/system_speech.rs). Linux / Windows
+  // users only see "cloud" and "piper" in the dropdown; the option is
+  // gated on isMac() below.
+  const [ttsProvider, setTtsProvider] = useState<'cloud' | 'piper' | 'system' | ''>('');
+  const macOs = isMac();
   const [sttModel, setSttModel] = useState<string>('');
   const [ttsVoice, setTtsVoice] = useState<string>('');
   const [isSavingProviders, setIsSavingProviders] = useState(false);
@@ -144,7 +150,9 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
         setSttProvider(prev => prev || seeded);
       }
       if (voiceResponse.tts_provider) {
-        const seeded = voiceResponse.tts_provider === 'piper' ? 'piper' : 'cloud';
+        const raw = voiceResponse.tts_provider;
+        const seeded: 'cloud' | 'piper' | 'system' =
+          raw === 'piper' ? 'piper' : raw === 'system' ? 'system' : 'cloud';
         setTtsProvider(prev => prev || seeded);
       }
       if (voiceResponse.stt_model_id) {
@@ -278,7 +286,7 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
   const persistProviders = async (
     update: Partial<VoiceProvidersSnapshot> & {
       stt_provider?: 'cloud' | 'whisper';
-      tts_provider?: 'cloud' | 'piper';
+      tts_provider?: 'cloud' | 'piper' | 'system';
       stt_model?: string;
       tts_voice?: string;
     }
@@ -310,7 +318,7 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
     setSttProvider(next);
     void persistProviders({ stt_provider: next });
   };
-  const onTtsProviderChange = (next: 'cloud' | 'piper') => {
+  const onTtsProviderChange = (next: 'cloud' | 'piper' | 'system') => {
     setTtsProvider(next);
     void persistProviders({ tts_provider: next });
   };
@@ -520,12 +528,26 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
                   data-testid="tts-provider-select"
                   value={ttsProvider || 'cloud'}
                   disabled={isSavingProviders}
-                  onChange={e => onTtsProviderChange(e.target.value as 'cloud' | 'piper')}
+                  onChange={e =>
+                    onTtsProviderChange(e.target.value as 'cloud' | 'piper' | 'system')
+                  }
                   className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-primary-400">
                   <option value="cloud">Cloud (ElevenLabs proxy)</option>
                   <option value="piper" disabled={!piperReady}>
                     Local Piper{piperReady ? '' : ' (install required)'}
                   </option>
+                  {/* System TTS is a macOS-only path that wraps
+                      /usr/bin/say + /usr/bin/afconvert. The backend
+                      validator accepts the value on any OS, but
+                      synthesize_system_say returns an explicit
+                      "macOS-only" error elsewhere — hiding the option on
+                      non-macOS keeps the dropdown a list of things that
+                      actually work on this machine. */}
+                  {macOs && (
+                    <option value="system" data-testid="tts-provider-system-option">
+                      System (macOS say) — no install needed
+                    </option>
+                  )}
                 </select>
                 <div className="flex items-center gap-2 pt-1">
                   <button

@@ -35,7 +35,7 @@ export interface VoiceStatus {
   llm_cleanup_enabled: boolean;
   /** Currently selected STT provider ('cloud' or 'whisper'). */
   stt_provider: string;
-  /** Currently selected TTS provider ('cloud' or 'piper'). */
+  /** Currently selected TTS provider ('cloud', 'piper', or 'system' for macOS-native say). */
   tts_provider: string;
 }
 
@@ -113,9 +113,13 @@ export async function openhumanUpdateVoiceServerSettings(update: {
   });
 }
 
+/** Supported TTS provider ids. `'system'` is macOS-only — Linux / Windows
+ *  surfaces an error from the core if selected. */
+export type TtsProviderId = 'cloud' | 'piper' | 'system';
+
 export interface VoiceProvidersUpdate {
   stt_provider?: 'cloud' | 'whisper';
-  tts_provider?: 'cloud' | 'piper';
+  tts_provider?: TtsProviderId;
   stt_model?: string;
   tts_voice?: string;
 }

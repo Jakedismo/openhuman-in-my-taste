@@ -323,6 +323,70 @@ describe('VoicePanel', () => {
     );
   });
 
+  // ── System TTS option (macOS-only) ─────────────────────────────────────
+  //
+  // The "System (macOS say)" path exists because the upstream Piper macOS
+  // release ships a binary with broken dylib dependencies — see
+  // src/openhuman/inference/voice/system_speech.rs for the long form. The
+  // dropdown surfaces the option only on macOS so Linux/Windows users
+  // never see a TTS provider that would error on their box.
+
+  it('shows the System (macOS say) TTS option on macOS', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      const systemOption = ttsSelect.querySelector(
+        'option[value="system"]'
+      ) as HTMLOptionElement | null;
+      expect(systemOption).not.toBeNull();
+      expect(systemOption!.textContent).toMatch(/macOS say/i);
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('hides the System (macOS say) TTS option on non-macOS hosts', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      const systemOption = ttsSelect.querySelector('option[value="system"]');
+      expect(systemOption).toBeNull();
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('persists tts_provider="system" when the user picks it on macOS', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      fireEvent.change(ttsSelect, { target: { value: 'system' } });
+
+      await waitFor(() =>
+        expect(vi.mocked(openhumanVoiceSetProviders)).toHaveBeenCalledWith(
+          expect.objectContaining({ tts_provider: 'system' })
+        )
+      );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
   it('renders the Install Whisper button when the engine is missing', async () => {
     runtime.whisperStatus = makeInstallStatus('whisper'); // explicit missing
     renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });

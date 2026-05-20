@@ -10,3 +10,4 @@ pub mod local_speech;
 pub mod local_transcribe;
 pub mod postprocess;
 pub mod streaming;
+pub mod system_speech;

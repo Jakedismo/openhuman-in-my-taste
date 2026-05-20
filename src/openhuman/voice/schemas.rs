@@ -330,11 +330,11 @@ pub fn voice_schemas(function: &str) -> ControllerSchema {
                 required_string("text", "Text to synthesize."),
                 optional_string(
                     "provider",
-                    "Override provider: 'cloud' or 'piper'. Defaults to config.local_ai.tts_provider.",
+                    "Override provider: 'cloud', 'piper', or 'system' (macOS only). Defaults to config.local_ai.tts_provider.",
                 ),
                 optional_string(
                     "voice",
-                    "Voice id (provider-specific). Piper expects an id like 'en_US-lessac-medium'.",
+                    "Voice id (provider-specific). Piper expects 'en_US-lessac-medium'; system expects a macOS `say -v` id like 'Samantha'.",
                 ),
             ],
             outputs: vec![json_output(
@@ -356,7 +356,7 @@ pub fn voice_schemas(function: &str) -> ControllerSchema {
                 ),
                 optional_string(
                     "tts_provider",
-                    "TTS provider id ('cloud' or 'piper'). Omitted = unchanged.",
+                    "TTS provider id ('cloud', 'piper', or 'system' for macOS-native say). Omitted = unchanged.",
                 ),
                 optional_string("stt_model", "Whisper model id (e.g. 'whisper-large-v3-turbo')."),
                 optional_string("tts_voice", "Piper voice id (e.g. 'en_US-lessac-medium')."),
@@ -722,9 +722,9 @@ fn validate_stt_provider(provider: &str) -> Result<(), String> {
 
 fn validate_tts_provider(provider: &str) -> Result<(), String> {
     match provider {
-        "cloud" | "piper" => Ok(()),
+        "cloud" | "piper" | "system" => Ok(()),
         other => Err(format!(
-            "invalid tts_provider '{other}' (valid: 'cloud', 'piper')"
+            "invalid tts_provider '{other}' (valid: 'cloud', 'piper', 'system')"
         )),
     }
 }
