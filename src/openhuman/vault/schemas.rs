@@ -23,6 +23,8 @@ pub fn all_controller_schemas() -> Vec<ControllerSchema> {
         schemas("files"),
         schemas("remove"),
         schemas("sync"),
+        schemas("sync_status"),
+        schemas("sync_all"),
     ]
 }
 
@@ -51,6 +53,14 @@ pub fn all_registered_controllers() -> Vec<RegisteredController> {
         RegisteredController {
             schema: schemas("sync"),
             handler: handle_sync,
+        },
+        RegisteredController {
+            schema: schemas("sync_status"),
+            handler: handle_sync_status,
+        },
+        RegisteredController {
+            schema: schemas("sync_all"),
+            handler: handle_sync_all,
         },
     ]
 }
@@ -184,12 +194,43 @@ pub fn schemas(function: &str) -> ControllerSchema {
         "sync" => ControllerSchema {
             namespace: "vault",
             function: "sync",
-            description: "Walk a vault's root folder and ingest changed files.",
+            description: "Enqueue an async vault sync. Returns a job handle the caller \
+                          polls via `vault.sync_status` for progress + final report.",
             inputs: vec![vault_id_input("Identifier of the vault to sync.")],
             outputs: vec![FieldSchema {
-                name: "report",
-                ty: TypeSchema::Ref("VaultSyncReport"),
-                comment: "Summary of the sync run.",
+                name: "handle",
+                ty: TypeSchema::Ref("VaultSyncJobHandle"),
+                comment: "Handle to the enqueued (or coalesced existing) sync job.",
+                required: true,
+            }],
+        },
+        "sync_status" => ControllerSchema {
+            namespace: "vault",
+            function: "sync_status",
+            description: "Read the live snapshot of a vault sync job by id.",
+            inputs: vec![FieldSchema {
+                name: "job_id",
+                ty: TypeSchema::String,
+                comment: "Identifier of the sync job (from `vault.sync` / `vault.sync_all`).",
+                required: true,
+            }],
+            outputs: vec![FieldSchema {
+                name: "snapshot",
+                ty: TypeSchema::Option(Box::new(TypeSchema::Ref("VaultSyncJobSnapshot"))),
+                comment: "Live snapshot; `null` when the job id is unknown.",
+                required: false,
+            }],
+        },
+        "sync_all" => ControllerSchema {
+            namespace: "vault",
+            function: "sync_all",
+            description: "Enqueue an async sync for every registered vault. \
+                          Returns one job handle per vault; per-vault coalesce still applies.",
+            inputs: vec![],
+            outputs: vec![FieldSchema {
+                name: "handles",
+                ty: TypeSchema::Array(Box::new(TypeSchema::Ref("VaultSyncJobHandle"))),
+                comment: "One handle per registered vault.",
                 required: true,
             }],
         },
@@ -275,6 +316,23 @@ fn handle_sync(params: Map<String, Value>) -> ControllerFuture {
         let config = config_rpc::load_config_with_timeout().await?;
         let vault_id = read_required::<String>(&params, "vault_id")?;
         to_json(crate::openhuman::vault::ops::vault_sync(&config, vault_id.trim()).await?)
+    })
+}
+
+fn handle_sync_status(params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async move {
+        let config = config_rpc::load_config_with_timeout().await?;
+        let job_id = read_required::<String>(&params, "job_id")?;
+        to_json(
+            crate::openhuman::vault::ops::vault_sync_status(&config, job_id.trim()).await?,
+        )
+    })
+}
+
+fn handle_sync_all(_params: Map<String, Value>) -> ControllerFuture {
+    Box::pin(async {
+        let config = config_rpc::load_config_with_timeout().await?;
+        to_json(crate::openhuman::vault::ops::vault_sync_all(&config).await?)
     })
 }
 
