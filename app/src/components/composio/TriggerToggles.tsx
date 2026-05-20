@@ -56,6 +56,17 @@ export default function TriggerToggles({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pendingSignature, setPendingSignature] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  // Inline configure form state for static triggers whose
+  // `requiredConfigKeys` are non-empty (e.g. GitHub repo-scoped
+  // triggers requiring `owner` + `repo`). `configFormFor` is the
+  // signature of the trigger being configured, or null when no form
+  // is open. Values are kept as a flat string map; we coerce to JSON
+  // before posting since Composio v3's `trigger_config` is a free-
+  // form JSON object — all the required keys we've seen so far for
+  // the toolkits this UI surfaces are strings.
+  const [configFormFor, setConfigFormFor] = useState<string | null>(null);
+  const [configFormValues, setConfigFormValues] = useState<Record<string, string>>({});
+  const [configFormSubmitting, setConfigFormSubmitting] = useState(false);
 
   // Load both lists in parallel on mount / when connection changes.
   useEffect(() => {
@@ -134,6 +145,79 @@ export default function TriggerToggles({
     [activeBySignature, connectionId, pendingSignature, toolkitSlug]
   );
 
+  /** Open the inline configure form for a static config-required
+   *  trigger (e.g. GITHUB_COMMIT_EVENT needs owner + repo). Pre-fills
+   *  any defaults from `defaultConfig` so users don't retype the
+   *  common ones. */
+  const openConfigForm = useCallback(
+    (entry: ComposioAvailableTrigger) => {
+      const sig = triggerSignature(entry.slug, entry.scope);
+      const initial: Record<string, string> = {};
+      for (const key of entry.requiredConfigKeys ?? []) {
+        const existing = entry.defaultConfig?.[key];
+        initial[key] = typeof existing === 'string' ? existing : '';
+      }
+      setConfigFormFor(sig);
+      setConfigFormValues(initial);
+      setRowError(null);
+    },
+    []
+  );
+
+  const closeConfigForm = useCallback(() => {
+    setConfigFormFor(null);
+    setConfigFormValues({});
+    setConfigFormSubmitting(false);
+  }, []);
+
+  /** Submit the inline form: build trigger_config from the typed
+   *  values + any non-required defaults, call enableTrigger, and add
+   *  the resulting active trigger to the local map keyed by signature
+   *  so the toggle flips on without a reload. */
+  const submitConfigForm = useCallback(
+    async (entry: ComposioAvailableTrigger) => {
+      const sig = triggerSignature(entry.slug, entry.scope);
+      const missing = (entry.requiredConfigKeys ?? []).filter(
+        k => (configFormValues[k] ?? '').trim() === ''
+      );
+      if (missing.length > 0) {
+        setRowError(`Fill in: ${missing.join(', ')}`);
+        return;
+      }
+      setConfigFormSubmitting(true);
+      setRowError(null);
+      try {
+        // Build the full trigger_config: defaults first (so non-required
+        // keys come along), then the user's typed values overwrite the
+        // required ones. Trim everything — Composio rejects leading/
+        // trailing whitespace on the GitHub `owner` / `repo` fields.
+        const merged: Record<string, unknown> = { ...(entry.defaultConfig ?? {}) };
+        for (const key of entry.requiredConfigKeys ?? []) {
+          merged[key] = (configFormValues[key] ?? '').trim();
+        }
+        const created = await enableTrigger(connectionId, entry.slug, merged);
+        setActiveBySignature(prev => {
+          const next = new Map(prev);
+          next.set(sig, {
+            id: created.triggerId,
+            slug: created.slug,
+            toolkit: toolkitSlug,
+            connectionId: created.connectionId,
+            triggerConfig: merged,
+          });
+          return next;
+        });
+        closeConfigForm();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setRowError(`${t('common.enable')} failed for ${formatTriggerLabel(entry.slug)}: ${msg}`);
+      } finally {
+        setConfigFormSubmitting(false);
+      }
+    },
+    [closeConfigForm, configFormValues, connectionId, t, toolkitSlug]
+  );
+
   if (loadError) {
     return (
       <div className="border-t border-stone-100 dark:border-neutral-800 pt-3 mt-1">
@@ -186,7 +270,11 @@ export default function TriggerToggles({
           const requiresConfig =
             (entry.requiredConfigKeys?.length ?? 0) > 0 && entry.scope === 'static';
           const isPending = pendingSignature === sig;
-          const disabled = requiresConfig || pendingSignature !== null;
+          const formOpen = configFormFor === sig;
+          // Toggle is only hard-disabled while another row is pending.
+          // Static config-required rows route their click through the
+          // form opener instead of disabling — see onClick below.
+          const disabled = pendingSignature !== null;
 
           const label =
             entry.scope === 'github_repo' && entry.repo
@@ -195,8 +283,8 @@ export default function TriggerToggles({
           const sub =
             entry.scope === 'github_repo'
               ? formatTriggerLabel(entry.slug)
-              : requiresConfig
-                ? t('composio.triggers.needsConfiguration')
+              : requiresConfig && !enabled
+                ? `Requires: ${(entry.requiredConfigKeys ?? []).join(', ')}`
                 : '';
           const action = enabled ? t('common.disable') : t('common.enable');
           const triggerName = formatTriggerLabel(entry.slug);
@@ -205,37 +293,111 @@ export default function TriggerToggles({
               ? `${action} ${triggerName} for ${entry.repo.owner}/${entry.repo.repo}`
               : `${action} ${triggerName}`;
 
+          // Click routing:
+          // - Enabled toggle on any row → disableTrigger (no form
+          //   needed; we already have the trigger_config persisted).
+          // - Disabled toggle on static config-required row → open
+          //   the inline form to collect the required keys.
+          // - Disabled toggle on any other row → enableTrigger
+          //   directly (no config to collect).
+          const onToggleClick = () => {
+            if (enabled) {
+              void handleToggle(entry);
+              return;
+            }
+            if (requiresConfig) {
+              if (formOpen) {
+                closeConfigForm();
+              } else {
+                openConfigForm(entry);
+              }
+              return;
+            }
+            void handleToggle(entry);
+          };
+
           return (
             <li
               key={sig}
               data-testid={`trigger-row-${sig}`}
-              className="flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-neutral-800/60">
-              <div className="min-w-0 flex-1">
-                <span className="text-sm font-medium text-stone-900 dark:text-neutral-100 break-all">
-                  {label}
-                </span>
-                {sub && (
-                  <p className="text-[11px] text-stone-400 dark:text-neutral-500 leading-snug">
-                    {sub}
-                  </p>
-                )}
+              className="rounded-lg px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-neutral-800/60">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <span className="text-sm font-medium text-stone-900 dark:text-neutral-100 break-all">
+                    {label}
+                  </span>
+                  {sub && (
+                    <p className="text-[11px] text-stone-400 dark:text-neutral-500 leading-snug">
+                      {sub}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enabled}
+                  aria-label={ariaLabel}
+                  disabled={disabled}
+                  onClick={onToggleClick}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    enabled ? 'bg-primary-500' : 'bg-stone-300 dark:bg-neutral-700'
+                  }`}>
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white dark:bg-neutral-900 shadow transition-transform ${
+                      enabled ? 'translate-x-5' : 'translate-x-0.5'
+                    } ${isPending ? 'animate-pulse' : ''}`}
+                  />
+                </button>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enabled}
-                aria-label={ariaLabel}
-                disabled={disabled}
-                onClick={() => void handleToggle(entry)}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 ${
-                  enabled ? 'bg-primary-500' : 'bg-stone-300 dark:bg-neutral-700'
-                }`}>
-                <span
-                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white dark:bg-neutral-900 shadow transition-transform ${
-                    enabled ? 'translate-x-5' : 'translate-x-0.5'
-                  } ${isPending ? 'animate-pulse' : ''}`}
-                />
-              </button>
+              {formOpen && requiresConfig && (
+                <form
+                  data-testid={`trigger-config-form-${sig}`}
+                  className="mt-2 rounded-md border border-stone-200 dark:border-neutral-700 bg-stone-50/60 dark:bg-neutral-900/40 p-2 space-y-2"
+                  onSubmit={e => {
+                    e.preventDefault();
+                    void submitConfigForm(entry);
+                  }}>
+                  {(entry.requiredConfigKeys ?? []).map(key => (
+                    <div key={key} className="flex items-center gap-2">
+                      <label
+                        htmlFor={`trig-cfg-${sig}-${key}`}
+                        className="w-20 text-[11px] font-medium text-stone-600 dark:text-neutral-300">
+                        {key}
+                      </label>
+                      <input
+                        id={`trig-cfg-${sig}-${key}`}
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={configFormValues[key] ?? ''}
+                        onChange={ev =>
+                          setConfigFormValues(prev => ({
+                            ...prev,
+                            [key]: ev.target.value,
+                          }))
+                        }
+                        className="flex-1 rounded border border-stone-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-2 py-1 text-xs font-mono"
+                        placeholder={key === 'owner' ? 'jruokola' : key === 'repo' ? 'closedhuman' : ''}
+                      />
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={closeConfigForm}
+                      disabled={configFormSubmitting}
+                      className="rounded border border-stone-300 dark:border-neutral-600 px-2 py-1 text-[11px] disabled:opacity-50">
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={configFormSubmitting}
+                      className="rounded bg-primary-600 hover:bg-primary-700 px-3 py-1 text-[11px] text-white disabled:opacity-50">
+                      {configFormSubmitting ? 'Enabling…' : 'Enable'}
+                    </button>
+                  </div>
+                </form>
+              )}
             </li>
           );
         })}
