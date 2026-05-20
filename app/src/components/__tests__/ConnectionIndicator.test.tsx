@@ -28,10 +28,11 @@ describe('ConnectionIndicator', () => {
 
   it('falls back to connectivity store when no override', () => {
     // Default connectivity state: internet online + core unknown +
-    // backend connecting → blocking = backend-only → "Reconnecting…"
-    // (#1527: split status; default reflects boot-time pre-socket state.)
+    // backend connecting. In the local-OAuth fork the backend socket
+    // is no longer a blocking state, so the indicator stays on
+    // "Connected to OpenHuman AI" once the other gates are green.
     renderWithProviders(<ConnectionIndicator />);
-    expect(screen.getByText(/Reconnecting|Connecting/)).toBeInTheDocument();
+    expect(screen.getByText(/Connected to OpenHuman AI/)).toBeInTheDocument();
   });
 
   // ---- Store-driven branches (lines 43, 50, 57, 67) ----
@@ -78,7 +79,10 @@ describe('ConnectionIndicator', () => {
     expect(screen.getByText('Core offline')).toBeInTheDocument();
   });
 
-  it('shows "Reconnecting…" when blocking=backend-only and socket is disconnected (line 67)', () => {
+  it('stays "Connected" when only the backend socket is disconnected (local-OAuth fork)', () => {
+    // The hosted OpenHuman backend was removed — `backend-only` is no
+    // longer a blocking state, so a disconnected backend channel must
+    // not surface "Reconnecting…" in the indicator.
     renderWithProviders(<ConnectionIndicator />, {
       preloadedState: {
         connectivity: {
@@ -90,10 +94,10 @@ describe('ConnectionIndicator', () => {
         socket: { byUser: {} },
       },
     });
-    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+    expect(screen.getByText(/Connected to OpenHuman AI/)).toBeInTheDocument();
   });
 
-  it('shows "Connecting" when blocking=backend-only and legacy socket status is connecting (line 67)', () => {
+  it('stays "Connected" when only the backend socket is connecting (local-OAuth fork)', () => {
     renderWithProviders(<ConnectionIndicator />, {
       preloadedState: {
         connectivity: {
@@ -102,10 +106,9 @@ describe('ConnectionIndicator', () => {
           backend: 'connecting',
           lastError: {},
         },
-        // Drive selectSocketStatus to return 'connecting'.
         socket: { byUser: { __pending__: { status: 'connecting', socketId: null } } },
       },
     });
-    expect(screen.getByText(/Connecting|Reconnecting/)).toBeInTheDocument();
+    expect(screen.getByText(/Connected to OpenHuman AI/)).toBeInTheDocument();
   });
 });

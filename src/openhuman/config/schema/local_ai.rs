@@ -125,7 +125,15 @@ pub struct LocalAiConfig {
 }
 
 fn default_runtime_enabled() -> bool {
-    false
+    // Local-OAuth fork: local AI is the natural default, so the
+    // master switch is ON. Individual `usage.*` flags
+    // (embeddings / heartbeat / learning_reflection / subconscious)
+    // still default to `false`, so flipping this on does NOT
+    // auto-engage any background workload — it only stops the
+    // Local Model Debug screen reporting `State: Disabled` and
+    // lets the workload routing UI offer Ollama models for the
+    // background workloads when the user opts in per-feature.
+    true
 }
 
 fn default_provider() -> String {
