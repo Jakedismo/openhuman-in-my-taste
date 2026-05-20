@@ -23,7 +23,19 @@ pub(crate) const DEFAULT_OLLAMA_EMBED_MODEL: &str = "bge-m3";
 /// tree's on-disk format was built for. Selections outside this set
 /// are PERMITTED but a warning is logged so the user has a chance
 /// to notice before memory writes start failing on dim mismatch.
-const KNOWN_COMPATIBLE_EMBEDDING_MODELS: &[&str] = &["bge-m3", "all-minilm:latest"];
+///
+/// The Qwen3 embedding family (`qwen3-embedding:0.6b`, `:4b`, `:8b`)
+/// is included because every published Qwen3 embedder ships at 1024
+/// hidden dim — matching the memory tree's on-disk format. Adding
+/// them here suppresses the spurious dim-warning that fires on every
+/// memory ingest when the user has selected a Qwen3 embedder.
+const KNOWN_COMPATIBLE_EMBEDDING_MODELS: &[&str] = &[
+    "bge-m3",
+    "all-minilm:latest",
+    "qwen3-embedding:0.6b",
+    "qwen3-embedding:4b",
+    "qwen3-embedding:8b",
+];
 
 fn enforce_mvp_chat_allowlist(resolved: &str) -> String {
     // Local-OAuth fork: trust the user's model selection. The legacy
