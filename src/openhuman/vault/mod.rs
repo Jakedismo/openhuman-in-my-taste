@@ -5,17 +5,21 @@
 //! under namespace `vault:<id>`. Per-file dedup uses (path, mtime, content
 //! hash) so re-syncs only touch what changed.
 
+pub mod jobs;
 pub mod ops;
 mod schemas;
 mod store;
-mod sync;
+pub(crate) mod sync;
 mod types;
 
 pub use schemas::{
     all_controller_schemas as all_vault_controller_schemas,
     all_registered_controllers as all_vault_registered_controllers,
 };
-pub use types::{Vault, VaultFile, VaultFileStatus, VaultSyncReport};
+pub use types::{
+    Vault, VaultFile, VaultFileStatus, VaultSyncJobHandle, VaultSyncJobSnapshot,
+    VaultSyncJobStatus, VaultSyncReport,
+};
 
 #[cfg(test)]
 mod tests;

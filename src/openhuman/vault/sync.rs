@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -75,9 +76,58 @@ pub fn supported_extension(ext: &str) -> bool {
     )
 }
 
+/// Per-file progress update delivered to a `ProgressCallback`. Used by
+/// the async job worker to surface live state to
+/// `vault_sync_status` callers.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    /// Files processed so far across the whole walk (ingested +
+    /// unchanged + failed + skipped_unsupported).
+    pub processed: u64,
+    /// Total supported file count discovered by the directory walk's
+    /// pre-pass, when one is available. The current implementation
+    /// doesn't run a pre-pass to avoid double-traversal of large
+    /// vaults; left in the type so a future pre-pass can populate
+    /// it without an API break.
+    pub total: Option<u64>,
+    /// Relative path of the file just processed, useful for showing
+    /// "current file" in the UI. `None` only at the post-walk
+    /// deletion-pass step.
+    pub current_file: Option<String>,
+    /// Most recent error message, if the just-processed file failed
+    /// to ingest. The full error list lives on the report.
+    pub last_error: Option<String>,
+}
+
+/// Callback invoked by [`sync_vault_with_progress`] after each file
+/// in the walk. Shared via `Arc` so the worker task and the status
+/// RPC can both observe the same updates without coupling lifetimes.
+pub type ProgressCallback = Arc<dyn Fn(ProgressUpdate) + Send + Sync>;
+
+/// Construct a no-op [`ProgressCallback`]. Used by the legacy
+/// blocking `sync_vault` entry point that doesn't need per-file
+/// progress.
+pub fn noop_progress() -> ProgressCallback {
+    Arc::new(|_| {})
+}
+
 /// Walk `vault.root_path`, ingest new/changed files into memory, delete docs
 /// whose source files vanished, and record per-file state in the ledger.
+///
+/// Back-compat alias for callers that don't care about progress —
+/// delegates to [`sync_vault_with_progress`] with a noop callback.
 pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
+    sync_vault_with_progress(config, vault, noop_progress()).await
+}
+
+/// Same as [`sync_vault`] but invokes `on_progress` after each file's
+/// ledger upsert + tree-ingest fan-out. The async job worker uses
+/// this entry point to drive `vault_sync_status` snapshots.
+pub async fn sync_vault_with_progress(
+    config: &Config,
+    vault: &Vault,
+    on_progress: ProgressCallback,
+) -> VaultSyncReport {
     let started = Utc::now();
     let mut report = VaultSyncReport {
         vault_id: vault.id.clone(),
@@ -364,6 +414,23 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
                     .push(format!("{rel_path}: ingest failed: {err}"));
             }
         }
+
+        // Emit a per-file progress update so async-job watchers
+        // (`vault_sync_status`) see the running counters move
+        // without waiting for the whole walk to finish. The last
+        // error pushed onto `report.errors` (if any) is forwarded so
+        // the UI can surface "failed: X" inline.
+        let processed = report.ingested
+            + report.unchanged
+            + report.failed
+            + report.skipped_unsupported;
+        let last_error = report.errors.last().cloned();
+        on_progress(ProgressUpdate {
+            processed,
+            total: None,
+            current_file: Some(rel_path.clone()),
+            last_error,
+        });
     }
 
     // Anything in ledger we didn't see this pass is gone — delete it.
@@ -408,6 +475,16 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
         report.skipped_unsupported,
         report.duration_ms,
     );
+
+    // Final progress flush so the UI clears the "current file"
+    // affordance even if the walk produced zero per-file callbacks
+    // (empty vault).
+    on_progress(ProgressUpdate {
+        processed: report.scanned,
+        total: Some(report.scanned),
+        current_file: None,
+        last_error: None,
+    });
     report
 }
 
