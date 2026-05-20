@@ -113,7 +113,7 @@ async fn start_github_flow_without_baked_client_id_reports_typed_error() {
 
 #[tokio::test]
 async fn google_flow_emits_auth_url_with_live_loopback_redirect() {
-    let flow = start_google_flow_with(http_client(), "test-google-cid")
+    let flow = start_google_flow_with(http_client(), "test-google-cid", None)
         .await
         .unwrap();
     let parsed = Url::parse(&flow.auth_url).unwrap();
@@ -169,7 +169,7 @@ async fn google_flow_happy_path_persists_tokens() {
     )
     .await;
 
-    let flow = start_google_flow_with(http_client(), "cid")
+    let flow = start_google_flow_with(http_client(), "cid", None)
         .await
         .unwrap()
         .with_token_endpoint(token_endpoint);
@@ -239,7 +239,7 @@ async fn state_mismatch_refuses_to_exchange_code() {
     // The mock token endpoint MUST NOT be hit if state mismatches —
     // assert by leaving it on the default 500 error.
     let (token_endpoint, _mock) = MockToken::default().start().await;
-    let flow = start_google_flow_with(http_client(), "cid")
+    let flow = start_google_flow_with(http_client(), "cid", None)
         .await
         .unwrap()
         .with_token_endpoint(token_endpoint);
@@ -270,7 +270,7 @@ async fn state_mismatch_refuses_to_exchange_code() {
 #[tokio::test]
 async fn flow_completes_with_loopback_timeout_when_no_redirect_arrives() {
     let (token_endpoint, _mock) = MockToken::default().start().await;
-    let flow = start_google_flow_with(http_client(), "cid")
+    let flow = start_google_flow_with(http_client(), "cid", None)
         .await
         .unwrap()
         .with_token_endpoint(token_endpoint);

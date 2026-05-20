@@ -40,6 +40,16 @@ use super::providers::{github, google, TokenError};
 /// [`OAuthFlowError::ClientIdMissing`] at runtime.
 pub const GOOGLE_CLIENT_ID: Option<&str> = option_env!("OPENHUMAN_GOOGLE_OAUTH_CLIENT_ID");
 
+/// Compile-time-baked Google OAuth client_secret. Google requires
+/// this in the token-exchange and refresh requests even for desktop
+/// (installed) OAuth clients. Its docs explicitly allow shipping the
+/// secret in installed-app binaries since it cannot truly be kept
+/// confidential there. Set `OPENHUMAN_GOOGLE_OAUTH_CLIENT_SECRET`
+/// at build time alongside the client ID. Unset is allowed but the
+/// token endpoint will reject the exchange with
+/// `client_secret is missing`.
+pub const GOOGLE_CLIENT_SECRET: Option<&str> = option_env!("OPENHUMAN_GOOGLE_OAUTH_CLIENT_SECRET");
+
 /// Compile-time-baked GitHub OAuth client ID. Same shape as
 /// [`GOOGLE_CLIENT_ID`] — set `OPENHUMAN_GITHUB_OAUTH_CLIENT_ID` at
 /// build time or accept the runtime error.
@@ -104,6 +114,9 @@ pub struct OAuthFlow {
     verifier: String,
     loopback: LoopbackHandle,
     client_id: String,
+    /// Google-only: paired with the client_id at build time.
+    /// `None` for GitHub or when unset at build.
+    client_secret: Option<String>,
     http: reqwest::Client,
     /// `None` in production (uses the provider's hard-coded token
     /// endpoint); test harnesses can point this at a local axum mock.
@@ -143,6 +156,9 @@ impl OAuthFlow {
         match self.kind {
             FlowKind::Google => {
                 let mut client = google::GoogleClient::new(self.http, &self.client_id);
+                if let Some(secret) = self.client_secret.as_deref() {
+                    client = client.with_client_secret(secret);
+                }
                 if let Some(endpoint) = self.token_endpoint_override {
                     client = client.with_token_endpoint(endpoint);
                 }
@@ -182,7 +198,7 @@ pub async fn start_google_flow(http: reqwest::Client) -> Result<OAuthFlow, OAuth
         provider: "google",
         env_var: "OPENHUMAN_GOOGLE_OAUTH_CLIENT_ID",
     })?;
-    start_google_flow_with(http, client_id).await
+    start_google_flow_with(http, client_id, GOOGLE_CLIENT_SECRET).await
 }
 
 /// Begin a Google OAuth PKCE flow with a caller-supplied client ID.
@@ -192,6 +208,7 @@ pub async fn start_google_flow(http: reqwest::Client) -> Result<OAuthFlow, OAuth
 pub async fn start_google_flow_with(
     http: reqwest::Client,
     client_id: &str,
+    client_secret: Option<&str>,
 ) -> Result<OAuthFlow, OAuthFlowError> {
     let verifier = pkce::code_verifier();
     let challenge = pkce::code_challenge(&verifier);
@@ -215,6 +232,7 @@ pub async fn start_google_flow_with(
         verifier,
         loopback,
         client_id: client_id.to_string(),
+        client_secret: client_secret.map(str::to_owned),
         http,
         token_endpoint_override: None,
     })
@@ -257,6 +275,7 @@ pub async fn start_github_flow_with(
         verifier,
         loopback,
         client_id: client_id.to_string(),
+        client_secret: None,
         http,
         token_endpoint_override: None,
     })

@@ -105,6 +105,7 @@ pub struct TokenResponse {
 pub struct GoogleClient {
     http: reqwest::Client,
     client_id: String,
+    client_secret: Option<String>,
     token_endpoint: String,
 }
 
@@ -113,8 +114,20 @@ impl GoogleClient {
         Self {
             http,
             client_id: client_id.into(),
+            client_secret: None,
             token_endpoint: TOKEN_ENDPOINT.into(),
         }
+    }
+
+    /// Attach the Google-issued client_secret. Google requires this in
+    /// the token-exchange and refresh requests even for "Desktop app"
+    /// OAuth clients (its docs acknowledge the value is not really
+    /// secret for installed apps and that it ships in the binary).
+    /// Without it the token endpoint returns
+    /// `{"error":"invalid_request","error_description":"client_secret is missing."}`.
+    pub fn with_client_secret(mut self, secret: impl Into<String>) -> Self {
+        self.client_secret = Some(secret.into());
+        self
     }
 
     /// Crate-internal knob to point the client at a different token
@@ -136,13 +149,16 @@ impl GoogleClient {
         code: &str,
         code_verifier: &str,
     ) -> Result<TokenResponse, TokenError> {
-        let form = [
+        let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
             ("client_id", self.client_id.as_str()),
             ("redirect_uri", redirect_uri),
             ("code_verifier", code_verifier),
         ];
+        if let Some(secret) = self.client_secret.as_deref() {
+            form.push(("client_secret", secret));
+        }
         self.post_token(&form).await
     }
 
@@ -153,11 +169,14 @@ impl GoogleClient {
         &self,
         refresh_token: &str,
     ) -> Result<TokenResponse, TokenError> {
-        let form = [
+        let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", self.client_id.as_str()),
         ];
+        if let Some(secret) = self.client_secret.as_deref() {
+            form.push(("client_secret", secret));
+        }
         self.post_token(&form).await
     }
 

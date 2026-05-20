@@ -22,7 +22,7 @@ use thiserror::Error;
 use crate::openhuman::credentials::profiles::TokenSet;
 use crate::openhuman::credentials::AuthService;
 
-use super::ops::{GITHUB_CLIENT_ID, GOOGLE_CLIENT_ID};
+use super::ops::{GITHUB_CLIENT_ID, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET};
 use super::persistence::{github_token_set, google_token_set, GITHUB_PROVIDER, GOOGLE_PROVIDER};
 use super::providers::{github, google};
 
@@ -81,7 +81,10 @@ async fn refresh_google(
         env_var: "OPENHUMAN_GOOGLE_OAUTH_CLIENT_ID",
     })?;
     let (existing_refresh, profile_name) = load_refresh_token(service, GOOGLE_PROVIDER)?;
-    let client = google::GoogleClient::new(http.clone(), client_id);
+    let mut client = google::GoogleClient::new(http.clone(), client_id);
+    if let Some(secret) = GOOGLE_CLIENT_SECRET {
+        client = client.with_client_secret(secret);
+    }
     let new = client
         .refresh_access_token(&existing_refresh)
         .await
