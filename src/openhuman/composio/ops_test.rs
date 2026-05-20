@@ -110,13 +110,22 @@ async fn composio_authorize_errors_without_client() {
 }
 
 #[tokio::test]
-async fn composio_delete_connection_errors_without_session() {
+async fn composio_delete_connection_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // composio_delete_connection now uses the mode-aware factory just
+    // like composio_sync. The toolkit lookup still tolerates "unknown
+    // connection" (best-effort .ok()), but the delete path itself
+    // requires a viable client — backend session OR direct-mode api
+    // key. With neither, the factory surfaces "no backend session
+    // token".
     let err = composio_delete_connection(&config, "c-1")
         .await
         .unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -150,11 +159,19 @@ async fn composio_execute_errors_without_client() {
 }
 
 #[tokio::test]
-async fn composio_get_user_profile_errors_without_session() {
+async fn composio_get_user_profile_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Same migration as composio_sync — the legacy resolve_client gate
+    // has been replaced with the mode-aware factory.
+    // resolve_toolkit_for_connection_mode_aware surfaces the factory's
+    // typed error when no client is configured ("no backend session
+    // token" / "no api key is configured").
     let err = composio_get_user_profile(&config, "c-1").await.unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -1153,6 +1170,49 @@ async fn composio_sync_routes_through_direct_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let config = direct_mode_config(&tmp);
     let err = composio_sync(&config, "c-1", None).await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_get_user_profile_routes_through_direct_mode() {
+    // Sibling of composio_sync_routes_through_direct_mode — same gate
+    // migration, same contract assertion. With composio.mode = "direct"
+    // and a fake api key staged, the error must not carry "no backend
+    // session" (proving the factory routed us to the direct arm) and
+    // must still log under the composio prefix for observability.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_get_user_profile(&config, "c-1").await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_delete_connection_routes_through_direct_mode() {
+    // Delete is special among the migrated ops: the data path is
+    // genuinely tenant-specific (DELETE /connected_accounts/{id}), so
+    // unlike composio_sync the actual HTTP call also lives in the
+    // direct branch. We assert the same contract: no backend-session
+    // leak, composio-tagged error so observability still routes
+    // correctly.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_delete_connection(&config, "c-1")
+        .await
+        .unwrap_err();
     assert!(
         !err.contains("no backend session"),
         "direct mode must not surface backend-auth errors, got: {err}"

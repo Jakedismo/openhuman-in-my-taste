@@ -22,8 +22,8 @@ type OpResult<T> = std::result::Result<T, String>;
 use std::sync::Arc;
 
 use super::client::{
-    build_composio_client, create_composio_client, direct_authorize, direct_list_connections,
-    direct_list_tools, ComposioClient, ComposioClientKind,
+    build_composio_client, create_composio_client, direct_authorize, direct_delete_connection,
+    direct_list_connections, direct_list_tools, ComposioClient, ComposioClientKind,
 };
 use super::providers::{
     capability_matrix, get_provider, ProviderContext, ProviderUserProfile, SyncOutcome, SyncReason,
@@ -347,14 +347,40 @@ pub async fn composio_delete_connection(
     connection_id: &str,
 ) -> OpResult<RpcOutcome<ComposioDeleteResponse>> {
     tracing::debug!(connection_id = %connection_id, "[composio] rpc delete_connection");
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id)
+    // Mode-aware: backend-proxied users keep going through the
+    // tinyhumans aggregator (`ComposioClient::delete_connection`),
+    // direct-mode users hit Composio v3 `/connected_accounts/{id}`
+    // against their own tenant via `direct_delete_connection`. The
+    // toolkit lookup is best-effort either way — failures degrade the
+    // post-delete bookkeeping (facets / PROFILE.md / `unknown` event
+    // toolkit) but never block the underlying delete call (matches the
+    // pre-#1710 behaviour).
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id)
         .await
         .ok();
-    let resp = client.delete_connection(connection_id).await.map_err(|e| {
-        report_composio_op_error("delete_connection", &e);
-        format!("[composio] delete_connection failed: {e:#}")
-    })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] delete_connection: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            tracing::debug!(
+                connection_id,
+                "[composio] delete_connection: backend variant"
+            );
+            client.delete_connection(connection_id).await.map_err(|e| {
+                report_composio_op_error("delete_connection", &e);
+                format!("[composio] delete_connection failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                connection_id,
+                "[composio-direct] delete_connection: routing to user's personal Composio tenant"
+            );
+            direct_delete_connection(&direct, connection_id)
+                .await
+                .map_err(|e| format!("[composio-direct] delete_connection failed: {e:#}"))?
+        }
+    };
     if let Some(toolkit) = toolkit.as_deref() {
         let deleted =
             super::providers::profile::delete_connected_identity_facets(toolkit, connection_id);
@@ -942,19 +968,20 @@ pub async fn composio_get_user_profile(
     connection_id: &str,
 ) -> OpResult<RpcOutcome<ProviderUserProfile>> {
     tracing::debug!(connection_id = %connection_id, "[composio] rpc get_user_profile");
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id).await?;
+    // Mode-aware: identical contract to composio_sync — direct-mode
+    // users (no backend session token, BYO Composio key) previously
+    // hit "composio unavailable: no backend session token" at the
+    // legacy resolve_client gate, even with an active connection in
+    // their personal Composio tenant. The data path
+    // (provider.fetch_user_profile → ctx.execute) is already
+    // mode-aware (#1710), so once we have the toolkit slug the rest
+    // works as-is.
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id).await?;
 
     let provider = get_provider(&toolkit).ok_or_else(|| {
         format!("[composio] no native provider registered for toolkit '{toolkit}'")
     })?;
 
-    // #1710: drop the pre-baked `client` field from `ProviderContext`.
-    // The factory resolves a fresh client per `ctx.execute(...)` call so
-    // a mode toggle is honoured immediately. We keep the local `client`
-    // binding alive for the toolkit lookup above (which still uses the
-    // explicit handle); the context itself just carries `Arc<Config>`.
-    let _ = client;
     let ctx = ProviderContext {
         config: Arc::new(config.clone()),
         toolkit: toolkit.clone(),

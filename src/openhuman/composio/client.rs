@@ -838,6 +838,28 @@ pub async fn direct_execute(
 /// (`ComposioConnection::is_active`) treats empty status as inactive,
 /// so a malformed row will simply not be presented as connected — the
 /// fail-safe shape the user expects.
+/// Direct-mode counterpart to [`ComposioClient::delete_connection`].
+/// Calls Composio v3 `DELETE /connected_accounts/{id}` against the
+/// user's personal tenant (via
+/// [`crate::openhuman::tools::ComposioTool::delete_connected_account`])
+/// and returns the same [`ComposioDeleteResponse { deleted: true }`]
+/// shape the backend-proxied path emits so the
+/// [`composio_delete_connection`] op call site stays single-shape.
+///
+/// [`composio_delete_connection`]:
+///     crate::openhuman::composio::ops::composio_delete_connection
+pub async fn direct_delete_connection(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    connection_id: &str,
+) -> anyhow::Result<ComposioDeleteResponse> {
+    tracing::debug!(
+        connection_id,
+        "[composio-direct] delete_connection: DELETE v3 /connected_accounts/{{id}}"
+    );
+    direct.delete_connected_account(connection_id).await?;
+    Ok(ComposioDeleteResponse { deleted: true })
+}
+
 pub async fn direct_list_connections(
     direct: &Arc<crate::openhuman::tools::ComposioTool>,
 ) -> anyhow::Result<ComposioConnectionsResponse> {

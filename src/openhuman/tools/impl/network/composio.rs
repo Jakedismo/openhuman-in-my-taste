@@ -448,6 +448,48 @@ impl ComposioTool {
         Ok(body.items)
     }
 
+    /// Direct-mode delete of a connected account against the user's
+    /// personal Composio v3 tenant.
+    ///
+    /// Wire shape: `DELETE
+    /// {COMPOSIO_API_BASE_V3}/connected_accounts/{connection_id}` with
+    /// the user's `x-api-key` header. Composio v3 returns 200 (with a
+    /// `{"success": true}` body) or 204 No Content on success — both
+    /// map to `Ok(())`. Anything else surfaces the upstream error body
+    /// via `response_error` so the caller can render it.
+    ///
+    /// Used by the direct arm of
+    /// [`crate::openhuman::composio::ops::composio_delete_connection`].
+    /// Backend-mode users still go through
+    /// `ComposioClient::delete_connection`, which talks to the
+    /// tinyhumans-hosted aggregator instead of `backend.composio.dev`
+    /// directly.
+    pub async fn delete_connected_account(&self, connection_id: &str) -> anyhow::Result<()> {
+        let connection_id = connection_id.trim();
+        if connection_id.is_empty() {
+            anyhow::bail!("connection_id must not be empty");
+        }
+        let url = format!("{COMPOSIO_API_BASE_V3}/connected_accounts/{connection_id}");
+        ensure_https(&url)?;
+
+        let resp = self
+            .client()
+            .delete(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let err = response_error(resp).await;
+            anyhow::bail!("Composio v3 delete_connected_account failed: {err}");
+        }
+        tracing::debug!(
+            connection_id,
+            "[composio-direct] delete_connected_account: deleted connected account"
+        );
+        Ok(())
+    }
+
     async fn resolve_auth_config_id(&self, app_name: &str) -> anyhow::Result<String> {
         let url = format!("{COMPOSIO_API_BASE_V3}/auth_configs");
 
