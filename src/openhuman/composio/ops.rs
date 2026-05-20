@@ -1023,11 +1023,33 @@ pub async fn composio_refresh_all_identities(
     config: &Config,
 ) -> OpResult<RpcOutcome<RefreshIdentitiesReport>> {
     tracing::info!("[composio] rpc refresh_all_identities");
-    let client = resolve_client(config)?;
-    let conns = client.list_connections().await.map_err(|e| {
-        report_composio_op_error("refresh_all_identities", &e);
-        format!("[composio] list_connections failed: {e:#}")
-    })?;
+    // Mode-aware: mirrors `periodic::run_one_tick` (the only other
+    // op that needs to enumerate ALL connections in a single pass).
+    // Backend mode walks the tinyhumans aggregator's view; direct
+    // mode walks the user's personal Composio v3 tenant via
+    // `direct_list_connections`. The iterate-and-fetch_user_profile
+    // loop below is already mode-aware — every Composio action runs
+    // through `ProviderContext::execute`, which re-resolves a fresh
+    // client per call (the #1710 contract).
+    let kind = create_composio_client(config)
+        .map_err(|e| format!("[composio] refresh_all_identities: {e}"))?;
+    let conns = match kind {
+        ComposioClientKind::Backend(client) => {
+            tracing::debug!("[composio] refresh_all_identities: backend variant");
+            client.list_connections().await.map_err(|e| {
+                report_composio_op_error("refresh_all_identities", &e);
+                format!("[composio] list_connections failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                "[composio-direct] refresh_all_identities: walking user's personal Composio tenant"
+            );
+            direct_list_connections(&direct)
+                .await
+                .map_err(|e| format!("[composio-direct] list_connections failed: {e:#}"))?
+        }
+    };
 
     let mut report = RefreshIdentitiesReport::default();
     let mut messages: Vec<String> = Vec::with_capacity(conns.connections.len() + 1);

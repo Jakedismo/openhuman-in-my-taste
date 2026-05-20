@@ -1201,6 +1201,40 @@ async fn composio_get_user_profile_routes_through_direct_mode() {
 }
 
 #[tokio::test]
+async fn composio_refresh_all_identities_routes_through_direct_mode() {
+    // Last op standing on the legacy resolve_client gate before this
+    // commit. Mirrors the periodic-tick's two-arm match. With direct
+    // mode configured and a fake api key staged, the call must (a)
+    // not surface "no backend session" (proving the factory routed
+    // to the direct branch) and (b) still carry the composio prefix.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_refresh_all_identities(&config).await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_refresh_all_identities_errors_without_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = test_config(&tmp);
+    // Default config = backend mode, no session token → factory
+    // surfaces "no backend session token". Direct-mode users with an
+    // api key never see this — they hit the direct arm above instead.
+    let err = composio_refresh_all_identities(&config).await.unwrap_err();
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn composio_delete_connection_routes_through_direct_mode() {
     // Delete is special among the migrated ops: the data path is
     // genuinely tenant-specific (DELETE /connected_accounts/{id}), so
