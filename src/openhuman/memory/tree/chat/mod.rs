@@ -45,9 +45,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::openhuman::config::{Config, DEFAULT_CLOUD_LLM_MODEL};
+use crate::openhuman::inference::provider::factory::{
+    create_chat_provider_from_string, provider_for_role, PROVIDER_OPENHUMAN,
+};
 
 pub mod cloud;
 pub mod local;
+pub mod workload;
 
 /// One pair of prompt messages handed to the chat backend.
 ///
@@ -161,30 +165,51 @@ pub fn build_chat_provider(
             std::time::Duration::from_millis(timeout_ms),
         )?))
     } else {
-        let model = config
+        // Non-Ollama branch. In the local-OAuth fork the dead OpenHuman
+        // backend (`summarization-v1`) is gone; route through the
+        // workload factory so the user's configured cloud provider
+        // (OpenAI, etc., or a slug-keyed `cloud_providers` row) handles
+        // the call instead. The factory's `provider_for_role("memory",
+        // ...)` resolves the same `memory_provider` field the local
+        // branch above checks — when it's blank/`cloud`, it falls back
+        // to the first non-openhuman cloud_providers entry (typically
+        // the migration-seeded `openai` row).
+        let resolved = provider_for_role("memory", config);
+        log::debug!(
+            "[memory_tree::chat] building workload-routed provider consumer={} resolved={}",
+            consumer.as_str(),
+            resolved
+        );
+        if resolved == PROVIDER_OPENHUMAN {
+            // Factory would hard-error in `make_openhuman_backend`. Surface
+            // the same actionable message instead of waiting for the
+            // first call to fail.
+            anyhow::bail!(
+                "[memory_tree::chat] no cloud provider configured for the memory workload — \
+                 add a `cloud_providers` entry (e.g. OpenAI) or set `memory_provider` to a \
+                 slug:model under Settings → AI"
+            );
+        }
+        let (inner, model) = create_chat_provider_from_string("memory", &resolved, config)?;
+        let slug_hint = resolved
+            .find(':')
+            .map(|i| &resolved[..i])
+            .unwrap_or(resolved.as_str());
+        // Honour the explicit `memory_tree.cloud_llm_model` override if the
+        // user pinned a specific model name in their config — otherwise use
+        // whatever the factory resolved. The legacy `DEFAULT_CLOUD_LLM_MODEL`
+        // (`summarization-v1`) is intentionally NOT consulted here; it only
+        // makes sense against the dead OpenHuman backend.
+        let model_to_use = config
             .memory_tree
             .cloud_llm_model
             .clone()
-            .unwrap_or_else(|| DEFAULT_CLOUD_LLM_MODEL.to_string());
-        // The `auth-profiles.json` lives next to `config.toml`, so the
-        // openhuman_dir is the parent of config_path. Without this the
-        // inner OpenHumanBackendProvider falls back to `~/.openhuman`
-        // and fails with "No backend session" on any workspace not
-        // located at the home default — the bug observed when running
-        // with `OPENHUMAN_WORKSPACE` pointed elsewhere.
-        let openhuman_dir = config.config_path.parent().map(std::path::PathBuf::from);
-        log::debug!(
-            "[memory_tree::chat] building Cloud provider consumer={} model={} \
-             openhuman_dir={:?}",
-            consumer.as_str(),
-            model,
-            openhuman_dir
-        );
-        Ok(Arc::new(cloud::CloudChatProvider::new(
-            config.api_url.clone(),
-            model,
-            openhuman_dir,
-            config.secrets.encrypt,
+            .filter(|m| !m.trim().is_empty() && m.trim() != DEFAULT_CLOUD_LLM_MODEL)
+            .unwrap_or(model);
+        Ok(Arc::new(workload::WorkloadChatProvider::new(
+            inner,
+            model_to_use,
+            slug_hint,
         )))
     }
 }
@@ -243,12 +268,43 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_returns_cloud_when_default() {
+    fn build_provider_errors_with_no_cloud_providers_configured() {
+        // Local-OAuth fork: `Config::default()` has empty `cloud_providers`
+        // and no `memory_provider`. The dead OpenHuman backend fallback
+        // (`summarization-v1`) is gone; the factory rightly surfaces a
+        // configuration error pointing at Settings → AI rather than
+        // silently constructing a provider that would 401/404 on every call.
         let cfg = Config::default();
-        // Default is LlmBackend::Cloud — provider construction must succeed
-        // without a configured local Ollama endpoint.
+        let err = build_chat_provider(&cfg, ChatConsumer::Extract)
+            .err()
+            .expect("expected error for unconfigured cloud provider");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no cloud provider configured") || msg.contains("chat-factory"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_provider_routes_to_workload_when_cloud_provider_present() {
+        use crate::openhuman::config::schema::cloud_providers::{AuthStyle, CloudProviderCreds};
+        let mut cfg = Config::default();
+        cfg.cloud_providers.push(CloudProviderCreds {
+            id: "p1".into(),
+            slug: "openai".into(),
+            label: "OpenAI".into(),
+            endpoint: "https://api.openai.com/v1".into(),
+            auth_style: AuthStyle::Bearer,
+            default_model: Some("gpt-5.4".into()),
+            ..CloudProviderCreds::default()
+        });
+        cfg.primary_cloud = Some("p1".into());
         let provider = build_chat_provider(&cfg, ChatConsumer::Extract).unwrap();
-        assert!(provider.name().contains("cloud"));
+        let name = provider.name();
+        assert!(
+            name.contains("openai") && name.contains("gpt-5.4"),
+            "expected workload-routed name with slug and model, got {name}"
+        );
     }
 
     #[test]

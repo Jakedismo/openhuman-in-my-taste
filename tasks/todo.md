@@ -169,6 +169,24 @@ Can run in parallel with Phase 5 (or after, to keep Phase 5 a clean diff).
 - [ ] **7.4** Update `CLAUDE.md` and `AGENTS.md` to reflect the new architecture (no Composio, no user accounts, native OAuth, Ollama-first).
 - [ ] **7.5** Update `src/openhuman/about_app/catalog.rs` capability matrix to reflect dropped surfaces.
 
+## Deferred / Future work
+
+### Composio direct-mode triggers (Option D)
+
+The trigger family — `composio_list_available_triggers`, `composio_list_triggers`, `composio_enable_trigger`, `composio_disable_trigger`, `composio_create_trigger`, `composio_list_github_repos` — still routes through the **backend-only** `resolve_client` helper in `src/openhuman/composio/ops.rs:52`. In direct mode this surfaces the misleading "composio unavailable: no backend session token. Sign in first (auth_store_session)." error in the per-toolkit Manage dialog (`<TriggerToggles>`), because the helper has no direct-mode arm.
+
+A working direct-mode trigger implementation needs:
+
+1. **Composio v3 trigger client** in `src/openhuman/composio/client.rs` — `direct_list_triggers`, `direct_list_active_triggers`, `direct_enable_trigger`, `direct_disable_trigger`. Modeled on `direct_list_connections` / `direct_authorize`. Hits `backend.composio.dev/api/v3/triggers_types*` and `/triggers/instances*` with the user's own API key.
+2. **Local webhook receiver** — Composio delivers trigger events to a public HTTPS URL. This is the structural blocker: in direct mode there is no OpenHuman backend fronting the receiver. Needs either ngrok / cloudflare-tunnel auto-provisioning, a relay tied to the existing A8 tunnels surface, or a user-supplied public URL.
+3. **HMAC verification** of inbound webhook payloads using the per-user webhook secret from app.composio.dev.
+4. **Webhook → event_bus dispatch** so the existing `trigger_triage` / `trigger_reactor` agents pick up the event.
+5. **Op rewiring** — replace `resolve_client(config)?` in the trigger ops with `create_composio_client(config)` + `ComposioClientKind::{Backend, Direct}` branching (same pattern as `composio_authorize` / `composio_list_connections`).
+
+Pre-work that closes the misleading-error gap without doing the full feature (interim, ~1h): make the trigger ops return an empty list in direct mode for the read paths and a clear "not yet supported in direct mode — see todo" error for the write paths. The UI's `<TriggerToggles>` already handles the empty-list case gracefully.
+
+**Do this after** the rest of the local-first goals settle (Phase 6 local replacements + Phase 7 defaults/cleanup). The trigger surface is not on the critical path for chat / memory / channels / native OAuth working.
+
 ## Risks & open questions
 
 - **Google "unverified app" UX** — every Gmail/Calendar/Drive consent shows a scary warning page until verification. Acceptable per scope but worth documenting in the README so a self-installer doesn't bounce off it.
