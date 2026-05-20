@@ -63,19 +63,29 @@ pub fn provider_for_role(role: &str, config: &Config) -> String {
     let s = opt.unwrap_or("").trim();
     if s.is_empty() || s == "cloud" {
         // When no explicit per-workload provider is set, resolve
-        // primary_cloud.  If it points to a non-openhuman entry, route
-        // there so users can use their own LLM provider without having
-        // to set every single workload knob.  (An active app-session
-        // is still required — verified inside
-        // create_chat_provider_from_string.)
+        // primary_cloud. If it points to a non-openhuman entry, use
+        // it. If primary_cloud is missing or stale, fall back to the
+        // first non-openhuman entry in `cloud_providers` (typically
+        // the migration-seeded "openai" entry). The OpenHuman backend
+        // sentinel is no longer a valid fallback in this fork — when
+        // nothing matches we return it only so callers see the
+        // factory's typed "no cloud provider configured" error
+        // instead of silently degrading.
         let primary_slug = config.primary_cloud.as_deref().and_then(|pid| {
             config
                 .cloud_providers
                 .iter()
-                .find(|e| e.id == pid && e.slug != "openhuman")
+                .find(|e| e.id == pid && e.slug != PROVIDER_OPENHUMAN)
                 .map(|e| e.slug.clone())
         });
-        if let Some(slug) = primary_slug {
+        let resolved = primary_slug.or_else(|| {
+            config
+                .cloud_providers
+                .iter()
+                .find(|e| e.slug != PROVIDER_OPENHUMAN)
+                .map(|e| e.slug.clone())
+        });
+        if let Some(slug) = resolved {
             format!("{slug}:")
         } else {
             PROVIDER_OPENHUMAN.to_string()
@@ -178,7 +188,23 @@ pub fn create_chat_provider_from_string(
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Build the OpenHuman backend provider (session-JWT auth).
+///
+/// In the local-OAuth fork there is no OpenHuman backend, so this
+/// hard-errors with a pointer at Settings → AI. The function is kept
+/// (rather than deleted) so existing call sites that resolve to the
+/// `"openhuman"` sentinel still type-check; their callers were never
+/// supposed to reach this in the local-only configuration, and the
+/// error surface is the user-facing way to find out their config
+/// drifted (e.g. `auth_style = "OpenhumanJwt"` left over from an
+/// older `cloud_providers` row).
 fn make_openhuman_backend(config: &Config) -> anyhow::Result<(Box<dyn Provider>, String)> {
+    let _ = config;
+    anyhow::bail!(
+        "[chat-factory] OpenHuman backend provider is not available in this build — \
+         configure a cloud provider (e.g. OpenAI) under Settings → AI, or set \
+         `primary_cloud` / `*_provider` to a slug present in `cloud_providers`."
+    );
+    #[allow(unreachable_code)]
     let model = config
         .default_model
         .clone()

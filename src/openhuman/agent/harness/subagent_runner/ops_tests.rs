@@ -900,18 +900,23 @@ fn resolve_subagent_provider_hint_with_no_config_falls_back() {
 #[test]
 fn resolve_subagent_provider_hint_with_config_routes_via_factory() {
     // The Hint arm with a real config takes the workload-factory path.
-    // We don't assert the *resulting* provider identity here (the
-    // factory may return a fresh OpenHuman backend or whatever
-    // primary_cloud resolves to), but we DO assert the resolved model
-    // matches the workload's configured exact id — not the legacy
-    // `{workload}-v1` synthesis.
+    // Assert the resolved model matches the workload entry's exact id —
+    // not the legacy `{workload}-v1` synthesis, not the parent's model.
+    use crate::openhuman::config::schema::cloud_providers::{AuthStyle, CloudProviderCreds};
     use crate::openhuman::config::Config;
     let mut config = Config::default();
-    // Route `agentic` to OpenHuman backend explicitly. The backend
-    // returns the configured default_model, which we set to a known
-    // string so the assertion is meaningful.
-    config.agentic_provider = Some("openhuman".to_string());
-    config.default_model = Some("agentic-specific-model".to_string());
+    // Route `agentic` to a real cloud-providers entry — OpenHuman
+    // backend is no longer a routable target in the local-OAuth fork.
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_oai".to_string(),
+        slug: "openai".to_string(),
+        label: "OpenAI".to_string(),
+        endpoint: "https://api.openai.com/v1".to_string(),
+        auth_style: AuthStyle::Bearer,
+        default_model: Some("agentic-specific-model".to_string()),
+        ..Default::default()
+    });
+    config.agentic_provider = Some("openai:agentic-specific-model".to_string());
 
     let parent: Arc<dyn Provider> = ScriptedProvider::new(vec![]);
     let (_resolved_provider, resolved_model) = super::resolve_subagent_provider(

@@ -53,30 +53,49 @@ fn anthropic_entry(id: &str, slug: &str) -> CloudProviderCreds {
 }
 
 #[test]
-fn openhuman_literal() {
+fn openhuman_literal_errors_in_local_fork() {
+    // In the local-OAuth fork the OpenHuman backend is gone; the
+    // sentinel must hard-error with a pointer at Settings → AI so
+    // the user knows where to configure their own provider.
     let config = Config::default();
-    let (_, model) = create_chat_provider_from_string("reasoning", "openhuman", &config)
-        .expect("openhuman literal must build");
-    assert!(!model.is_empty(), "model must not be empty");
-}
-
-#[test]
-fn cloud_no_providers_falls_back_to_openhuman() {
-    let config = Config::default();
-    let result = create_chat_provider_from_string("reasoning", "cloud", &config);
+    let err = create_chat_provider_from_string("reasoning", "openhuman", &config)
+        .err()
+        .expect("must error");
     assert!(
-        result.is_ok(),
-        "cloud fallback must succeed: {:?}",
-        result.err()
+        err.to_string()
+            .contains("OpenHuman backend provider is not available"),
+        "expected backend-removed error, got: {err}"
     );
 }
 
 #[test]
-fn openhuman_slug_routes_to_backend() {
+fn cloud_no_providers_errors_in_local_fork() {
+    // With no cloud_providers configured, "cloud" sentinel falls
+    // through to the same OpenHuman-backend hard error.
+    let config = Config::default();
+    let err = create_chat_provider_from_string("reasoning", "cloud", &config)
+        .err()
+        .expect("must error");
+    assert!(
+        err.to_string()
+            .contains("OpenHuman backend provider is not available"),
+        "expected backend-removed error, got: {err}"
+    );
+}
+
+#[test]
+fn openhuman_slug_errors_in_local_fork() {
+    // `openhuman:<model>` used to route to the backend provider.
+    // After the local-OAuth refactor it must hard-error too.
     let config = config_with_providers(vec![oh_entry("p_oh")]);
-    let (_, model) =
-        create_chat_provider_from_string("reasoning", "openhuman:", &config).expect("build");
-    assert!(!model.is_empty());
+    let err = create_chat_provider_from_string("reasoning", "openhuman:", &config)
+        .err()
+        .expect("must error");
+    assert!(
+        err.to_string()
+            .contains("OpenHuman backend provider is not available"),
+        "expected backend-removed error, got: {err}"
+    );
 }
 
 #[test]
@@ -302,9 +321,19 @@ async fn cloud_provider_with_malformed_endpoint_surfaces_url_error() {
 }
 
 #[test]
-fn primary_cloud_defaults_to_openhuman_when_no_providers() {
+fn primary_cloud_with_no_providers_errors_in_local_fork() {
+    // No cloud_providers, no primary_cloud, no workload override —
+    // factory must error with the backend-removed pointer rather
+    // than silently return the dead OpenHumanBackendProvider.
     let config = Config::default();
-    assert!(create_chat_provider("reasoning", &config).is_ok());
+    let err = create_chat_provider("reasoning", &config)
+        .err()
+        .expect("must error");
+    assert!(
+        err.to_string()
+            .contains("OpenHuman backend provider is not available"),
+        "expected backend-removed error, got: {err}"
+    );
 }
 
 #[test]
@@ -336,14 +365,12 @@ fn unknown_workload_falls_back_to_openhuman() {
     assert_eq!(provider_for_role("", &config), "openhuman");
 }
 
-#[test]
-fn openhuman_backend_uses_config_path_parent_as_state_dir() {
-    let mut config = Config::default();
-    config.config_path = std::path::PathBuf::from("/tmp/oh-test-workspace/config.toml");
-    let (_provider, model) = create_chat_provider("reasoning", &config)
-        .expect("openhuman backend must build with no cloud_providers");
-    assert!(!model.is_empty(), "model must be set")
-}
+// The `openhuman_backend_uses_config_path_parent_as_state_dir` test
+// was removed in the local-OAuth refactor — the OpenHuman backend
+// provider is no longer reachable, so there is no state_dir threading
+// behaviour left to assert. The user-facing fix when chat hits the
+// "no provider" path is to configure one in Settings → AI; this is
+// covered by `primary_cloud_with_no_providers_errors_in_local_fork`.
 
 // ── verify_session_active tests ──────────────────────────────────────
 

@@ -1102,27 +1102,12 @@ fn register_domain_subscribers(
         // initial throttle decision on battery-powered hosts).
         crate::openhuman::scheduler_gate::init_global(&config);
 
-        // Seed the scheduler-gate signed-out override from the on-disk
-        // session. Without this, a sidecar that boots with no stored JWT
-        // would happily spin up cron / channel loops and fire LLM requests
-        // that all 401 immediately.
-        match crate::api::jwt::get_session_token(&config) {
-            Ok(Some(_)) => {
-                crate::openhuman::scheduler_gate::set_signed_out(false);
-            }
-            Ok(None) => {
-                log::info!(
-                    "[auth] no session token at startup — scheduler gate set to signed_out"
-                );
-                crate::openhuman::scheduler_gate::set_signed_out(true);
-            }
-            Err(err) => {
-                log::warn!(
-                    "[auth] failed to read session token at startup ({err}) — assuming signed_out"
-                );
-                crate::openhuman::scheduler_gate::set_signed_out(true);
-            }
-        }
+        // In the local-OAuth fork there is no OpenHuman backend session
+        // to gate on — every workload uses the user's own cloud
+        // provider (or local Ollama). Leave the scheduler gate open so
+        // chat / cron / channels can run on first boot without needing
+        // a JWT that no longer exists.
+        crate::openhuman::scheduler_gate::set_signed_out(false);
 
         // Register the SessionExpired handler before any subscribers that
         // might publish 401-derived events, so the very first 401 is
