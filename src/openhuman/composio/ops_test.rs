@@ -92,17 +92,19 @@ async fn composio_list_connections_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_authorize_is_disabled() {
+async fn composio_authorize_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Without backend session OR direct-mode api key configured,
+    // `composio_authorize` returns the factory's typed error pointing
+    // the user at the right fix. In direct mode (api key set), this
+    // call would succeed and start an OAuth flow against the user's
+    // personal Composio tenant.
     let err = composio_authorize(&config, "gmail", None)
         .await
         .unwrap_err();
-    // After the local-OAuth refactor `composio_authorize` is a hard
-    // error — the Composio OAuth aggregator path was removed. New
-    // surface is the native `oauth-connect` CLI.
     assert!(
-        err.contains("authorize is disabled"),
+        err.contains("no backend session token") || err.contains("no api key is configured"),
         "unexpected error: {err}"
     );
 }
@@ -131,17 +133,18 @@ async fn composio_list_tools_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_execute_errors_for_unknown_slug() {
+async fn composio_execute_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
-    // Native dispatch isn't enabled (env var unset) and the Composio
-    // backend path was removed — so any execute now hard-errors with
-    // the "no native dispatcher" hint regardless of session state.
+    // Native dispatch has no arm for an arbitrary slug, and the
+    // mode-aware factory rejects when no backend session OR
+    // direct-mode api key is configured. The user-facing fix is in
+    // both error messages.
     let err = composio_execute(&config, "UNKNOWN_SLUG_FOR_TEST", None)
         .await
         .unwrap_err();
     assert!(
-        err.contains("no native dispatcher"),
+        err.contains("no backend session token") || err.contains("no api key is configured"),
         "unexpected error: {err}"
     );
 }

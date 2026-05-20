@@ -289,13 +289,6 @@ pub async fn composio_authorize(
     extra_params: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioAuthorizeResponse>> {
     tracing::debug!(toolkit = %toolkit, has_extra_params = extra_params.is_some(), "[composio] rpc authorize");
-    return Err(format!(
-        "[composio] authorize is disabled — Composio OAuth aggregator was removed \
-         in the local-OAuth refactor. Use the native flow via the `oauth-connect` \
-         CLI (Google/GitHub) or add a native arm for toolkit '{toolkit}'."
-    ));
-
-    #[allow(unreachable_code)]
     let kind = create_composio_client(config).map_err(|e| format!("[composio] authorize: {e}"))?;
     let resp = match kind {
         ComposioClientKind::Backend(client) => {
@@ -661,17 +654,35 @@ pub async fn composio_execute(
 ) -> OpResult<RpcOutcome<ComposioExecuteResponse>> {
     tracing::debug!(tool = %tool, "[composio] rpc execute");
 
-    // Native-OAuth dispatch is the ONLY execution path. The Composio
-    // backend proxy was removed in the local-OAuth refactor — any slug
-    // without a native arm hard-errors here so callers don't silently
-    // depend on a third-party tool runner.
+    // Native-OAuth dispatch wins when an arm exists (Gmail / Calendar /
+    // Drive / GitHub). Direct-mode Composio handles every other slug
+    // against the user's personal Composio tenant — backend mode is no
+    // longer reachable in this fork.
     if let Some(result) = try_native_dispatch(config, tool, arguments.as_ref()).await {
         return Ok(result);
     }
-    Err(format!(
-        "[composio] tool '{tool}' has no native dispatcher. \
-         Add a native arm in src/openhuman/oauth/native_dispatch.rs \
-         to support this slug."
+
+    let kind = create_composio_client(config).map_err(|e| format!("[composio] execute: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            client.execute_tool(tool, arguments).await.map_err(|e| {
+                report_composio_op_error("execute", &e);
+                format!("[composio] execute failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                tool = %tool,
+                "[composio-direct] execute: routing to user's personal Composio tenant"
+            );
+            super::client::direct_execute(&direct, tool, arguments, &config.composio.entity_id)
+                .await
+                .map_err(|e| format!("[composio-direct] execute failed: {e:#}"))?
+        }
+    };
+    Ok(RpcOutcome::new(
+        resp,
+        vec![format!("composio: executed tool {tool}")],
     ))
 }
 
@@ -1439,17 +1450,9 @@ pub async fn fetch_connected_integrations_status(
 /// expected to be re-sourced from `AuthService` profiles in a follow-up
 /// (it currently sees zero connections, which prompts the user-visible
 /// "no connections" state in the agent prompt).
-#[allow(unused_variables)]
 async fn fetch_connected_integrations_uncached(
     config: &Config,
 ) -> Option<Vec<ConnectedIntegration>> {
-    tracing::debug!(
-        "[composio] fetch_connected_integrations: stubbed (Composio backend removed)"
-    );
-    return None;
-
-    #[allow(unreachable_code)]
-    {
     use super::client::{create_composio_client, direct_list_connections, ComposioClientKind};
     use super::providers::toolkit_description;
 
@@ -1715,7 +1718,6 @@ async fn fetch_connected_integrations_uncached(
     }
 
     Some(integrations)
-    }
 }
 
 /// Just-in-time fetch of every available action for a single Composio

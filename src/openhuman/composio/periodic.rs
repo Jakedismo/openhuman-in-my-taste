@@ -99,19 +99,16 @@ pub fn record_sync_success(toolkit: &str, connection_id: &str) {
     }
 }
 
-/// Spawn the periodic sync background task. Stubbed out as part of
-/// the local-OAuth refactor — the Composio backend is no longer
-/// reachable, so polling it is a no-op. Kept as a stable entry point
-/// in case future native sync work wants to reuse the same scheduler
-/// shape.
+/// Spawn the periodic sync background task. Idempotent — calling
+/// twice is a cheap no-op because [`SCHEDULER_STARTED`] guards the
+/// spawn. In direct mode the scheduler polls the user's personal
+/// Composio v3 tenant; in backend mode it's a no-op (no backend
+/// session in this fork).
 pub fn start_periodic_sync() {
-    tracing::debug!(
-        "[composio:periodic] sync scheduler disabled (Composio backend removed)"
-    );
-    let _ = SCHEDULER_STARTED.set(());
-    return;
-
-    #[allow(unreachable_code)]
+    if SCHEDULER_STARTED.set(()).is_err() {
+        tracing::debug!("[composio:periodic] scheduler already started; ignoring duplicate call");
+        return;
+    }
     tokio::spawn(async move {
         tracing::info!(
             tick_seconds = TICK_SECONDS,
