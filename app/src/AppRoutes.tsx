@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Route, Routes, Navigate } from 'react-router-dom';
 
 import DefaultRedirect from './components/DefaultRedirect';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -17,10 +17,15 @@ import Skills from './pages/Skills';
 const AppRoutes = () => {
   return (
     <Routes>
-      {/* Single-user local app: root redirects straight to /home.
-          The old Welcome / login screen was removed in the local-OAuth
-          refactor (no user accounts, no session JWT). */}
-      <Route path="/" element={<Navigate to="/home" replace />} />
+      {/* Single-user local app: root goes through `DefaultRedirect`
+          so the onboarding gate fires on first launch. The old
+          Welcome / login screen was removed in the local-OAuth
+          refactor (no user accounts, no session JWT) — but the
+          onboarding wizard (Settings → AI key, channel intros,
+          model picks) still applies and was being silently
+          bypassed because `/` did an unconditional Navigate to
+          /home, never consulting `snapshot.onboardingCompleted`. */}
+      <Route path="/" element={<DefaultRedirect />} />
 
       {/* Onboarding (full-page stepper, gated by onboarding_completed) */}
       <Route
