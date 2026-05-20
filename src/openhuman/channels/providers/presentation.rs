@@ -17,6 +17,16 @@ use super::web::publish_web_channel_event;
 const MIN_SEGMENT_CHARS: usize = 40;
 const MAX_SEGMENTS: usize = 5;
 
+/// How long [`deliver_response`] waits for the cosmetic emoji-reaction
+/// decision before giving up and publishing `chat_done` without an
+/// emoji. The reaction runs on the local Ollama model; if it is
+/// saturated by a background vault sync or memory ingestion the
+/// reaction call can hang indefinitely, which used to wedge every
+/// chat turn at "Thinking… (1)" because `chat_done` is only emitted
+/// after this await completes. Two seconds is comfortably above the
+/// expected latency for an 8-token decision on a warm local model.
+const REACTION_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Deliver an agent response to the frontend, applying local-model
 /// presentation (segmentation + reaction) when the model is available.
 ///
@@ -39,8 +49,11 @@ pub async fn deliver_response(
     // Segmentation is pure CPU work, runs immediately.
     let segments = segment_for_delivery(full_response);
 
-    // Await the reaction result (should already be done or nearly done).
-    let reaction_emoji = reaction_handle.await.unwrap_or(None);
+    // Bounded await — the reaction is cosmetic and must NEVER block the
+    // user-visible `chat_done` event. When local Ollama is saturated by
+    // a background vault sync this await used to wedge forever, which
+    // surfaced to the user as a chat reply stuck at "Thinking… (1)".
+    let reaction_emoji = await_reaction_bounded(reaction_handle, REACTION_DECISION_TIMEOUT).await;
 
     if segments.len() <= 1 {
         // Single bubble — emit chat_done directly.
@@ -379,6 +392,34 @@ fn segment_delay(segment: &str) -> u64 {
 }
 
 // ── Reactions ────────────────────────────────────────────────────────────────
+
+/// Await a spawned `try_reaction` task with an upper bound on how long
+/// we'll wait. Returns the emoji on success, or `None` on timeout / panic /
+/// no-decision. The dropped `JoinHandle` leaves the spawned task detached;
+/// it will finish in the background when the local model frees up, and its
+/// result is simply discarded.
+async fn await_reaction_bounded(
+    handle: tokio::task::JoinHandle<Option<String>>,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(Ok(emoji)) => emoji,
+        Ok(Err(join_err)) => {
+            tracing::warn!(
+                error = %join_err,
+                "[presentation:reaction] reaction task panicked — proceeding without emoji"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = timeout.as_millis() as u64,
+                "[presentation:reaction] local model reaction timed out — proceeding without emoji (likely local Ollama contention)"
+            );
+            None
+        }
+    }
+}
 
 /// Ask the local model for an emoji reaction to the user's message.
 /// Returns `None` if the local model is unavailable or decides no reaction.
