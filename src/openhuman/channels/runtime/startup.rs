@@ -180,10 +180,21 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.autonomy,
         &config.workspace_dir,
     ));
-    let model = config
+    // `model` is the literal string that gets sent over the wire to
+    // whatever LLM endpoint the workload provider points at. When
+    // `default_model` is a slug-prefixed string like `openai:gpt-5.4`
+    // we MUST strip the slug — otherwise the OpenAI / Ollama / etc.
+    // endpoint receives the slug-prefixed string verbatim and 404s
+    // (the user-visible symptom was Telegram bot errors naming
+    // `openhuman:gpt-5.4-mini` as the model).
+    let raw_model = config
         .default_model
         .clone()
         .unwrap_or_else(|| crate::openhuman::config::DEFAULT_MODEL.into());
+    let model = match raw_model.split_once(':') {
+        Some((_slug, real)) if !real.trim().is_empty() => real.trim().to_string(),
+        _ => raw_model,
+    };
     let temperature = config.default_temperature;
     let local_embedding = config.workload_local_model("embeddings");
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_local_ai(

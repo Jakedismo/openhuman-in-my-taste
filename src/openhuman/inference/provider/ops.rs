@@ -582,6 +582,50 @@ pub fn create_intelligent_routing_provider(
     config: &crate::openhuman::config::Config,
     options: &ProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn Provider>> {
+    // Local-OAuth fork: when the user has configured at least one
+    // non-openhuman cloud-providers entry and is NOT pointing the
+    // legacy `inference_url` at a custom OpenAI-compatible host, route
+    // through the workload factory so the channel runtime and
+    // /threads chat both end up calling the user's primary_cloud
+    // (typically the seeded "openai" row). Without this, both call
+    // sites silently fell back to `OpenHumanBackendProvider`, which
+    // hard-errors with the SESSION_EXPIRED sentinel in this build —
+    // the user-visible symptom was the Telegram bot reporting
+    // `openhuman:<model>` provider failures even though Settings →
+    // AI was pointed at OpenAI or Ollama.
+    let has_user_cloud = config
+        .cloud_providers
+        .iter()
+        .any(|e| e.slug != INFERENCE_BACKEND_ID);
+    if has_user_cloud && inference_url.is_none() {
+        let provider_str = factory::provider_for_role("reasoning", config);
+        log::info!(
+            "[providers] intelligent routing: using workload factory provider_str={}",
+            provider_str
+        );
+        let (workload_provider, resolved_model) =
+            factory::create_chat_provider_from_string("reasoning", &provider_str, config)?;
+        let fallback_model = if resolved_model.trim().is_empty() {
+            config
+                .default_model
+                .clone()
+                .unwrap_or_else(|| crate::openhuman::config::DEFAULT_MODEL.to_string())
+        } else {
+            resolved_model
+        };
+        let reliable: Box<dyn Provider> = Box::new(
+            reliable::ReliableProvider::new(
+                vec![(INFERENCE_BACKEND_ID.to_string(), workload_provider)],
+                config.reliability.provider_retries,
+                config.reliability.provider_backoff_ms,
+            )
+            .with_model_fallbacks(config.reliability.model_fallbacks.clone()),
+        );
+        let provider =
+            crate::openhuman::routing::new_provider(reliable, &config.local_ai, &fallback_model);
+        return Ok(Box::new(provider));
+    }
+
     let raw_backend =
         create_backend_inference_provider(inference_url, backend_url, api_key, options)?;
     // Wrap the raw backend in ReliableProvider so transient 502/503/504 errors
