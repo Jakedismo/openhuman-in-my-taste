@@ -51,19 +51,29 @@ const TriggersPanel = () => {
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Seed the form drafts once from the first status payload. After
+  // that, polling refreshes only the read-only display fields
+  // (tunnel_state, public_url, subscription_id, error) — the user's
+  // in-flight checkbox/domain/port edits are preserved verbatim.
+  // Without this latch the 4-second poll would clobber an unchecked
+  // toggle as long as the tunnel was still running on disk.
+  const hasSeededForm = useRef(false);
+
   const refreshStatus = useCallback(async () => {
     try {
       const res = await openhumanComposioLocalWebhookStatus();
       const next = res.result?.status;
       if (next) {
         setStatus(next);
-        // Seed the form drafts from the persisted state on first
-        // load. After that we only refresh the read-only fields
-        // (tunnel_state, subscription_id, public_url) — the user's
-        // in-flight edits to enabled/domain/port are preserved.
-        setNgrokDomain(prev => (prev === '' ? next.ngrok_domain : prev));
-        setPort(prev => (prev === 8765 ? next.local_port : prev));
-        setEnabled(prev => prev || next.tunnel_state !== 'idle');
+        if (!hasSeededForm.current) {
+          setNgrokDomain(next.ngrok_domain);
+          setPort(next.local_port);
+          // The receiver actually being up is the source of truth
+          // for the "enabled" form initial value; subsequent user
+          // edits are not overwritten.
+          setEnabled(next.tunnel_state !== 'idle');
+          hasSeededForm.current = true;
+        }
       }
     } catch (err) {
       console.warn('[TriggersPanel] failed to load status:', err);
