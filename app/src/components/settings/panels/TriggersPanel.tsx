@@ -357,7 +357,7 @@ const TriggersPanel = () => {
               type="button"
               onClick={handleSave}
               disabled={saveStatus === 'saving'}
-              className="rounded bg-ocean-600 hover:bg-ocean-700 text-white px-4 py-2 text-sm disabled:opacity-50"
+              className="rounded bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 text-sm disabled:opacity-50"
             >
               {saveStatus === 'saving' ? 'Saving…' : 'Save'}
             </button>
