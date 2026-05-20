@@ -3,12 +3,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::openhuman::config::Config;
 use crate::openhuman::memory::ops::{doc_delete, doc_ingest, DeleteDocParams, IngestDocParams};
+use crate::openhuman::memory::tree::canonicalize::document::DocumentInput as TreeDocumentInput;
+use crate::openhuman::memory::tree::ingest as tree_ingest;
 
 use super::store;
 use super::types::{Vault, VaultFile, VaultFileStatus, VaultSyncReport};
@@ -245,10 +247,14 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
             .and_then(|s| s.to_str())
             .unwrap_or(&rel_path)
             .to_string();
+        // Memory tree needs its own copy of the body. `doc_ingest` moves
+        // `content` into `IngestDocParams`; we clone here (vault files are
+        // capped at MAX_FILE_BYTES so the clone is bounded).
+        let tree_body = content.clone();
         let ingest_params = IngestDocParams {
             namespace: vault.namespace.clone(),
             key,
-            title,
+            title: title.clone(),
             content,
             source_type: "vault".to_string(),
             priority: "medium".to_string(),
@@ -272,7 +278,7 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
                     vault_id: vault.id.clone(),
                     rel_path: rel_path.clone(),
                     document_id,
-                    content_hash: hash,
+                    content_hash: hash.clone(),
                     mtime_ms,
                     bytes: metadata.len(),
                     ingested_at: Utc::now(),
@@ -288,6 +294,67 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
                 }
                 log::trace!("[vault] sync_vault: ingested path={rel_path}");
                 report.ingested += 1;
+
+                // Fan out to the memory-tree ingest path so the chunks
+                // become visible to the summariser / extractor workers.
+                // The main `doc_ingest` above writes to the
+                // `UnifiedMemory` namespace store (graph + vector
+                // chunks for `query_namespace` retrieval); the memory
+                // tree maintains its own `mem_tree_chunks` table that
+                // feeds the bucket-seal / summary cascade and the UI's
+                // tree visualisation. Without this fan-out the user
+                // saw "Cleared 0 tree row(s); requeued 0 chunk(s)" on
+                // reset because the tree's chunk table was empty
+                // despite the vault sync reporting hundreds of
+                // ingested files (#bug-report 2026-05-20).
+                //
+                // We use a hash-suffixed source_id so re-syncing a
+                // modified file produces a NEW tree-side ingest
+                // instead of being skipped by
+                // `tree::ingest::already_ingested`. Old chunks for
+                // the previous content stay in the tree (acceptable
+                // for v1; a follow-up could prune them via a
+                // delete-by-prefix sweep keyed on
+                // `vault:{vault_id}:{rel_path}:`).
+                let tree_source_id =
+                    format!("vault:{}:{}:{}", vault.id, rel_path, &hash[..hash.len().min(12)]);
+                let modified_at = DateTime::<Utc>::from_timestamp_millis(mtime_ms)
+                    .unwrap_or_else(Utc::now);
+                let tree_doc = TreeDocumentInput {
+                    provider: "vault".to_string(),
+                    title: title.clone(),
+                    body: tree_body,
+                    modified_at,
+                    source_ref: Some(format!("vault://{}/{}", vault.id, rel_path)),
+                };
+                match tree_ingest::ingest_document(
+                    config,
+                    &tree_source_id,
+                    "self",
+                    vec![format!("vault:{}", vault.id), format!("ext:{ext}")],
+                    tree_doc,
+                )
+                .await
+                {
+                    Ok(ingest_outcome) => {
+                        log::debug!(
+                            "[vault] sync_vault: tree ingest ok path={rel_path} \
+                             chunks_written={} chunks_dropped={} already={}",
+                            ingest_outcome.chunks_written,
+                            ingest_outcome.chunks_dropped,
+                            ingest_outcome.already_ingested,
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[vault] sync_vault: tree ingest failed (non-fatal) \
+                             path={rel_path} err={err:#}"
+                        );
+                        report
+                            .errors
+                            .push(format!("{rel_path}: tree ingest failed: {err:#}"));
+                    }
+                }
             }
             Err(err) => {
                 log::debug!("[vault] sync_vault: ingest failed path={rel_path} err={err}");
