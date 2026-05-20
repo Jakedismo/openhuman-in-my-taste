@@ -531,15 +531,26 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // Single message bus — all channels send messages here
     let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
 
-    // Spawn a listener for each channel
-    let mut handles = Vec::new();
+    // Wire the process-wide listener registry so connect/disconnect
+    // RPCs can hot-swap channel listeners without restarting the core
+    // process. Idempotent — re-calling `start_channels` keeps the
+    // first sender (subsequent calls would be a no-op).
+    super::listener_registry::init(tx.clone(), initial_backoff_secs, max_backoff_secs);
+
+    // Spawn a listener for each channel. The registry owns each handle
+    // so a later `connect/disconnect` RPC can abort + respawn it. The
+    // tokio runtime drives them to completion regardless of who holds
+    // the handle, so we don't separately await them at the end of
+    // `start_channels` anymore — `run_message_dispatch_loop` is the
+    // process-lifetime gate.
     for ch in &channels {
-        handles.push(spawn_supervised_listener(
+        let handle = spawn_supervised_listener(
             ch.clone(),
             tx.clone(),
             initial_backoff_secs,
             max_backoff_secs,
-        ));
+        );
+        super::listener_registry::track(ch.name().to_string(), handle);
     }
     drop(tx); // Drop our copy so rx closes when all channels stop
 
@@ -604,10 +615,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
 
-    // Wait for all channel tasks
-    for h in handles {
-        let _ = h.await;
-    }
-
+    // Listener tasks are owned by `listener_registry`. The tokio
+    // runtime drains them on shutdown; no explicit await needed here.
     Ok(())
 }
