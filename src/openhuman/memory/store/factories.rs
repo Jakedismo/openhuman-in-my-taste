@@ -490,15 +490,22 @@ mod tests {
     // ── effective_embedding_settings (unprobed selection priority) ────────
 
     #[test]
-    fn embedding_settings_defaults_to_cloud_when_no_local_ai() {
+    fn embedding_settings_defaults_to_ollama_in_local_oauth_fork() {
+        // Local-OAuth fork: the OpenHuman backend Voyage path is dead,
+        // so `MemoryConfig::default()` now seeds an Ollama-based
+        // embedder (`bge-m3`, 1024 dim). The fallback through this
+        // helper must reflect that — otherwise the legacy
+        // `embedding_provider = "cloud"` line gets re-injected on every
+        // `Config::save()` round-trip, which is exactly the user-
+        // reported bug this default flip is meant to fix.
         let mem = MemoryConfig::default();
         let (provider, model, dims) = effective_embedding_settings(&mem, None);
         assert_eq!(
-            provider, "cloud",
-            "no local-AI config must default to cloud"
+            provider, "ollama",
+            "no local-AI config must default to Ollama in the local-OAuth fork"
         );
-        assert!(!model.is_empty(), "cloud model must be non-empty");
-        assert!(dims > 0, "cloud dimensions must be positive");
+        assert!(!model.is_empty(), "default model must be non-empty");
+        assert_eq!(dims, 1024, "default Ollama dimensions are 1024 (bge-m3)");
     }
 
     #[test]
@@ -627,11 +634,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probed_settings_keep_cloud_when_provider_is_cloud() {
-        // No local-AI opt-in → intended provider is cloud, probe is skipped.
+    async fn probed_settings_keep_default_provider_when_no_local_override() {
+        // In the local-OAuth fork `MemoryConfig::default()` now seeds
+        // `embedding_provider = "ollama"` (was: "cloud"). With no
+        // `local_model` override the probed-path returns the intended
+        // provider as-is — the probe is skipped because the caller
+        // hasn't opted into the local-AI workload. The legacy assertion
+        // here pinned the dead "cloud" default and would silently
+        // regress every time we tried to flip the schema.
         let mem = MemoryConfig::default();
         let (provider, _, _) = effective_embedding_settings_probed(&mem, None).await;
-        assert_eq!(provider, "cloud");
+        assert_eq!(provider, "ollama");
     }
 
     /// Sets `OPENHUMAN_OLLAMA_BASE_URL` to a deliberately unreachable address

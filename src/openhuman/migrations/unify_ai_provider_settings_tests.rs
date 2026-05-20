@@ -117,11 +117,24 @@ fn memory_provider_local_when_llm_backend_local() {
 }
 
 #[test]
-fn memory_provider_cloud_when_llm_backend_cloud() {
+fn memory_provider_defaults_to_local_ollama_in_local_oauth_fork() {
+    // `Config::default()` now has `llm_backend = Local`,
+    // `local_ai.runtime_enabled = true`, and a non-empty
+    // `local_ai.chat_model_id` (defaults to "gemma3:1b-it-qat"). The
+    // migration's Local arm matches, so `memory_provider` is set to
+    // `ollama:<chat_model_id>`. This replaces the legacy default
+    // where `llm_backend = Cloud` produced `memory_provider = "cloud"`
+    // — that path was tied to the dead OpenHuman backend's
+    // `summarization-v1` model, which is no longer reachable in this
+    // fork. Users who explicitly want cloud routing for memory can
+    // still set `memory_provider = "<slug>:<model>"` themselves; the
+    // factory's `provider_for_role("memory", ...)` honours it.
     let mut c = Config::default();
-    // default backend is Cloud
     let _ = run(&mut c).unwrap();
-    assert_eq!(c.memory_provider.as_deref(), Some("cloud"));
+    assert_eq!(
+        c.memory_provider.as_deref(),
+        Some("ollama:gemma3:1b-it-qat")
+    );
 }
 
 #[test]

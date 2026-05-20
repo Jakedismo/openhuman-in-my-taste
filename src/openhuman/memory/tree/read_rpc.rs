@@ -2034,10 +2034,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_llm_returns_cloud_by_default() {
+    async fn get_llm_returns_local_by_default_in_local_oauth_fork() {
+        // The OpenHuman backend `summarization-v1` chat path is dead;
+        // `LlmBackend::default()` flipped to `Local` so fresh configs
+        // don't write a zombie `llm_backend = "cloud"` line back into
+        // `config.toml`. The legacy `LlmBackend::Cloud` variant is
+        // still deserialised from older configs but isn't a default.
         let (_tmp, cfg) = test_config();
         let resp = get_llm_rpc(&cfg).await.unwrap().value;
-        assert_eq!(resp.current, "cloud");
+        assert_eq!(resp.current, "local");
     }
 
     /// Test helper — build a backend-only `SetLlmRequest` with all model
