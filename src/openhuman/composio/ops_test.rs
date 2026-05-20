@@ -158,11 +158,23 @@ async fn composio_get_user_profile_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_sync_errors_without_session() {
+async fn composio_sync_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Post-#1710 follow-up: composio_sync now goes through the
+    // mode-aware factory instead of the legacy `resolve_client`. With
+    // no backend session AND no direct-mode api key configured, the
+    // factory surfaces "no backend session token" — same tolerance
+    // pattern used by composio_authorize / composio_execute /
+    // composio_list_connections tests. Direct-mode users with an api
+    // key configured no longer hit the "composio unavailable" wall on
+    // sync; they reach the toolkit-lookup step against their personal
+    // Composio v3 tenant.
     let err = composio_sync(&config, "c-1", None).await.unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -1119,6 +1131,36 @@ async fn composio_list_tools_in_direct_mode_does_not_fall_back_to_backend() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn composio_sync_routes_through_direct_mode() {
+    // Regression: in the local-OAuth fork, `composio_sync` previously
+    // gated on the legacy `resolve_client(config)?` which required a
+    // backend session token. Direct-mode users hit
+    // "composio unavailable: no backend session token" even with a
+    // valid Composio API key + active connection. Sync must now route
+    // through the mode-aware factory (mirrors `composio_authorize` and
+    // `composio_list_connections`).
+    //
+    // We can't mock the live Composio v3 `/connected_accounts` endpoint
+    // at the URL-rewriter level in this unit test, so we assert on the
+    // error-shape contract: (a) no "no backend session" surface, and
+    // (b) the error must still carry a `composio` prefix so it routes
+    // through normal observability. The backend-mode path would have
+    // produced "composio unavailable / no backend session" — its
+    // absence proves the factory routed us to direct mode.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_sync(&config, "c-1", None).await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
 }
 
 #[tokio::test]

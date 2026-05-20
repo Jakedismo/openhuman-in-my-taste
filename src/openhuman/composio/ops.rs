@@ -888,6 +888,52 @@ async fn resolve_toolkit_for_connection(
     Ok(conn.toolkit)
 }
 
+/// Mode-aware sibling of [`resolve_toolkit_for_connection`]. Looks up
+/// the toolkit slug via the factory, so direct-mode users (no backend
+/// session token, BYO Composio API key) still resolve the connection
+/// against **their own** Composio tenant. Used by ops whose data-path
+/// runs through the mode-aware [`ProviderContext::execute`] —
+/// [`composio_sync`] today; analogous callers can be migrated later by
+/// swapping `resolve_client(config)` + `resolve_toolkit_for_connection`
+/// for a single call to this helper.
+///
+/// Returns the same `connection unknown` error shape as the legacy
+/// helper so existing UI / agent error handling continues to work.
+async fn resolve_toolkit_for_connection_mode_aware(
+    config: &Config,
+    connection_id: &str,
+) -> OpResult<String> {
+    tracing::debug!(
+        connection_id = %connection_id,
+        "[composio] resolve_toolkit_for_connection_mode_aware"
+    );
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] resolve_toolkit: {e}"))?;
+    let connections = match kind {
+        ComposioClientKind::Backend(client) => {
+            let resp = client.list_connections().await.map_err(|e| {
+                report_composio_op_error("resolve_toolkit_for_connection", &e);
+                format!("[composio] list_connections failed: {e:#}")
+            })?;
+            resp.connections
+        }
+        ComposioClientKind::Direct(direct) => {
+            // Walk the user's personal Composio v3 tenant rather than
+            // the (non-existent) backend session. Mirrors the direct
+            // arm in [`composio_list_connections`] (#1710).
+            let resp = direct_list_connections(&direct)
+                .await
+                .map_err(|e| format!("[composio-direct] list_connections failed: {e:#}"))?;
+            resp.connections
+        }
+    };
+    connections
+        .into_iter()
+        .find(|c| c.id == connection_id)
+        .map(|c| c.toolkit)
+        .ok_or_else(|| format!("[composio] no connection with id '{connection_id}'"))
+}
+
 /// `openhuman.composio_get_user_profile` — fetch a normalized user
 /// profile for a connected account by dispatching to the toolkit's
 /// registered [`super::providers::ComposioProvider`].
@@ -1055,14 +1101,21 @@ pub async fn composio_sync(
         reason = reason.as_str(),
         "[composio] rpc sync"
     );
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id).await?;
+    // Mode-aware: works for backend-proxied users AND direct-mode users
+    // (BYO Composio API key, no backend session token). Previously this
+    // gated on `resolve_client(config)?` which always required a backend
+    // session — direct-mode users hit "composio unavailable: no backend
+    // session token" even after a successful authorize + active
+    // connection.  The actual data path inside `provider.sync()` runs
+    // every Composio action through `ProviderContext::execute`, which is
+    // already mode-aware (#1710), so once we have the toolkit slug the
+    // rest is identical regardless of mode.
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id).await?;
 
     let provider = get_provider(&toolkit).ok_or_else(|| {
         format!("[composio] no native provider registered for toolkit '{toolkit}'")
     })?;
 
-    let _ = client; // see analogous comment above — drop the pre-baked client (#1710).
     let ctx = ProviderContext {
         config: Arc::new(config.clone()),
         toolkit: toolkit.clone(),
