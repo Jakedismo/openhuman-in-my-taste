@@ -171,6 +171,24 @@ Can run in parallel with Phase 5 (or after, to keep Phase 5 a clean diff).
 
 ## Deferred / Future work
 
+### LLM-driven namespace-graph entity extraction
+
+Today `UnifiedMemory::upsert_document` (`src/openhuman/memory/store/unified/documents.rs`) runs **chunking + embedding** end-to-end with the user's configured embedder, but **entity / relation extraction** for the namespace knowledge graph is still hard-coded to the heuristic regex path in `src/openhuman/memory/ingestion/parse.rs::parse_document` — the `DEFAULT_MEMORY_EXTRACTION_MODEL = "heuristic-only"` label reported in logs. Patterns are tuned for chat / email / structured prose (`From:`/`To:`/`Subject:` headers, `# markdown headings`, capitalised names), so on arbitrary vault HTML / prose / source code the namespace graph stays sparse.
+
+The memory **tree** path (`src/openhuman/memory/tree/score/extract/llm.rs::LlmEntityExtractor`) already runs an LLM against `memory_tree.llm_extractor_model` (`gemma4:e4b` in the user's config) and produces rich extraction asynchronously via the extract-job worker — but that output lands in `mem_tree_*` tables and feeds the tree visualisation + drill-down retrieval, NOT the namespace `(subject, predicate, object)` graph that `graph_query_namespace` / `query_namespace` read from.
+
+To upgrade `UnifiedMemory::upsert_document` to LLM-driven graph extraction:
+
+1. **New extractor module** under `src/openhuman/memory/ingestion/` (e.g. `llm_extract.rs`) — mirrors the shape of `tree::score::extract::llm::LlmEntityExtractor` but emits the namespace-graph `(RawEntity, RawRelation)` shapes consumed by `parse::parse_document` / `ExtractionAccumulator`. Lift the prompt template from the tree extractor for parity; both surfaces want the same JSON entity/relation envelope.
+2. **Route via the workload factory.** `provider_for_role("memory", config)` already returns the user's configured memory workload provider (`ollama:gemma4:e4b` / `openai:gpt-5.4-mini` / etc). Build a `Box<dyn Provider>` per ingest and call its `chat_with_system` with the extraction prompt + the chunk body. Reuse the `WorkloadChatProvider` adapter from `memory/tree/chat/workload.rs` so the timing / retry behaviour matches the tree path.
+3. **Async, not inline.** `upsert_document` is called from the vault sync hot path (`vault::sync::sync_vault`), the chat archivist, and Gmail / Drive ingest — running an LLM call per chunk inline would block all of them. Enqueue an `extract_namespace_graph` job (mirror the existing tree-side `extract_chunk` jobs) and have the background ingestion worker (`memory::ingestion::queue`) drain it. The doc rows + chunks land synchronously; graph relations fill in asynchronously.
+4. **Soft-fallback contract.** When the LLM is unreachable / times out / parse fails, fall back to the existing heuristic path for that document so ingest stays write-through. Log a `[memory:ingestion] LLM extraction failed; falling back to heuristic` warning with the doc id so operators can spot a misconfig.
+5. **Config knob.** Add `[memory] graph_extraction = "heuristic" | "llm" | "auto"` (default `auto` → LLM when `memory_provider` is set, heuristic when not). Honours the existing `memory_provider` workload field; no new top-level setting.
+6. **Reporting.** Update `MemoryIngestionResult.extraction_mode` and `MemoryIngestionResult.model_name` so the UI / activity log can show "extracted via gemma4:e4b" instead of the cosmetic `heuristic-only` label.
+7. **Tests.** Mock-provider tests in `memory::ingestion::tests` asserting (a) heuristic path runs when no provider configured, (b) LLM path runs with a configured `memory_provider`, (c) LLM failure falls back to heuristic, (d) extracted entities / relations land in the namespace graph (`graph_query_namespace` returns them).
+
+**Do this after** the Phase 6 local replacements + Phase 7 defaults settle — chat / memory tree / channels are all wired now, but the namespace graph isn't on the critical path for everyday retrieval (`query_namespace` reads chunks via vector search, not the graph). The tree extractor already covers the "show me entities in this doc" UX through the Intelligence drill-down, so users have a working entity surface today; this entry is about making `graph_query_namespace` first-class for callers (agent prompts, knowledge graph viz) that want explicit subject/predicate/object queries.
+
 ### Composio direct-mode triggers (Option D)
 
 The trigger family — `composio_list_available_triggers`, `composio_list_triggers`, `composio_enable_trigger`, `composio_disable_trigger`, `composio_create_trigger`, `composio_list_github_repos` — still routes through the **backend-only** `resolve_client` helper in `src/openhuman/composio/ops.rs:52`. In direct mode this surfaces the misleading "composio unavailable: no backend session token. Sign in first (auth_store_session)." error in the per-toolkit Manage dialog (`<TriggerToggles>`), because the helper has no direct-mode arm.
