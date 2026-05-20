@@ -149,7 +149,18 @@ async fn ensure_ollama_server_requires_external_runtime_when_unreachable() {
 }
 
 #[tokio::test]
-async fn ensure_ollama_server_reports_broken_external_runner_without_restart_attempt() {
+async fn ensure_ollama_server_passes_when_tags_endpoint_responds_even_if_show_misbehaves() {
+    // Regression: the old probe sent `POST /api/show {"name": ...}` and
+    // declared the runner broken on any 500 + `fork/exec` body. In
+    // practice this produced false positives — `/api/embeddings` and
+    // `/api/chat` worked perfectly but `/api/show` on a nonexistent
+    // model returned a `fork/exec`-shaped error in some Ollama versions,
+    // and users got "cannot execute models" boot warnings + a yellow
+    // degraded badge despite real LLM calls working. The probe is now
+    // GET-only on `/api/tags`; if that responds, the runner is
+    // considered OK. Genuine runner failures will be reported by the
+    // actual chat / embed paths on the first failed call, with their
+    // real error context.
     let _guard = crate::openhuman::inference::inference_test_guard();
 
     let app = Router::new()
@@ -157,9 +168,11 @@ async fn ensure_ollama_server_reports_broken_external_runner_without_restart_att
         .route(
             "/api/show",
             axum::routing::post(|| async {
+                // Simulate the false-positive shape from the previous
+                // bug report: /api/show returns 500 with fork/exec.
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "fork/exec /broken/ollama: no such file or directory",
+                    "fork/exec /some/runner: no such file or directory",
                 )
             }),
         );
@@ -170,18 +183,15 @@ async fn ensure_ollama_server_reports_broken_external_runner_without_restart_att
 
     let config = Config::default();
     let service = LocalAiService::new(&config);
-    let err = service
-        .ensure_ollama_server(&config)
-        .await
-        .expect_err("broken runner should fail");
+    let result = service.ensure_ollama_server(&config).await;
 
     unsafe {
         std::env::remove_var("OPENHUMAN_OLLAMA_BASE_URL");
     }
 
     assert!(
-        err.contains("cannot execute models") || err.contains("Restart the external runtime"),
-        "unexpected error: {err}"
+        result.is_ok(),
+        "tags-200 should pass regardless of /api/show body; got: {result:?}"
     );
 }
 

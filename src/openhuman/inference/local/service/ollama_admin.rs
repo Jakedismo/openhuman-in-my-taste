@@ -1144,41 +1144,42 @@ impl LocalAiService {
     }
 
     /// Quick check that the Ollama runner can actually exec models.
-    /// Sends a tiny generate request and checks for a 500 "fork/exec" error.
+    ///
+    /// Previously this sent a `POST /api/show` with a nonexistent model
+    /// name and looked for a `500` response whose body contained the
+    /// substring `fork/exec` (Go's `os/exec.Cmd.Start` error shape). The
+    /// premise was that `/api/show` spawns the runner subprocess to
+    /// introspect a model's template/parameters, so a runner-binary
+    /// problem (Gatekeeper quarantine, missing runner files, bad
+    /// permissions) would surface as `fork/exec /path/to/runner: …`.
+    ///
+    /// In practice the probe produced false positives on installations
+    /// where `/api/embeddings` and `/api/chat` both worked perfectly —
+    /// users would hit "Configured Ollama runtime is reachable but
+    /// cannot execute models" in boot logs and a yellow "degraded"
+    /// status badge in the UI even though their LLM calls returned
+    /// fine. (Recent Ollama versions changed the `/api/show` code path
+    /// to return `fork/exec` in some edge cases that no longer
+    /// correlate with real runner brokenness — most commonly when the
+    /// queried model name doesn't exist.) The probe was over-eager
+    /// and the gate it fed (`bootstrap degraded`) is purely cosmetic
+    /// anyway — the live chat / embedding paths (`OllamaEmbedding`,
+    /// `OllamaChatProvider`) hit Ollama over HTTP directly and would
+    /// surface a real runner failure with its real error text on the
+    /// first failed call, with much more useful context than this
+    /// boot-time probe.
+    ///
+    /// Now: if the daemon answers `GET /api/tags` we consider the
+    /// runner OK. Real model failures will be reported by the actual
+    /// calling code path.
     async fn ollama_runner_ok(&self) -> bool {
         let resp = self
             .http
-            .post(format!("{}/api/tags", ollama_base_url()))
+            .get(format!("{}/api/tags", ollama_base_url()))
             .timeout(std::time::Duration::from_secs(3))
             .send()
             .await;
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                // Tags endpoint works — but the runner error only shows up on model exec.
-                // Do a lightweight pull-status check (won't download, just checks).
-                let check = self
-                    .http
-                    .post(format!("{}/api/show", ollama_base_url()))
-                    .json(&serde_json::json!({"name": "___nonexistent_probe___"}))
-                    .timeout(std::time::Duration::from_secs(3))
-                    .send()
-                    .await;
-                match check {
-                    Ok(r) => {
-                        let status = r.status().as_u16();
-                        let body = r.text().await.unwrap_or_default();
-                        // 404 = model not found — runner is fine. 500 with fork/exec = broken.
-                        if status == 500 && body.contains("fork/exec") {
-                            log::warn!("[local_ai] ollama runner broken: {body}");
-                            return false;
-                        }
-                        true
-                    }
-                    Err(_) => true, // network error, assume ok
-                }
-            }
-            _ => false,
-        }
+        matches!(resp, Ok(r) if r.status().is_success())
     }
 
     /// Kill any running Ollama server process so we can restart with the correct binary.
