@@ -46,8 +46,24 @@ pub async fn list_configured_models(
         .cloned()
         .ok_or_else(|| format!("no cloud provider with id or slug '{}' found", provider_id))?;
 
-    let base = entry.endpoint.trim_end_matches('/');
+    let base = entry.endpoint.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(format!(
+            "cloud provider '{}' has an empty endpoint; configure one in Settings → AI",
+            entry.slug
+        ));
+    }
     let models_url = format!("{}/models", base);
+
+    // Parse early so we fail with a clear "invalid endpoint URL" message
+    // before we hit the reqwest builder's opaque "builder error" later.
+    let parsed_url = reqwest::Url::parse(&models_url).map_err(|e| {
+        format!(
+            "cloud provider '{}' endpoint '{}' is not a valid URL ({}); \
+             expected something like `http://127.0.0.1:11434/v1`",
+            entry.slug, entry.endpoint, e
+        )
+    })?;
 
     log::debug!(
         "[providers][list_models] fetching url={} slug={}",
@@ -59,11 +75,32 @@ pub async fn list_configured_models(
         crate::openhuman::inference::provider::factory::lookup_key_for_slug(&entry.slug, &config)
             .unwrap_or_default();
 
-    let client = crate::openhuman::config::build_runtime_proxy_client_with_timeouts(
-        "providers.list_models",
-        30,
-        10,
+    // Loopback endpoints (Ollama / LM Studio / dev mocks) must bypass the
+    // runtime proxy — even an otherwise-correct proxy is the wrong route
+    // for 127.0.0.1, and a misconfigured one surfaces here as an opaque
+    // reqwest "builder error". A vanilla client is fine for local URLs;
+    // remote providers continue to use the proxied client.
+    let is_loopback = matches!(
+        parsed_url.host_str(),
+        Some("127.0.0.1") | Some("::1") | Some("localhost")
     );
+    let client = if is_loopback {
+        log::debug!(
+            "[providers][list_models] using direct client for loopback url={}",
+            models_url
+        );
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("[providers][list_models] failed to build direct client: {e}"))?
+    } else {
+        crate::openhuman::config::build_runtime_proxy_client_with_timeouts(
+            "providers.list_models",
+            30,
+            10,
+        )
+    };
 
     let mut request = client.get(&models_url);
 
@@ -93,10 +130,20 @@ pub async fn list_configured_models(
         AuthStyle::None => request,
     };
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("[providers][list_models] HTTP request failed: {}", e))?;
+    let response = request.send().await.map_err(|e| {
+        use std::error::Error;
+        let mut chain = format!("{e}");
+        let mut src: Option<&dyn std::error::Error> = Error::source(&e);
+        while let Some(inner) = src {
+            chain.push_str(" -> ");
+            chain.push_str(&format!("{inner}"));
+            src = inner.source();
+        }
+        format!(
+            "[providers][list_models] HTTP request to {} failed: {}",
+            models_url, chain
+        )
+    })?;
 
     let status = response.status();
     if !status.is_success() {
