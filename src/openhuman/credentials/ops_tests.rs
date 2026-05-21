@@ -363,11 +363,25 @@ async fn list_provider_credentials_sorts_by_provider_then_profile_name() {
 }
 
 #[tokio::test]
-async fn auth_get_me_errors_without_session() {
+async fn auth_get_me_returns_synthetic_user_in_local_fork() {
+    // Pre-fork this returned an error when no backend JWT was stored,
+    // which the jsonrpc dispatcher then turned into a `SessionExpired`
+    // domain event — once per chat turn because the frontend refetches
+    // `userApi.getMe()` after every reply. The closedhuman fork is
+    // single-user local; the right answer is a synthetic local user.
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
-    let err = auth_get_me(&config).await.unwrap_err();
-    assert!(err.contains("session JWT required"));
+    let outcome = auth_get_me(&config)
+        .await
+        .expect("synthetic user must not error in local fork");
+    let user = outcome.value;
+    assert_eq!(user["_id"], "local");
+    assert_eq!(user["hasAccess"], true);
+    assert_eq!(user["role"], "user");
+    assert_eq!(user["activeTeamId"], "local");
+    // Subscription pinned to PRO so any pre-fork plan gates don't trip.
+    assert_eq!(user["subscription"]["plan"], "PRO");
+    assert_eq!(user["subscription"]["hasActiveSubscription"], true);
 }
 
 // ── list_provider_credentials_by_prefix ───────────────────────

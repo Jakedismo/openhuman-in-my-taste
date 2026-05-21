@@ -335,15 +335,76 @@ pub async fn auth_get_session_token_json(
 }
 
 pub async fn auth_get_me(config: &Config) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| "session JWT required".to_string())?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    let user = client
-        .fetch_current_user(&token)
-        .await
-        .map_err(|e| e.to_string())?;
+    // The closedhuman fork is single-user-local — there's no backend
+    // login, no remote user record. The frontend still calls
+    // `userApi.getMe()` after every chat reply (see
+    // `ChatRuntimeProvider`), so erroring here with "session JWT
+    // required" trips `is_session_expired_error` in `core::jsonrpc`,
+    // which publishes a `SessionExpired` event, pauses background
+    // workers, and resets local-AI state — once per chat turn.
+    //
+    // Return a synthetic local-user payload instead. The shape mirrors
+    // the upstream `User` interface in `app/src/types/api.ts` closely
+    // enough that components reading `user.subscription.plan` /
+    // `user.role` / `user._id` keep working; the team / billing
+    // surfaces are deleted in this fork so the precise values for
+    // those nested objects don't gate any feature.
+    //
+    // The OpenHuman backend `BackendOAuthClient` is still preserved
+    // upstream of this function for any tests that exercise the
+    // legacy path, but in normal use we never reach it.
+    let _ = config;
+    Ok(RpcOutcome::single_log(
+        synthetic_local_user(),
+        "synthetic local user returned (closedhuman fork)",
+    ))
+}
 
-    Ok(RpcOutcome::single_log(user, "current user fetched"))
+/// Build the synthetic-local-user JSON envelope returned by
+/// `auth_get_me` in the closedhuman fork. Kept as a free function so
+/// `auth_get_me_returns_synthetic_user_in_local_fork` can pin the
+/// exact shape without standing up a full `Config` + RPC harness.
+fn synthetic_local_user() -> serde_json::Value {
+    json!({
+        "_id": "local",
+        "telegramId": 0,
+        "hasAccess": true,
+        "magicWord": "",
+        "referral": {
+            "code": "",
+            "referredBy": null,
+            "referralCount": 0
+        },
+        "subscription": {
+            // Pin to PRO so any pre-fork feature gates keyed on the
+            // plan tier (legacy billing surface) don't accidentally
+            // hide local features. The actual billing module is
+            // deleted in Phase 5.3.
+            "plan": "PRO",
+            "hasActiveSubscription": true,
+            "planExpiry": null,
+            "currentPeriodEnd": null,
+            "quantity": 1,
+            "monthlyBudgetUsd": 0,
+            "weeklyBudgetUsd": 0,
+            "fiveHourCapUsd": 0
+        },
+        "role": "user",
+        "settings": {},
+        "autoDeleteTelegramMessagesAfterDays": 0,
+        "autoDeleteThreadsAfterDays": 0,
+        "firstName": "Local",
+        "lastName": "User",
+        "username": "local",
+        "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "totalSpendUsd": 0
+        },
+        "languageCode": null,
+        "activeTeamId": "local"
+    })
 }
 
 pub async fn consume_login_token(

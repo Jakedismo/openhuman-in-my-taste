@@ -652,6 +652,25 @@ async fn try_native_dispatch(
         }
         Err(e) => {
             let err_msg = e.to_string();
+            // When the native arm fails specifically because the user
+            // never OAuth'd that provider through `oauth-connect`
+            // (Composio is their only connection), fall through to
+            // Composio rather than surfacing the native-auth error.
+            // Returning `None` here is the documented "no native impl;
+            // caller should try Composio" signal — same shape as a
+            // slug without a native arm at all.
+            //
+            // We DON'T fall through on other native failures (HTTP
+            // errors, malformed args, …) — those are real bugs the
+            // operator needs to see.
+            if looks_like_missing_native_credential(&err_msg) {
+                tracing::info!(
+                    tool = %tool,
+                    elapsed_ms,
+                    "[composio][native] no native credential — falling through to Composio: {err_msg}",
+                );
+                return None;
+            }
             tracing::debug!(
                 tool = %tool,
                 elapsed_ms,
@@ -681,6 +700,24 @@ async fn try_native_dispatch(
             ))
         }
     }
+}
+
+/// Whether a native-dispatch error is the "user never connected this
+/// provider via the native OAuth flow" case. Matched by substring
+/// against the messages `providers_native::load_access_token` emits;
+/// keep in sync with that module.
+///
+/// These are signals to fall through to Composio when the user has
+/// Gmail / Calendar / Drive / GitHub connected through Composio
+/// instead of through `oauth-connect`. Any OTHER native failure
+/// (HTTP error from the provider, malformed args, etc.) must surface
+/// as the final result.
+fn looks_like_missing_native_credential(err_msg: &str) -> bool {
+    let lower = err_msg.to_lowercase();
+    lower.contains("no connected account for provider")
+        || lower.contains("has no token_set")
+        || lower.contains("carries an empty access_token")
+        || lower.contains("run the oauth flow first")
 }
 
 pub async fn composio_execute(
