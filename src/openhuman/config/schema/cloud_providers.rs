@@ -161,6 +161,37 @@ pub fn migrate_legacy_fields(entry: &mut CloudProviderCreds) {
     if entry.auth_style == AuthStyle::Bearer && lt == "anthropic" {
         entry.auth_style = AuthStyle::Anthropic;
     }
+
+    // Local OpenAI-compatible runtimes don't carry an Authorization
+    // header — LM Studio, Ollama's `/v1/*` shim, llamacpp-server, vLLM,
+    // koboldcpp, etc. The factory's `AuthStyle::Bearer` branch would
+    // hit the auth store on every chat-provider build (memory tree
+    // summariser, channel dispatch, …) and surface
+    // `failed to read API key for slug 'lmstudio': Timed out waiting
+    // for auth profile lock` whenever a peer holds the auth-profile
+    // lock. None of those builds actually need the (non-existent) key,
+    // so flip the auth style at config-load time.
+    if entry.auth_style == AuthStyle::Bearer && is_no_auth_local_slug(&entry.slug) {
+        log::debug!(
+            "[config][cloud_providers] slug='{}' migrated Bearer → None (no-auth local runtime)",
+            entry.slug
+        );
+        entry.auth_style = AuthStyle::None;
+    }
+}
+
+/// Slugs for local OpenAI-compatible runtimes that don't require an
+/// Authorization header. The factory routes these through
+/// `AuthStyle::None`, skipping the auth-store lookup entirely.
+///
+/// Kept here (not in `factory.rs`) so the same list governs both the
+/// config-load migration and any future "should I prompt the user for
+/// an API key?" UI heuristic.
+pub(crate) fn is_no_auth_local_slug(slug: &str) -> bool {
+    matches!(
+        slug.trim().to_ascii_lowercase().as_str(),
+        "lmstudio" | "lm_studio" | "lm-studio" | "ollama" | "llamacpp" | "llama-server" | "vllm"
+    )
 }
 
 /// Closedhuman-fork-only sweep: rewrite any `OpenhumanJwt` entries to
@@ -351,6 +382,58 @@ mod tests {
         let mut e = entry("anthropic", AuthStyle::Bearer, Some("anthropic"));
         migrate_legacy_fields(&mut e);
         assert_eq!(e.auth_style, AuthStyle::Anthropic);
+    }
+
+    #[test]
+    fn migrate_legacy_fields_flips_local_runtime_slugs_to_none_auth() {
+        // Local OpenAI-compatible runtimes don't carry an Authorization
+        // header. Without this migration the chat-factory's Bearer arm
+        // would hit the auth store on every provider build and surface
+        // `failed to read API key for slug 'lmstudio': Timed out waiting
+        // for auth profile lock` when a peer holds the file lock.
+        for slug in [
+            "lmstudio",
+            "lm_studio",
+            "lm-studio",
+            "ollama",
+            "llamacpp",
+            "llama-server",
+            "vllm",
+        ] {
+            let mut e = entry(slug, AuthStyle::Bearer, None);
+            migrate_legacy_fields(&mut e);
+            assert_eq!(
+                e.auth_style,
+                AuthStyle::None,
+                "slug '{slug}' should migrate Bearer → None"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_legacy_fields_leaves_cloud_slugs_on_bearer() {
+        // Defensive: cloud providers that DO need a Bearer header
+        // (openai, openrouter, groq, mistral, etc.) must not be
+        // affected by the no-auth-local migration.
+        for slug in ["openai", "openrouter", "groq", "mistral", "custom-cloud"] {
+            let mut e = entry(slug, AuthStyle::Bearer, None);
+            migrate_legacy_fields(&mut e);
+            assert_eq!(
+                e.auth_style,
+                AuthStyle::Bearer,
+                "slug '{slug}' must stay Bearer; only local runtimes flip to None"
+            );
+        }
+    }
+
+    #[test]
+    fn is_no_auth_local_slug_is_case_insensitive_and_trims() {
+        assert!(is_no_auth_local_slug("LMStudio"));
+        assert!(is_no_auth_local_slug(" ollama "));
+        assert!(is_no_auth_local_slug("LM_Studio"));
+        assert!(!is_no_auth_local_slug("openai"));
+        assert!(!is_no_auth_local_slug("anthropic"));
+        assert!(!is_no_auth_local_slug(""));
     }
 
     #[test]

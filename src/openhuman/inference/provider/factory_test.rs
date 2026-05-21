@@ -141,6 +141,29 @@ fn ollama_prefix() {
     assert_eq!(model, "llama3.1:8b");
 }
 
+#[test]
+fn local_runtime_slug_with_auth_none_skips_auth_lookup() {
+    // Regression for the LM Studio failure where the chat-factory's
+    // Bearer arm hit the auth store on every provider build and
+    // surfaced `failed to read API key for slug 'lmstudio': Timed out
+    // waiting for auth profile lock`. With `auth_style = None` the
+    // factory must build the provider WITHOUT calling the auth store.
+    let mut config = Config::default();
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_lm".to_string(),
+        slug: "lmstudio".to_string(),
+        label: "LM Studio".to_string(),
+        endpoint: "http://localhost:1234".to_string(),
+        auth_style: AuthStyle::None,
+        default_model: Some("google/gemma-4-31b".to_string()),
+        ..Default::default()
+    });
+    let (_, model) =
+        create_chat_provider_from_string("memory", "lmstudio:google/gemma-4-31b", &config)
+            .expect("lmstudio AuthStyle::None build must succeed without auth-store access");
+    assert_eq!(model, "google/gemma-4-31b");
+}
+
 #[tokio::test]
 async fn ollama_provider_does_not_require_api_key() {
     let mut config = Config::default();

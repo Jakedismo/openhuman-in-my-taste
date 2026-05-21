@@ -324,11 +324,11 @@ fn make_cloud_provider_by_slug(
         redact_endpoint(&entry.endpoint)
     );
 
-    let key = lookup_key_for_slug(slug, config)?;
-
     let unsupported = &config.temperature_unsupported_models;
     match entry.auth_style {
         AuthStyle::Anthropic => {
+            // Anthropic needs an x-api-key header; resolve from the auth store.
+            let key = lookup_key_for_slug(slug, config)?;
             let p = make_openai_compatible_provider_with_config(
                 &entry.endpoint,
                 &key,
@@ -347,6 +347,17 @@ fn make_cloud_provider_by_slug(
             make_openhuman_backend(config)
         }
         AuthStyle::None => {
+            // No-auth providers (LM Studio, Ollama's OpenAI-compat
+            // shim, llamacpp-server, vLLM without keys, …). Skip the
+            // auth-store lookup entirely — there is no key to find and
+            // a slow / locked auth-profile file would otherwise
+            // surface as `"failed to read API key for slug 'lmstudio':
+            // Timed out waiting for auth profile lock"` even though
+            // the request will never carry an Authorization header.
+            log::debug!(
+                "[providers][chat-factory] slug='{}' auth_style=None → skipping auth-store lookup",
+                slug
+            );
             let p = make_openai_compatible_provider_with_config(
                 &entry.endpoint,
                 "",
@@ -356,6 +367,7 @@ fn make_cloud_provider_by_slug(
             Ok((p, effective_model))
         }
         AuthStyle::Bearer => {
+            let key = lookup_key_for_slug(slug, config)?;
             let p = make_openai_compatible_provider_with_config(
                 &entry.endpoint,
                 &key,
@@ -376,7 +388,9 @@ fn make_cloud_provider_by_slug(
 /// at factory build time.
 pub fn lookup_key_for_slug(slug: &str, config: &Config) -> anyhow::Result<String> {
     let auth = AuthService::from_config(config);
-    // Try new-style key first.
+    // Try new-style key first. Errors (e.g. auth-profile lock timeout)
+    // are swallowed so we fall through to the legacy lookup — same
+    // contract as the previous behaviour for the new-style key.
     let new_key = auth_key_for_slug(slug);
     if let Ok(Some(k)) = auth.get_provider_bearer_token(&new_key, None) {
         if !k.is_empty() {
@@ -387,17 +401,25 @@ pub fn lookup_key_for_slug(slug: &str, config: &Config) -> anyhow::Result<String
             return Ok(k);
         }
     }
-    // Fall back to legacy bare slug.
-    let key = auth
-        .get_provider_bearer_token(slug, None)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "[chat-factory] failed to read API key for slug '{}': {}",
+    // Fall back to legacy bare slug. A lock-timeout / I/O error here is
+    // demoted to "no key found" (empty string) so the chat-provider
+    // build can still construct an `OpenAiCompatibleProvider`. The
+    // first call will then surface a clean `<provider> API key not set`
+    // error instead of the misleading factory-build failure that
+    // mentions an "auth profile lock" the user has no insight into.
+    let key = match auth.get_provider_bearer_token(slug, None) {
+        Ok(opt) => opt.unwrap_or_default(),
+        Err(e) => {
+            log::warn!(
+                "[providers][chat-factory] auth lookup for slug '{}' (legacy) failed: {} — \
+                 treating as no key. If the slug genuinely needs an API key, save it under \
+                 Settings → AI and the next request will pick it up.",
                 slug,
                 e
-            )
-        })?
-        .unwrap_or_default();
+            );
+            String::new()
+        }
+    };
     log::debug!(
         "[providers][chat-factory] auth lookup slug={} key_present={}",
         slug,
