@@ -215,6 +215,69 @@ fn parse_chat_response_body_reports_sanitized_snippet() {
 }
 
 #[test]
+fn parse_chat_response_body_salvages_responses_api_shape() {
+    // LM Studio (with certain reasoning models) returns the
+    // `/v1/responses` envelope shape even on the `/v1/chat/completions`
+    // endpoint — body lacks `choices` but has `output_text`. The
+    // chat-completions parser should salvage this instead of erroring
+    // with "missing field `choices`".
+    let body = r#"{
+        "id": "resp-1",
+        "object": "response",
+        "output_text": "Hello from LM Studio",
+        "output": []
+    }"#;
+    let parsed = parse_chat_response_body("lmstudio", body)
+        .expect("should salvage the responses-api shape");
+    assert_eq!(parsed.choices.len(), 1);
+    assert_eq!(
+        parsed.choices[0].message.effective_content(),
+        "Hello from LM Studio"
+    );
+}
+
+#[test]
+fn parse_chat_response_body_salvages_output_array_responses_shape() {
+    // Alternate `/v1/responses` shape — text lives in
+    // `output[].content[].text` (the streaming-style envelope) rather
+    // than `output_text`. Salvage path must also handle this.
+    let body = r#"{
+        "id": "resp-2",
+        "output_text": null,
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": "Salvaged text"}
+                ]
+            }
+        ]
+    }"#;
+    let parsed = parse_chat_response_body("lmstudio", body)
+        .expect("should salvage the output[]-shaped responses payload");
+    assert_eq!(parsed.choices.len(), 1);
+    assert_eq!(parsed.choices[0].message.effective_content(), "Salvaged text");
+}
+
+#[test]
+fn parse_chat_response_body_missing_choices_includes_actionable_hint() {
+    // When the body is neither a chat-completions nor a responses-api
+    // shape, the error must mention `choices` and include the LM Studio
+    // hint so the operator knows what to check.
+    let body = r#"{"id":"x","object":"chat.completion"}"#;
+    let err =
+        parse_chat_response_body("lmstudio", body).expect_err("unrecognised shape should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing field `choices`"),
+        "expected the raw serde 'missing field choices' error to surface, got: {msg}"
+    );
+    assert!(
+        msg.contains("LM Studio") || msg.contains("reasoning models"),
+        "expected the actionable hint about LM Studio / reasoning models, got: {msg}"
+    );
+}
+
+#[test]
 fn parse_responses_response_body_reports_sanitized_snippet() {
     let body = r#"{"output_text":123,"api_key":"sk-another-secret"}"#;
     let err = parse_responses_response_body("custom", body).expect_err("payload should fail");
