@@ -452,3 +452,82 @@ fn auth_profile_kind_serde_roundtrip() {
     let json = serde_json::to_string(&AuthProfileKind::Token).unwrap();
     assert_eq!(json, "\"token\"");
 }
+
+// ── Stale-lock recovery ────────────────────────────────────────────────────
+
+#[test]
+fn clear_lock_if_stale_removes_dead_pid_lock() {
+    // A lock file with a PID that's no longer running must be cleared.
+    let tmp = TempDir::new().unwrap();
+    let store = AuthProfilesStore::new(tmp.path(), false);
+    // Pick a PID unlikely to be running (top of the u16 range, well
+    // above the typical Linux PID_MAX_DEFAULT of 32768 and far above
+    // anything macOS or Windows will hand out for a long-running app).
+    std::fs::write(&store.lock_path, "pid=4294967290\n").unwrap();
+    assert!(store.lock_path.exists());
+    assert!(
+        store.clear_lock_if_stale(),
+        "dead-PID lock should be removed"
+    );
+    assert!(!store.lock_path.exists());
+}
+
+#[test]
+fn clear_lock_if_stale_leaves_live_pid_lock_alone() {
+    let tmp = TempDir::new().unwrap();
+    let store = AuthProfilesStore::new(tmp.path(), false);
+    // Our own PID is, by definition, alive.
+    std::fs::write(
+        &store.lock_path,
+        format!("pid={}\n", std::process::id()),
+    )
+    .unwrap();
+    assert!(
+        !store.clear_lock_if_stale(),
+        "live-PID lock must stay in place"
+    );
+    assert!(store.lock_path.exists());
+}
+
+#[test]
+fn clear_lock_if_stale_removes_malformed_lock_past_grace_window() {
+    // Lock file with no parseable `pid=` line — the writer crashed
+    // between `create_new` and the `writeln!`. After the grace window
+    // it's safe to assume no live writer is racing us; the lock
+    // should be cleared.
+    let tmp = TempDir::new().unwrap();
+    let store = AuthProfilesStore::new(tmp.path(), false);
+    std::fs::write(&store.lock_path, "").unwrap();
+    // Backdate the mtime well past the grace window. `filetime`
+    // would normally be the right crate, but std's
+    // `File::set_modified` (1.75+) is sufficient.
+    let backdated = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(60))
+        .expect("clock cannot be too early");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&store.lock_path)
+        .unwrap();
+    file.set_modified(backdated).unwrap();
+    drop(file);
+    assert!(
+        store.clear_lock_if_stale(),
+        "malformed lock past grace window should be removed"
+    );
+    assert!(!store.lock_path.exists());
+}
+
+#[test]
+fn clear_lock_if_stale_keeps_malformed_lock_inside_grace_window() {
+    // A malformed lock file that was JUST written might be a healthy
+    // writer mid-`writeln!`. Don't remove it inside the grace window.
+    let tmp = TempDir::new().unwrap();
+    let store = AuthProfilesStore::new(tmp.path(), false);
+    std::fs::write(&store.lock_path, "").unwrap();
+    // Default mtime is "now" — well inside the 5s grace window.
+    assert!(
+        !store.clear_lock_if_stale(),
+        "fresh malformed lock must stay in place"
+    );
+    assert!(store.lock_path.exists());
+}

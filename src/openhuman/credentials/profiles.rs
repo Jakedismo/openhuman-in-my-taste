@@ -600,12 +600,41 @@ impl AuthProfilesStore {
         }
     }
 
-    /// Returns `true` if an existing lock file was detected as stale (its
-    /// recorded PID is no longer running) and successfully removed.
-    /// Malformed locks (no `pid=` line) and locks whose PID is still alive
-    /// are left in place so the caller falls back to the normal busy-wait
-    /// and timeout path.
+    /// Returns `true` if an existing lock file was detected as stale and
+    /// successfully removed. Three cases are recognised:
+    ///
+    /// 1. **Parseable PID, dead process** — the recorded owner is no
+    ///    longer running, definitely stale. Remove unconditionally.
+    /// 2. **No parseable PID, file older than [`MALFORMED_LOCK_GRACE_MS`]** —
+    ///    the writer crashed mid-write (a common signature when the
+    ///    process is killed during lock creation, or a Cmd+Q race with
+    ///    the OS killing the parent). The lock will never be valid for
+    ///    any future reader; clear it after a small grace window so we
+    ///    don't race a legitimate writer that's still finishing the
+    ///    `pid=` line.
+    /// 3. **Parseable PID, live process** OR **No parseable PID, file
+    ///    younger than grace window** — leave in place, fall back to
+    ///    the busy-wait + timeout path.
     fn clear_lock_if_stale(&self) -> bool {
+        let metadata = match fs::metadata(&self.lock_path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => {
+                tracing::warn!(
+                    target: "auth-profiles",
+                    "[credentials] failed to stat lock file at {} for stale check: {e}",
+                    self.lock_path.display()
+                );
+                return false;
+            }
+        };
+        let lock_age_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+
         let content = match fs::read_to_string(&self.lock_path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
@@ -624,12 +653,45 @@ impl AuthProfilesStore {
             .find_map(|line| line.trim().strip_prefix("pid=")?.trim().parse::<u32>().ok());
 
         let Some(pid) = pid else {
-            tracing::warn!(
-                target: "auth-profiles",
-                "[credentials] lock at {} has no parseable pid line; leaving in place",
-                self.lock_path.display()
-            );
-            return false;
+            // Malformed lock — no parseable `pid=` line. This is the
+            // signature of a writer that crashed between
+            // `OpenOptions::create_new` succeeding and the `pid=` line
+            // being flushed. If the file is older than the grace
+            // window, no live writer could still be racing us; clear
+            // it. Otherwise wait one more busy-wait tick and let the
+            // next caller re-check.
+            if (lock_age_ms as u64) < MALFORMED_LOCK_GRACE_MS {
+                tracing::warn!(
+                    target: "auth-profiles",
+                    "[credentials] lock at {} has no parseable pid line but is only {}ms old; \
+                     leaving in place to avoid racing a still-writing peer",
+                    self.lock_path.display(),
+                    lock_age_ms
+                );
+                return false;
+            }
+            match fs::remove_file(&self.lock_path) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "auth-profiles",
+                        "[credentials] removed malformed stale auth profile lock at {} \
+                         (no parseable pid line; file age {}ms > {}ms grace)",
+                        self.lock_path.display(),
+                        lock_age_ms,
+                        MALFORMED_LOCK_GRACE_MS
+                    );
+                    return true;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "auth-profiles",
+                        "[credentials] failed to remove malformed lock at {}: {e}",
+                        self.lock_path.display()
+                    );
+                    return false;
+                }
+            }
         };
 
         if is_pid_alive(pid) {
@@ -657,6 +719,13 @@ impl AuthProfilesStore {
         }
     }
 }
+
+/// How long a malformed lock file (no parseable `pid=` line) must
+/// have been on disk before [`AuthProfilesStore::clear_lock_if_stale`]
+/// will remove it. Set well past the worst-case write window for a
+/// healthy lock (a few hundred microseconds in practice) so we don't
+/// remove a lock another process is currently writing.
+const MALFORMED_LOCK_GRACE_MS: u64 = 5_000;
 
 /// Cross-platform best-effort check that a given OS process id is currently
 /// running. Used by [`AuthProfilesStore::clear_lock_if_stale`] to decide
