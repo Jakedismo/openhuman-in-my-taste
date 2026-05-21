@@ -283,25 +283,36 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Build the full URL for chat completions, detecting if base_url already includes the path.
-    /// This allows custom providers with non-standard endpoints (e.g., VolcEngine ARK uses
-    /// `/api/coding/v3/chat/completions` instead of `/v1/chat/completions`).
+    /// This handles three shapes:
+    ///
+    /// 1. `https://api.openai.com/v1/chat/completions` — full endpoint already in `base_url`.
+    ///    Returned as-is. This is also what custom providers with non-standard paths
+    ///    (e.g. VolcEngine ARK's `/api/coding/v3/chat/completions`) use.
+    /// 2. `https://api.openai.com/v1` — explicit API path present but no `/chat/completions`.
+    ///    Append `/chat/completions` (the OpenAI / Anthropic / OpenRouter cloud convention).
+    /// 3. `http://localhost:1234` — base host with no path (the LM Studio / Ollama
+    ///    OpenAI-compatible / vLLM convention; users type the server's home URL).
+    ///    Append `/v1/chat/completions` — without the `/v1` LM Studio responds with
+    ///    `{"error":"Unexpected endpoint or method. (POST /chat/completions)"}`.
+    ///
+    /// Mirrors the asymmetry [`responses_url`] already has — see
+    /// `has_explicit_api_path` for the path-detection rule.
     fn chat_completions_url(&self) -> String {
-        let has_full_endpoint = reqwest::Url::parse(&self.base_url)
-            .map(|url| {
-                url.path()
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            })
-            .unwrap_or_else(|_| {
-                self.base_url
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            });
+        if self.path_ends_with("/chat/completions") {
+            return self.base_url.clone();
+        }
 
-        let url = if has_full_endpoint {
-            self.base_url.clone()
+        let normalized_base = self.base_url.trim_end_matches('/');
+        let url = if self.has_explicit_api_path() {
+            format!("{normalized_base}/chat/completions")
         } else {
-            format!("{}/chat/completions", self.base_url)
+            // No path on the base URL — assume the OpenAI `/v1` convention.
+            // Local OpenAI-compatible servers (LM Studio, vLLM, llamacpp,
+            // Ollama's `/v1/*` shim) all require this; cloud providers
+            // configured via the UI ship with `/v1` baked into the
+            // `cloud_providers.endpoint` field already and hit the
+            // `has_explicit_api_path` branch above.
+            format!("{normalized_base}/v1/chat/completions")
         };
         log::info!(
             "[provider:{}] outbound chat/completions -> {}",

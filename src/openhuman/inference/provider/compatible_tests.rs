@@ -565,18 +565,46 @@ fn responses_url_non_v1_api_path_uses_raw_suffix() {
 }
 
 #[test]
-fn chat_completions_url_without_v1() {
-    // Provider configured without /v1 in base URL
+fn chat_completions_url_host_only_gets_v1_inserted() {
+    // Provider configured with bare host (no path) — the OpenAI
+    // `/v1` convention is the universal one. LM Studio, vLLM,
+    // llamacpp-server, and Ollama's `/v1/*` shim all reject
+    // `POST /chat/completions` with no `/v1` prefix. Symmetric
+    // with the `responses_url` behaviour at the path level.
     let p = make_provider("test", "https://api.example.com", None);
     assert_eq!(
         p.chat_completions_url(),
-        "https://api.example.com/chat/completions"
+        "https://api.example.com/v1/chat/completions"
+    );
+}
+
+#[test]
+fn chat_completions_url_lmstudio_loopback_gets_v1_inserted() {
+    // Regression for the LM Studio failure on the local-OAuth fork:
+    // base URL `http://localhost:1234` produced `/chat/completions`
+    // which LM Studio rejects with:
+    // `{"error":"Unexpected endpoint or method. (POST /chat/completions)"}`.
+    let p = make_provider("lmstudio", "http://localhost:1234", None);
+    assert_eq!(
+        p.chat_completions_url(),
+        "http://localhost:1234/v1/chat/completions"
+    );
+}
+
+#[test]
+fn chat_completions_url_host_with_trailing_slash_gets_v1_inserted() {
+    // Trailing slash on a host-only URL is treated as no path —
+    // same `/v1/chat/completions` result.
+    let p = make_provider("lmstudio", "http://localhost:1234/", None);
+    assert_eq!(
+        p.chat_completions_url(),
+        "http://localhost:1234/v1/chat/completions"
     );
 }
 
 #[test]
 fn chat_completions_url_base_with_v1() {
-    // Provider configured with /v1 in base URL
+    // Provider configured with /v1 in base URL — no doubling.
     let p = make_provider("test", "https://api.example.com/v1", None);
     assert_eq!(
         p.chat_completions_url(),
