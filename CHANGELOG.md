@@ -139,6 +139,14 @@ and Composio direct-mode took over from the deleted backend proxy.
 
 ### Added
 
+- **Triage ACK memory-write.** `apply_decision(Acknowledge)` now writes
+  a deterministic memo into the memory tree (`tree::ingest::ingest_document`)
+  under `triage-ack:<source-slug>:<external_id>` with the `triage:acknowledge`
+  tag and the LLM's classification reason. Composio retries (same
+  `metadata.uuid`) short-circuit via the existing already-ingested gate.
+  Best-effort: a memory-write failure logs a warning and does not fail
+  the triage pipeline. Replaces the previous log-only behavior whose
+  message ended with "(memory-write is a future addition)".
 - **Kokoro TTS provider.** Speaks OpenAI Audio API to any local
   `/v1/audio/speech` server — mlx-audio with Kokoro (MLX-accelerated on
   Apple Silicon), kokoro-fastapi, or LM Studio's audio mode all work

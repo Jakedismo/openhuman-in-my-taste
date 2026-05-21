@@ -3,8 +3,10 @@
 //! The four actions:
 //!
 //! - **`drop`** — log only, publish `TriggerEvaluated`.
-//! - **`acknowledge`** — log + publish `TriggerEvaluated`. (Memory-write
-//!   for ack is a future addition.)
+//! - **`acknowledge`** — log, publish `TriggerEvaluated`, and write
+//!   a deterministic memo into the memory tree so the agent can recall
+//!   the triggered event later. Memory-write is best-effort: a failure
+//!   logs a warning and does not fail the triage pipeline.
 //! - **`react`** — dispatch the `trigger_reactor` sub-agent via
 //!   [`run_subagent`], publish `TriggerEvaluated` + `TriggerEscalated`.
 //! - **`escalate`** — dispatch the `orchestrator` sub-agent, same
@@ -16,6 +18,7 @@
 //! installed on the task-local so [`run_subagent`] can inherit the
 //! provider and tools.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
@@ -25,11 +28,26 @@ use crate::openhuman::agent::harness::fork_context::{with_parent_context, Parent
 use crate::openhuman::agent::harness::subagent_runner::{self, SubagentRunOptions};
 use crate::openhuman::agent::Agent;
 use crate::openhuman::config::Config;
+use crate::openhuman::memory::tree::canonicalize::document::DocumentInput;
+use crate::openhuman::memory::tree::ingest::{self as tree_ingest, IngestResult};
 
 use super::decision::TriageAction;
 use super::envelope::TriggerEnvelope;
 use super::evaluator::TriageRun;
 use super::events;
+
+/// Cap on the JSON payload preview embedded in the ACK memo. Long
+/// payloads (a 200-message Slack thread, a 50 KB Gmail body) would
+/// otherwise dominate the canonicaliser's chunker output.
+const ACK_PAYLOAD_PREVIEW_MAX_CHARS: usize = 1024;
+
+/// Tag attached to every triage ACK memo so retrieval can scope a
+/// query (`tags:["triage:acknowledge"]`) to just these rows.
+const ACK_TRIAGE_TAG: &str = "triage:acknowledge";
+
+/// Owner field on the memory row. The closedhuman fork is single-user
+/// local; `"self"` matches the convention used by vault sync.
+const ACK_MEMORY_OWNER: &str = "self";
 
 /// Executes the side effects of a triage decision.
 ///
@@ -63,8 +81,9 @@ pub async fn apply_decision(run: TriageRun, envelope: &TriggerEnvelope) -> anyho
                 label = %envelope.display_label,
                 external_id = %envelope.external_id,
                 reason = %run.decision.reason,
-                "[triage::escalation] ACKNOWLEDGE — logged (memory-write is a future addition)"
+                "[triage::escalation] ACKNOWLEDGE — logged"
             );
+            persist_acknowledge_memory(envelope, &run.decision.reason).await;
         }
         TriageAction::React | TriageAction::Escalate => {
             let target = run
@@ -203,12 +222,135 @@ async fn dispatch_target_agent(agent_id: &str, prompt: &str) -> anyhow::Result<S
     Ok(outcome.output)
 }
 
+/// Load config and write an ACK memo to the memory tree.
+///
+/// Best-effort: a failure to load config or ingest must not fail the
+/// triage pipeline. Both branches log a warning and return.
+async fn persist_acknowledge_memory(envelope: &TriggerEnvelope, reason: &str) {
+    let config = match Config::load_or_init().await {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                label = %envelope.display_label,
+                external_id = %envelope.external_id,
+                "[triage::escalation] ACK memory-write skipped — config load failed"
+            );
+            return;
+        }
+    };
+
+    match write_acknowledge_memory(&config, envelope, reason).await {
+        Ok(result) => {
+            tracing::debug!(
+                label = %envelope.display_label,
+                external_id = %envelope.external_id,
+                source_id = %result.source_id,
+                chunks_written = result.chunks_written,
+                already_ingested = result.already_ingested,
+                "[triage::escalation] ACK memory-write committed"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                label = %envelope.display_label,
+                external_id = %envelope.external_id,
+                "[triage::escalation] ACK memory-write failed (non-fatal)"
+            );
+        }
+    }
+}
+
+/// Build the `DocumentInput` for an ACK memo and hand it to
+/// [`tree_ingest::ingest_document`].
+///
+/// `source_id` is deterministic on `triage-ack:<source-slug>:<external_id>`
+/// so Composio retries (and other re-deliveries that share `external_id`)
+/// short-circuit via `tree::ingest::already_ingested` instead of duplicating
+/// the memo into the tree.
+async fn write_acknowledge_memory(
+    config: &Config,
+    envelope: &TriggerEnvelope,
+    reason: &str,
+) -> anyhow::Result<IngestResult> {
+    let source_slug = envelope.source.slug();
+    let source_id = format!("triage-ack:{source_slug}:{}", envelope.external_id);
+
+    let body = build_acknowledge_body(envelope, reason);
+
+    let doc = DocumentInput {
+        provider: format!("triage-ack/{source_slug}"),
+        title: envelope.display_label.clone(),
+        body,
+        modified_at: envelope.received_at,
+        source_ref: Some(format!(
+            "triage-ack://{source_slug}/{}",
+            envelope.external_id
+        )),
+    };
+
+    let tags = vec![ACK_TRIAGE_TAG.to_string(), format!("source:{source_slug}")];
+
+    tree_ingest::ingest_document(config, &source_id, ACK_MEMORY_OWNER, tags, doc)
+        .await
+        .context("triage::escalation: writing ACK memo to memory tree")
+}
+
+/// Compose the markdown body for an ACK memo. Always emits the label
+/// and received-at timestamp so the canonicaliser never sees an empty
+/// body; the LLM reason and a payload preview are appended when
+/// non-trivial.
+fn build_acknowledge_body(envelope: &TriggerEnvelope, reason: &str) -> String {
+    let mut body = String::new();
+    let _ = writeln!(&mut body, "Triggered event: {}", envelope.display_label);
+    let _ = writeln!(
+        &mut body,
+        "Received at: {}",
+        envelope.received_at.to_rfc3339()
+    );
+
+    let trimmed_reason = reason.trim();
+    if !trimmed_reason.is_empty() {
+        let _ = writeln!(&mut body);
+        let _ = writeln!(&mut body, "Triage reasoning:");
+        let _ = writeln!(&mut body, "{trimmed_reason}");
+    }
+
+    if let Ok(payload_str) = serde_json::to_string(&envelope.payload) {
+        if !payload_str.is_empty() && payload_str != "null" && payload_str != "{}" {
+            let preview = truncate_chars(&payload_str, ACK_PAYLOAD_PREVIEW_MAX_CHARS);
+            let _ = writeln!(&mut body);
+            let _ = writeln!(&mut body, "Payload preview:");
+            let _ = writeln!(&mut body, "{preview}");
+        }
+    }
+
+    body
+}
+
+/// Truncate by char count (not byte count) so multi-byte codepoints
+/// can't be split. Appends a single horizontal-ellipsis when truncation
+/// occurred so it's visible in the memo body.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let total: usize = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::event_bus::{init_global, DomainEvent};
     use crate::openhuman::agent::harness::definition::AgentDefinitionRegistry;
+    use crate::openhuman::memory::tree::store::{count_chunks, list_chunks, ListChunksQuery};
+    use crate::openhuman::memory::tree::types::SourceKind;
     use serde_json::json;
+    use tempfile::TempDir;
     use tokio::time::{sleep, timeout, Duration};
 
     static TEST_EVENTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -458,5 +600,150 @@ mod tests {
             DomainEvent::TriggerEscalationFailed { external_id, reason, .. }
                 if external_id == "esc-escalate-fail" && reason.contains("missing-agent")
         )));
+    }
+
+    // ---------- ACK memory-write ----------
+
+    fn ack_test_config() -> (TempDir, Config) {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = Config::default();
+        cfg.workspace_dir = tmp.path().to_path_buf();
+        cfg.memory_tree.embedding_endpoint = None;
+        cfg.memory_tree.embedding_model = None;
+        cfg.memory_tree.embedding_strict = false;
+        (tmp, cfg)
+    }
+
+    #[tokio::test]
+    async fn write_acknowledge_memory_persists_a_chunk_under_triage_ack_source_id() {
+        let (_tmp, cfg) = ack_test_config();
+        let envelope = TriggerEnvelope::from_composio(
+            "github",
+            "GITHUB_COMMIT_EVENT",
+            "ack-write-meta-id",
+            "ack-write-uuid",
+            json!({
+                "repository": "Jakedismo/openhuman-in-my-taste",
+                "commit": "abcdef1",
+                "message": "fix(triage): write ACK memo to memory tree",
+            }),
+        );
+
+        let result = write_acknowledge_memory(
+            &cfg,
+            &envelope,
+            "Technical commit; acknowledge for later recall.",
+        )
+        .await
+        .expect("ACK ingest should succeed");
+
+        assert_eq!(result.source_id, "triage-ack:composio:ack-write-uuid");
+        assert!(
+            !result.already_ingested,
+            "first ACK write should not short-circuit"
+        );
+        assert!(
+            result.chunks_written >= 1,
+            "ACK memo body must produce at least one chunk"
+        );
+        assert_eq!(count_chunks(&cfg).unwrap(), result.chunks_written as u64);
+
+        let rows = list_chunks(&cfg, &ListChunksQuery::default()).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.metadata.source_id == "triage-ack:composio:ack-write-uuid")
+            .expect("ACK row should be present");
+        assert_eq!(row.metadata.source_kind, SourceKind::Document);
+        assert_eq!(row.metadata.owner, ACK_MEMORY_OWNER);
+        assert!(
+            row.metadata.tags.iter().any(|t| t == ACK_TRIAGE_TAG),
+            "ACK row must carry triage:acknowledge tag (got: {:?})",
+            row.metadata.tags
+        );
+        assert!(
+            row.metadata.tags.iter().any(|t| t == "source:composio"),
+            "ACK row must carry source slug tag (got: {:?})",
+            row.metadata.tags
+        );
+    }
+
+    #[tokio::test]
+    async fn write_acknowledge_memory_is_idempotent_on_repeated_external_id() {
+        let (_tmp, cfg) = ack_test_config();
+        let envelope = TriggerEnvelope::from_composio(
+            "gmail",
+            "GMAIL_NEW_GMAIL_MESSAGE",
+            "ack-idem-meta",
+            "ack-idem-uuid",
+            json!({ "subject": "Order confirmation", "from": "shop@example.com" }),
+        );
+
+        let first = write_acknowledge_memory(&cfg, &envelope, "FYI, nothing to act on.")
+            .await
+            .expect("first ACK ingest should succeed");
+        assert!(!first.already_ingested);
+        assert!(first.chunks_written >= 1);
+        let initial_count = count_chunks(&cfg).unwrap();
+
+        // Composio retry: same metadata.uuid, possibly different payload
+        // detail. Must not duplicate the memo into the tree.
+        let mut retry = envelope.clone();
+        retry.payload = json!({
+            "subject": "Order confirmation (retry)",
+            "from": "shop@example.com",
+        });
+        let second = write_acknowledge_memory(&cfg, &retry, "FYI, nothing to act on.")
+            .await
+            .expect("retry ACK ingest should succeed");
+        assert!(second.already_ingested);
+        assert_eq!(second.chunks_written, 0);
+        assert_eq!(count_chunks(&cfg).unwrap(), initial_count);
+    }
+
+    #[test]
+    fn build_acknowledge_body_includes_label_and_received_at_even_when_payload_empty() {
+        let envelope = TriggerEnvelope::from_external("caller-x", "manual", json!({}));
+        let body = build_acknowledge_body(&envelope, "");
+
+        assert!(body.contains("Triggered event: external/caller-x"));
+        assert!(body.contains("Received at: "));
+        assert!(
+            !body.contains("Triage reasoning:"),
+            "empty reason must not emit the heading"
+        );
+        assert!(
+            !body.contains("Payload preview:"),
+            "empty payload object must not emit the heading"
+        );
+    }
+
+    #[test]
+    fn build_acknowledge_body_includes_reason_and_payload_preview() {
+        let envelope = TriggerEnvelope::from_composio(
+            "github",
+            "GITHUB_COMMIT_EVENT",
+            "m",
+            "u",
+            json!({ "message": "ship it" }),
+        );
+        let body = build_acknowledge_body(&envelope, "Test commit landed.");
+        assert!(body.contains("Triage reasoning:"));
+        assert!(body.contains("Test commit landed."));
+        assert!(body.contains("Payload preview:"));
+        assert!(body.contains("ship it"));
+    }
+
+    #[test]
+    fn truncate_chars_respects_multibyte_codepoint_boundaries() {
+        let s: String = std::iter::repeat('猫').take(200).collect();
+        let truncated = truncate_chars(&s, 10);
+        // 10 cats + ellipsis (each char is multi-byte UTF-8)
+        assert_eq!(truncated.chars().count(), 11);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_chars_passes_through_short_strings() {
+        assert_eq!(truncate_chars("short", 16), "short");
     }
 }
