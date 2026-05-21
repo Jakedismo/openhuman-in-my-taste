@@ -8,15 +8,26 @@
 //!
 //! `ResolvedProvider.used_local` is preserved for telemetry compatibility but
 //! is always `false`.
+//!
+//! ## Backend wiring
+//!
+//! In the closedhuman fork the legacy `create_routed_provider_with_options`
+//! path hard-errors on a missing OpenHuman backend, so [`build_remote_provider`]
+//! now routes through the workload factory's `chat` role (the triage agent
+//! is a lightweight JSON classifier — same workload shape as a chat turn).
+//! The factory resolves to whichever `cloud_providers` row the user has
+//! marked primary, or to local Ollama if the user set `chat_provider =
+//! "ollama:<model>"`.
 
 use std::sync::Arc;
 
 use anyhow::Context;
 
 use crate::openhuman::config::Config;
-use crate::openhuman::inference::provider::{
-    self, Provider, ProviderRuntimeOptions, INFERENCE_BACKEND_ID,
+use crate::openhuman::inference::provider::factory::{
+    create_chat_provider_from_string, provider_for_role, PROVIDER_OPENHUMAN,
 };
+use crate::openhuman::inference::provider::Provider;
 
 /// The concrete provider + metadata that [`crate::openhuman::agent::triage::evaluator::run_triage`]
 /// should use for this particular triage turn.
@@ -137,42 +148,53 @@ pub fn build_local_provider_with_config(config: &Config) -> Option<ResolvedProvi
 
 // ── Provider builder ────────────────────────────────────────────────────
 
-/// Build the default remote routed backend provider. Same wiring as
-/// `inference::local::ops::agent_chat_simple` uses so we stay consistent with
-/// the existing direct-chat path.
+/// Build a provider for the triage turn via the workload factory's
+/// `chat` role.
+///
+/// The legacy implementation here called
+/// `provider::create_routed_provider_with_options` against
+/// `config.inference_url` — that path constructs `OpenHumanBackendProvider`
+/// when the URL is unset (default for the local-OAuth fork) and the
+/// downstream `chat_with_system` then 401s with `SESSION_EXPIRED`. Every
+/// inbound Composio trigger surfaced this as `[composio][triage]
+/// run_triage failed ... error=resolving provider for triage turn`.
+///
+/// The workload factory takes the user's `chat_provider` (or falls
+/// back to their primary `cloud_providers` row) and produces a
+/// concrete `Box<dyn Provider>` + model string — same path the migrated
+/// chat / memory-tree / channels surfaces use after commit `95f1e3c4`.
 fn build_remote_provider(config: &Config) -> anyhow::Result<ResolvedProvider> {
-    let default_model = config
-        .default_model
-        .clone()
-        .unwrap_or_else(|| crate::openhuman::config::DEFAULT_MODEL.to_string());
-    let options = ProviderRuntimeOptions {
-        auth_profile_override: None,
-        openhuman_dir: config.config_path.parent().map(std::path::PathBuf::from),
-        secrets_encrypt: config.secrets.encrypt,
-        reasoning_enabled: config.runtime.reasoning_enabled,
-    };
-    let provider_box = provider::create_routed_provider_with_options(
-        config.inference_url.as_deref(),
-        config.api_url.as_deref(),
-        config.api_key.as_deref(),
-        &config.reliability,
-        &config.model_routes,
-        default_model.as_str(),
-        &options,
-    )
-    .context("building routed remote provider for triage")?;
+    let resolved = provider_for_role("chat", config);
+    if resolved == PROVIDER_OPENHUMAN {
+        // The factory's `make_openhuman_backend` would hard-error
+        // anyway, but pre-empting it lets us surface a clearer
+        // actionable message that matches the rest of the fork's
+        // "Settings → AI" pointers.
+        anyhow::bail!(
+            "no chat provider configured for triage — add a `cloud_providers` \
+             entry (e.g. OpenAI) or set `chat_provider` to a `slug:model` (e.g. \
+             `ollama:gpt-oss:20b`) under Settings → AI"
+        );
+    }
+    let (provider_box, model) = create_chat_provider_from_string("chat", &resolved, config)
+        .context("building routed chat provider for triage")?;
+    let slug_hint = resolved
+        .find(':')
+        .map(|i| &resolved[..i])
+        .unwrap_or(resolved.as_str())
+        .to_string();
     // `Box<dyn Provider>` → `Arc<dyn Provider>` is a single reallocation
     // — the `Provider` trait is `Send + Sync` so this is type-safe.
     let provider: Arc<dyn Provider> = Arc::from(provider_box);
     tracing::debug!(
-        provider = %INFERENCE_BACKEND_ID,
-        model = %default_model,
-        "[triage::routing] resolved remote provider"
+        provider = %slug_hint,
+        model = %model,
+        "[triage::routing] resolved remote provider via workload factory"
     );
     Ok(ResolvedProvider {
         provider,
-        provider_name: INFERENCE_BACKEND_ID.to_string(),
-        model: default_model,
+        provider_name: slug_hint,
+        model,
         used_local: false,
     })
 }
