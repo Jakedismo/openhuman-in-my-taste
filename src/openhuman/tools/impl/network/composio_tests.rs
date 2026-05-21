@@ -230,18 +230,123 @@ fn auth_config_prefers_enabled_status() {
 
 #[test]
 fn extract_api_error_message_from_common_shapes() {
-    let nested = r#"{"error":{"message":"tool not found"}}"#;
-    let flat = r#"{"message":"invalid api key"}"#;
-
+    // 1. error.message (nested object) — OpenAI-style.
     assert_eq!(
-        extract_api_error_message(nested).as_deref(),
+        extract_api_error_message(r#"{"error":{"message":"tool not found"}}"#).as_deref(),
         Some("tool not found")
     );
+    // 2. error (flat string) — Composio v3 auth/permission errors.
     assert_eq!(
-        extract_api_error_message(flat).as_deref(),
+        extract_api_error_message(r#"{"error":"Forbidden"}"#).as_deref(),
+        Some("Forbidden")
+    );
+    // 3. message.
+    assert_eq!(
+        extract_api_error_message(r#"{"message":"invalid api key"}"#).as_deref(),
         Some("invalid api key")
     );
+    // 4. detail (FastAPI / Pydantic).
+    assert_eq!(
+        extract_api_error_message(r#"{"detail":"Not authenticated"}"#).as_deref(),
+        Some("Not authenticated")
+    );
+    // 5. errors[0].message (multi-error array).
+    assert_eq!(
+        extract_api_error_message(
+            r#"{"errors":[{"message":"first problem"},{"message":"second"}]}"#
+        )
+        .as_deref(),
+        Some("first problem")
+    );
+    // Invalid JSON → None (caller still surfaces the raw snippet).
     assert_eq!(extract_api_error_message("not-json"), None);
+    // Empty JSON → None.
+    assert_eq!(extract_api_error_message("{}"), None);
+}
+
+#[tokio::test]
+async fn response_error_403_includes_actionable_hint_and_body_snippet() {
+    // Stand up a minimal mock that responds 403 with a Composio-shape
+    // body and assert the resulting message carries both an
+    // explanation of WHY a 403 happens on this endpoint and the raw
+    // body so the operator can verify.
+    use axum::{response::Response as AxumResponse, routing::get, Router};
+    use tokio::net::TcpListener;
+
+    async fn forbidden() -> AxumResponse {
+        AxumResponse::builder()
+            .status(403)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"error":"Forbidden","trace_id":"abc123"}"#,
+            ))
+            .unwrap()
+    }
+
+    let app = Router::new().route("/v3/test", get(forbidden));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{addr}/v3/test"))
+        .await
+        .unwrap();
+    let msg = response_error(resp).await;
+    server.abort();
+
+    assert!(msg.starts_with("HTTP 403"), "wrong status prefix: {msg}");
+    // Extracted message
+    assert!(
+        msg.contains("Forbidden"),
+        "missing extracted error text: {msg}"
+    );
+    // Actionable hint
+    assert!(
+        msg.contains("invalid/revoked Composio API key"),
+        "missing 403 hint: {msg}"
+    );
+    // Body snippet so the operator sees the trace_id
+    assert!(msg.contains("trace_id"), "missing body snippet: {msg}");
+}
+
+#[tokio::test]
+async fn response_error_unknown_shape_still_surfaces_body_snippet() {
+    // When the body's JSON shape isn't one the extractor recognises,
+    // the operator MUST still see the raw bytes — otherwise novel
+    // error shapes hide root cause.
+    use axum::{response::Response as AxumResponse, routing::get, Router};
+    use tokio::net::TcpListener;
+
+    async fn weird() -> AxumResponse {
+        AxumResponse::builder()
+            .status(500)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"reason_phrase":"upstream toolkit registry down","retry_after":15}"#,
+            ))
+            .unwrap()
+    }
+
+    let app = Router::new().route("/v3/test", get(weird));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::get(format!("http://{addr}/v3/test"))
+        .await
+        .unwrap();
+    let msg = response_error(resp).await;
+    server.abort();
+
+    assert!(msg.contains("HTTP 500"));
+    assert!(
+        msg.contains("reason_phrase") && msg.contains("upstream toolkit registry down"),
+        "novel-shape body must surface in snippet: {msg}"
+    );
 }
 
 #[test]
