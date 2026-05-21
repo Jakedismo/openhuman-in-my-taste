@@ -137,6 +137,21 @@ and Composio direct-mode took over from the deleted backend proxy.
 
 ## 21.5.2026 — Direct-mode polish + Kokoro
 
+### Fixed
+
+- **Kokoro provider rejects foreign per-call voice IDs.** The mascot's
+  `voice_reply_synthesize` calls were forwarding the frontend
+  `MASCOT_VOICE_ID` (an ElevenLabs id like `JBFqnCBsd6RMkjVDRZzb`) into
+  the Kokoro provider's per-call override, bypassing the
+  `is_kokoro_voice_id` gate that already filtered construction-time
+  voices. mlx-audio then crashed with
+  `[load_safetensors] Failed to open file …/voices/<el-id>.safetensors`.
+  The provider's `synthesize` now reuses the same gate via a new pure
+  `resolve_kokoro_voice` helper: invalid per-call ids are dropped to the
+  configured Kokoro default with a `[voice-tts] kokoro: dropping
+  non-kokoro per-call voice id` warning, so the mascot speaks instead
+  of crashing the TTS server.
+
 ### Added
 
 - **Triage ACK memory-write.** `apply_decision(Acknowledge)` now writes

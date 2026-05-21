@@ -340,13 +340,7 @@ impl TtsProvider for KokoroTtsProvider {
         text: &str,
         voice: Option<&str>,
     ) -> Result<RpcOutcome<ReplySpeechResult>, String> {
-        // Per-call voice override wins; otherwise fall back to the configured
-        // default. Empty strings on either side trigger the server's own
-        // default by omitting `voice` from the request body.
-        let resolved_voice = voice
-            .map(str::to_string)
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.voice.clone());
+        let resolved_voice = resolve_kokoro_voice(voice, self.voice.as_deref());
         debug!(
             "{LOG_PREFIX} kokoro TTS dispatch endpoint={} model={} voice={} chars={}",
             self.endpoint_url,
@@ -361,6 +355,43 @@ impl TtsProvider for KokoroTtsProvider {
         };
         synthesize_kokoro(config, text, &opts).await
     }
+}
+
+/// Resolve which voice the Kokoro provider should send to mlx-audio /
+/// kokoro-fastapi.
+///
+/// The per-call `voice` only wins when it matches Kokoro's id namespace
+/// ([`is_kokoro_voice_id`]). Foreign ids (the mascot's ElevenLabs voice
+/// like `JBFqnCBsd6RMkjVDRZzb`, Piper's `en_US-lessac-medium`, macOS-say's
+/// `Samantha`) are silently dropped to the configured default — sending
+/// them on would crash mlx-audio with
+/// `Failed to open file …/voices/<foreign-id>.safetensors`.
+///
+/// `tracing::warn!` is emitted on drop so the operator can spot a
+/// stale-voice-id misconfig in the logs without having to read mlx-audio
+/// tracebacks.
+fn resolve_kokoro_voice(
+    per_call: Option<&str>,
+    configured_default: Option<&str>,
+) -> Option<String> {
+    if let Some(per_call) = per_call.map(str::trim).filter(|s| !s.is_empty()) {
+        if is_kokoro_voice_id(per_call) {
+            return Some(per_call.to_string());
+        }
+        tracing::warn!(
+            target: "openhuman::voice::factory",
+            per_call_voice = per_call,
+            configured_default = configured_default.unwrap_or("<unset>"),
+            "[voice-tts] kokoro: dropping non-kokoro per-call voice id; \
+             falling back to configured default. Likely a stale ElevenLabs / \
+             Piper / macOS-say voice from the mascot settings page — clear it \
+             or set VITE_MASCOT_VOICE_ID to a Kokoro id (e.g. af_heart)."
+        );
+    }
+    configured_default
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +781,75 @@ mod tests {
         ] {
             assert!(is_kokoro_voice_id(id), "{id} should be accepted");
         }
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_prefers_valid_per_call_id() {
+        let resolved = resolve_kokoro_voice(Some("am_michael"), Some("af_heart"));
+        assert_eq!(resolved.as_deref(), Some("am_michael"));
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_drops_elevenlabs_id_and_falls_back_to_default() {
+        // The exact id that crashed mlx-audio in the field: the mascot's
+        // default `MASCOT_VOICE_ID` (an ElevenLabs voice) reached the
+        // Kokoro provider as a per-call override.
+        let resolved = resolve_kokoro_voice(Some("JBFqnCBsd6RMkjVDRZzb"), Some("af_heart"));
+        assert_eq!(
+            resolved.as_deref(),
+            Some("af_heart"),
+            "foreign per-call ids must fall back to the configured default, \
+             not reach mlx-audio"
+        );
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_drops_piper_id_and_falls_back_to_default() {
+        let resolved = resolve_kokoro_voice(Some("en_US-lessac-medium"), Some("af_heart"));
+        assert_eq!(resolved.as_deref(), Some("af_heart"));
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_drops_macos_say_id_and_falls_back_to_default() {
+        let resolved = resolve_kokoro_voice(Some("Samantha"), Some("af_heart"));
+        assert_eq!(resolved.as_deref(), Some("af_heart"));
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_returns_none_when_per_call_invalid_and_no_default() {
+        // Omitting voice from the request body lets the server pick its own
+        // default — the right behavior when neither side has a valid Kokoro id.
+        let resolved = resolve_kokoro_voice(Some("Rachel"), None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_empty_per_call_falls_through_to_default() {
+        assert_eq!(
+            resolve_kokoro_voice(Some(""), Some("af_heart")).as_deref(),
+            Some("af_heart")
+        );
+        assert_eq!(
+            resolve_kokoro_voice(Some("   "), Some("af_heart")).as_deref(),
+            Some("af_heart")
+        );
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_none_per_call_uses_default() {
+        assert_eq!(
+            resolve_kokoro_voice(None, Some("am_michael")).as_deref(),
+            Some("am_michael")
+        );
+    }
+
+    #[test]
+    fn resolve_kokoro_voice_empty_default_treated_as_none() {
+        // Configured default may be an empty string when the user hasn't
+        // picked one yet; must not produce an empty `voice` field in the
+        // outgoing body.
+        assert_eq!(resolve_kokoro_voice(None, Some("")), None);
+        assert_eq!(resolve_kokoro_voice(None, Some("   ")), None);
     }
 
     #[test]
