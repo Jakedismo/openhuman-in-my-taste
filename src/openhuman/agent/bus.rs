@@ -175,6 +175,26 @@ pub fn register_agent_handlers() {
                 "[agent::bus] dispatching {AGENT_RUN_TURN_METHOD}"
             );
 
+            // Skip the prompt-injection detector for dispatches that
+            // carry already-trusted internal payloads. The triage
+            // pipeline (`trigger_triage` / `trigger_reactor`) receives
+            // payloads that have already passed Composio's HMAC
+            // verification + our envelope parser — what arrives in the
+            // "user" message is webhook content (PR titles, commit
+            // messages, diffs) the classifier is supposed to inspect.
+            // Running the jailbreak heuristics on it produces false
+            // positives like `override.role_hijack` on a PR titled
+            // "Refactor: replace admin role check" and silently defers
+            // every trigger for 30s, then again, then again.
+            //
+            // The detector still runs for every user-facing channel
+            // (`chat`, `web`, `slack`, etc.) — see
+            // `is_trusted_internal_dispatch` below for the exact gate.
+            let skip_prompt_guard = is_trusted_internal_dispatch(
+                channel_name.as_str(),
+                target_agent_id.as_deref(),
+            );
+            if !skip_prompt_guard {
             if let Some(user_prompt) = history
                 .iter()
                 .rev()
@@ -220,6 +240,7 @@ pub fn register_agent_handlers() {
                     return Err(msg.to_string());
                 }
             }
+            } // end `if !skip_prompt_guard`
 
             // Resolve the target agent's declared sandbox mode so any
             // tool executed inside the loop can read it via the
@@ -357,11 +378,100 @@ pub async fn use_real_agent_handler() -> tokio::sync::MutexGuard<'static, ()> {
     guard
 }
 
+/// Whether this `agent.run_turn` dispatch carries an already-trusted
+/// internal payload that should bypass the prompt-injection detector.
+///
+/// The detector exists to catch jailbreak attempts in user-typed
+/// content from external channels (chat, web, slack, etc.). When the
+/// dispatch is an internal-automation turn — trigger triage / reactor
+/// fed by a Composio webhook envelope, vault ingestion classifying
+/// a file, learning extraction over a private archive — the "user"
+/// message is data we generated or already trust, and the jailbreak
+/// heuristics produce false positives (e.g. `override.role_hijack`
+/// on a PR titled "Refactor: replace admin role"; `exfiltration.intent`
+/// on a diff that mentions a token key). Letting the detector reject
+/// those silently defers every webhook trigger forever.
+///
+/// Two gates, OR'd:
+/// 1. Channel name is on the internal-automation list. The bus
+///    receives these from machine-driven sources, never from
+///    user keystrokes.
+/// 2. Target agent is one of the well-known classifier agents
+///    (`trigger_triage`, `trigger_reactor`). The agent definitions
+///    are sandboxed (`sandbox_mode = "read_only"`, zero tools for
+///    triage) so even a hypothetical injection couldn't execute.
+///
+/// User-facing dispatches (`chat`, `web`, `slack`, `telegram`,
+/// `discord`, `imessage`, `meet`, anything else) continue to run
+/// the detector.
+fn is_trusted_internal_dispatch(channel_name: &str, target_agent_id: Option<&str>) -> bool {
+    const TRUSTED_CHANNELS: &[&str] = &["triage", "cron", "webhook", "vault-sync", "learning"];
+    const TRUSTED_AGENTS: &[&str] = &["trigger_triage", "trigger_reactor"];
+
+    let channel_trusted = TRUSTED_CHANNELS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(channel_name));
+    if channel_trusted {
+        return true;
+    }
+    if let Some(agent_id) = target_agent_id {
+        if TRUSTED_AGENTS
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(agent_id))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::event_bus::NativeRegistry;
     use async_trait::async_trait;
+
+    // ── is_trusted_internal_dispatch ──────────────────────────────────────
+
+    #[test]
+    fn triage_channel_is_trusted_internal() {
+        assert!(is_trusted_internal_dispatch("triage", Some("trigger_triage")));
+        assert!(is_trusted_internal_dispatch("triage", None));
+    }
+
+    #[test]
+    fn well_known_trigger_agents_are_trusted_regardless_of_channel() {
+        // If a future dispatch path puts trigger_triage on a different
+        // channel name, the agent-id gate still kicks in.
+        assert!(is_trusted_internal_dispatch("composio", Some("trigger_triage")));
+        assert!(is_trusted_internal_dispatch("composio", Some("trigger_reactor")));
+    }
+
+    #[test]
+    fn user_facing_channels_run_the_detector() {
+        assert!(!is_trusted_internal_dispatch("chat", None));
+        assert!(!is_trusted_internal_dispatch("web", None));
+        assert!(!is_trusted_internal_dispatch("slack", Some("orchestrator")));
+        assert!(!is_trusted_internal_dispatch("telegram", Some("orchestrator")));
+        assert!(!is_trusted_internal_dispatch("discord", Some("orchestrator")));
+        assert!(!is_trusted_internal_dispatch("imessage", Some("orchestrator")));
+    }
+
+    #[test]
+    fn channel_match_is_case_insensitive() {
+        assert!(is_trusted_internal_dispatch("Triage", None));
+        assert!(is_trusted_internal_dispatch("TRIAGE", None));
+        assert!(is_trusted_internal_dispatch("triage", Some("TRIGGER_TRIAGE")));
+    }
+
+    #[test]
+    fn unknown_internal_channel_falls_through_to_detector() {
+        // Defensive: a new channel name we haven't whitelisted is
+        // treated as user-facing. Better to false-positive a detector
+        // run than to silently skip the detector on a path we forgot
+        // to audit.
+        assert!(!is_trusted_internal_dispatch("custom-channel", Some("orchestrator")));
+    }
 
     /// Minimal `Provider` implementation used only to satisfy the
     /// `Arc<dyn Provider>` type in [`AgentTurnRequest`]. The tests below
