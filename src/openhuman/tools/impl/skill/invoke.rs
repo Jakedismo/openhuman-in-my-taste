@@ -1,12 +1,14 @@
-//! Tool: `skill_invoke` — runs the JS entrypoint of an installed skill
-//! against the managed (or system) Node.js runtime, exchanging JSON
-//! over stdin/stdout.
+//! Tool: `skill_invoke` — runs the entrypoint of an installed skill
+//! against the managed (or system) Node.js or Python runtime,
+//! exchanging JSON over stdin/stdout.
 //!
 //! This is the agent-facing layer on top of
-//! [`crate::openhuman::runtime_node::execute_script`]. The primitive
-//! handles the process spawn + I/O + timeout; this tool handles skill
-//! lookup, entrypoint resolution, and JSON marshalling between the
-//! agent's tool-call schema and the script's wire contract.
+//! [`crate::openhuman::runtime_node::execute_script`] /
+//! [`crate::openhuman::runtime_python::execute_script`]. The primitives
+//! handle the process spawn + I/O + timeout; this tool handles skill
+//! lookup, entrypoint resolution, runtime dispatch (by file extension),
+//! and JSON marshalling between the agent's tool-call schema and the
+//! script's wire contract.
 //!
 //! ## Skill metadata contract
 //!
@@ -18,14 +20,16 @@
 //! name: my-skill
 //! description: …
 //! metadata:
-//!   entrypoint: scripts/main.js
+//!   entrypoint: scripts/main.js   # or scripts/main.py
 //! ---
 //! ```
 //!
 //! The path is **relative to the skill directory** and must point at a
-//! `.js` or `.mjs` file under `scripts/` (one of the conventional
-//! `RESOURCE_DIRS`). Anything else is rejected so a malicious or buggy
-//! skill can't escape its install root via `..` traversal.
+//! `.js` / `.mjs` / `.cjs` (Node) or `.py` (Python) file under `scripts/`
+//! (one of the conventional `RESOURCE_DIRS`). Anything else is rejected
+//! so a malicious or buggy skill can't escape its install root via `..`
+//! traversal. The extension picks which runtime is engaged — Node and
+//! Python both speak the same wire contract below.
 //!
 //! ## Script wire contract
 //!
@@ -33,13 +37,16 @@
 //! {...} }`, stdout should be `{ "ok": bool, "result"|"error": <json> }`.
 //! This tool wraps the user's `args` payload, parses stdout as JSON
 //! into a `ToolResult`, and surfaces the script's `error` field directly
-//! to the agent when `ok: false`.
+//! to the agent when `ok: false`. `meta.runtime` is set to `"javascript"`
+//! or `"python"` so scripts that support both languages can branch on it.
 //!
 //! ## Out of scope (v1)
 //!
-//! - Python skills (entrypoint must be `.js` / `.mjs`).
 //! - Sandbox beyond OS process isolation.
-//! - Resource limits beyond a wall-clock timeout.
+//! - Resource limits beyond a wall-clock timeout (memory caps on Unix
+//!   live in `runtime_python::execute_script` via
+//!   `ExecuteOptions::memory_limit_bytes` but aren't surfaced through
+//!   this tool's parameter schema yet).
 //! - Streaming results; one stdout JSON object, then exit.
 
 use std::path::{Path, PathBuf};
@@ -50,21 +57,56 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::openhuman::javascript::NodeBootstrap;
-use crate::openhuman::runtime_node::{execute_script, ExecuteOptions};
+use crate::openhuman::runtime_node::{
+    execute_script as execute_node_script, ExecuteOptions as NodeExecuteOptions, ExecuteOutcome,
+};
+use crate::openhuman::runtime_python::{
+    execute_script as execute_python_script, PythonBootstrap,
+    PythonExecuteOptions as PyExecuteOptions,
+};
 use crate::openhuman::skills::ops_discover::load_skills;
 use crate::openhuman::skills::ops_types::Skill;
 use crate::openhuman::tools::traits::{
     PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult,
 };
 
+/// Programming language inferred from the entrypoint filename. Decides
+/// which runtime + bootstrap is engaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntrypointKind {
+    JavaScript,
+    Python,
+}
+
+impl EntrypointKind {
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "js" | "mjs" | "cjs" => Some(Self::JavaScript),
+            "py" => Some(Self::Python),
+            _ => None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+        }
+    }
+}
+
 const LOG_PREFIX: &str = "[skill_invoke]";
 
 /// Tool implementation. Constructed once per agent build with the
-/// workspace dir (for skill lookup) and a shared `NodeBootstrap` (for
-/// runtime resolution).
+/// workspace dir (for skill lookup), a `NodeBootstrap` for JavaScript
+/// entrypoints, and an optional `PythonBootstrap` for `.py`
+/// entrypoints. When the Python bootstrap is `None`, calls to `.py`
+/// skills surface an actionable "python runtime not configured" error
+/// — the JavaScript path remains usable regardless.
 pub struct SkillInvokeTool {
     workspace_dir: PathBuf,
     node_bootstrap: Arc<NodeBootstrap>,
+    python_bootstrap: Option<Arc<PythonBootstrap>>,
 }
 
 impl SkillInvokeTool {
@@ -72,7 +114,16 @@ impl SkillInvokeTool {
         Self {
             workspace_dir,
             node_bootstrap,
+            python_bootstrap: None,
         }
+    }
+
+    /// Builder-style extension to attach a Python bootstrap. Without
+    /// this, `.py` entrypoints can't be invoked. Mirrors how the Node
+    /// bootstrap is mandatory and Python is opt-in.
+    pub fn with_python_bootstrap(mut self, python: Arc<PythonBootstrap>) -> Self {
+        self.python_bootstrap = Some(python);
+        self
     }
 
     /// Look up the skill by `dir_name` (the on-disk slug under
@@ -215,18 +266,18 @@ impl Tool for SkillInvokeTool {
             }
         };
 
-        // ── 4. Resolve (and possibly download) the managed Node runtime
-        log::debug!("{LOG_PREFIX} resolving node runtime via NodeBootstrap");
-        let resolved = match self.node_bootstrap.resolve().await {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(ToolResult::error(format!(
-                    "{LOG_PREFIX} node runtime resolution failed: {e:#}"
-                )));
-            }
+        // ── 4. Pick the runtime by entrypoint extension ────────────────
+        let ext = entrypoint_abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let Some(kind) = EntrypointKind::from_extension(ext) else {
+            return Ok(ToolResult::error(format!(
+                "{LOG_PREFIX} skill '{skill_id}': entrypoint extension '{ext}' not supported"
+            )));
         };
 
-        // ── 5. Spawn the script ────────────────────────────────────────
+        // ── 5. Build the wire payload ──────────────────────────────────
         let payload = json!({
             "args": user_args,
             "meta": {
@@ -234,21 +285,84 @@ impl Tool for SkillInvokeTool {
                 "skill_dir": skill_dir.display().to_string(),
                 "host": "closedhuman",
                 "tool": "skill_invoke",
+                "runtime": kind.label(),
             }
         });
-        let opts = ExecuteOptions {
-            cwd: skill_dir.clone(),
-            env: Default::default(),
-            timeout: Some(timeout),
-        };
-        let outcome = match execute_script(&resolved, &entrypoint_abs, &payload, &opts).await {
-            Ok(o) => o,
-            Err(e) => {
-                return Ok(ToolResult::error(format!(
-                    "{LOG_PREFIX} script spawn failed: {e}"
-                )));
-            }
-        };
+
+        // ── 6. Resolve runtime + spawn ─────────────────────────────────
+        let outcome: ExecuteOutcome =
+            match kind {
+                EntrypointKind::JavaScript => {
+                    log::debug!("{LOG_PREFIX} resolving node runtime via NodeBootstrap");
+                    let resolved = match self.node_bootstrap.resolve().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Ok(ToolResult::error(format!(
+                                "{LOG_PREFIX} node runtime resolution failed: {e:#}"
+                            )));
+                        }
+                    };
+                    let opts = NodeExecuteOptions {
+                        cwd: skill_dir.clone(),
+                        env: Default::default(),
+                        timeout: Some(timeout),
+                    };
+                    match execute_node_script(&resolved, &entrypoint_abs, &payload, &opts).await {
+                        Ok(o) => o,
+                        Err(e) => {
+                            return Ok(ToolResult::error(format!(
+                                "{LOG_PREFIX} node script spawn failed: {e}"
+                            )));
+                        }
+                    }
+                }
+                EntrypointKind::Python => {
+                    let Some(py_bootstrap) = self.python_bootstrap.as_ref() else {
+                        return Ok(ToolResult::error(format!(
+                            "{LOG_PREFIX} skill '{skill_id}' has a .py entrypoint but no Python \
+                         runtime is configured. Enable `python.enabled` (or supply \
+                         `python_bootstrap` when building the tool) to invoke Python skills."
+                        )));
+                    };
+                    log::debug!("{LOG_PREFIX} resolving python runtime via PythonBootstrap");
+                    let resolved = match py_bootstrap.resolve().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Ok(ToolResult::error(format!(
+                                "{LOG_PREFIX} python runtime resolution failed: {e:#}"
+                            )));
+                        }
+                    };
+                    let opts = PyExecuteOptions {
+                        cwd: skill_dir.clone(),
+                        env: Default::default(),
+                        timeout: Some(timeout),
+                        memory_limit_bytes: None,
+                    };
+                    let py_outcome =
+                        match execute_python_script(&resolved, &entrypoint_abs, &payload, &opts)
+                            .await
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                return Ok(ToolResult::error(format!(
+                                    "{LOG_PREFIX} python script spawn failed: {e}"
+                                )));
+                            }
+                        };
+                    // Cross-cast: PythonExecuteOutcome shares the exact same
+                    // field set as runtime_node::ExecuteOutcome, so we map
+                    // by-value through the canonical (Node) shape to keep
+                    // the downstream marshalling single-pathed.
+                    ExecuteOutcome {
+                        stdout: py_outcome.stdout,
+                        stderr: py_outcome.stderr,
+                        exit_code: py_outcome.exit_code,
+                        elapsed_ms: py_outcome.elapsed_ms,
+                        timed_out: py_outcome.timed_out,
+                    }
+                }
+            };
 
         log::debug!(
             "{LOG_PREFIX} script done skill_id={skill_id} exit_code={:?} timed_out={} elapsed_ms={} stdout_bytes={} stderr_bytes={}",
@@ -329,9 +443,9 @@ fn resolve_entrypoint(skill_dir: &Path, entrypoint: &str) -> Result<PathBuf, Str
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
-    if !matches!(ext.as_deref(), Some("js") | Some("mjs")) {
+    if EntrypointKind::from_extension(ext.as_deref().unwrap_or("")).is_none() {
         return Err(format!(
-            "entrypoint '{entrypoint}' must end with .js or .mjs (got {:?})",
+            "entrypoint '{entrypoint}' must end with .js, .mjs, .cjs, or .py (got {:?})",
             ext.as_deref().unwrap_or("<none>")
         ));
     }
@@ -518,7 +632,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_non_js_entrypoint_extension() {
+    async fn rejects_unsupported_entrypoint_extension() {
+        // .sh / .rb / .pl / … are never valid. The allow-list now
+        // covers .js, .mjs, .cjs, and .py — anything else trips the
+        // resolve_entrypoint extension gate.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _ = crate::openhuman::skills::ops_discover::init_skills_dir(tmp.path());
+        let workspace_skills = tmp.path().join("skills");
+        let skill_dir = write_fixture_skill(
+            &workspace_skills,
+            "shell-skill",
+            "name: shell-skill\ndescription: declares a shell entrypoint\nmetadata:\n  entrypoint: scripts/main.sh\n",
+            None,
+        );
+        fs::write(skill_dir.join("scripts").join("main.sh"), "echo hi")
+            .expect("write shell script");
+        let tool = tool_for_workspace(tmp.path());
+        let result = tool
+            .execute(json!({ "skill_id": "shell-skill" }))
+            .await
+            .expect("execute should not panic");
+        assert!(result.is_error);
+        assert!(
+            result.text().contains(".js") && result.text().contains(".py"),
+            "error should list the supported extensions: {}",
+            result.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn py_entrypoint_without_python_bootstrap_returns_actionable_error() {
+        // .py is a valid extension but Python support is opt-in. With
+        // no PythonBootstrap attached, calling a .py skill should
+        // surface a precise "configure python" error rather than
+        // silently fall back to Node (which would try to run a Python
+        // file as JS and fail with an opaque syntax error).
         let tmp = tempfile::tempdir().expect("tempdir");
         let _ = crate::openhuman::skills::ops_discover::init_skills_dir(tmp.path());
         let workspace_skills = tmp.path().join("skills");
@@ -536,8 +684,8 @@ mod tests {
             .expect("execute should not panic");
         assert!(result.is_error);
         assert!(
-            result.text().contains(".js") && result.text().contains(".mjs"),
-            "error should explain the allowed extensions: {}",
+            result.text().to_lowercase().contains("python"),
+            "error should mention python: {}",
             result.text()
         );
     }
@@ -654,6 +802,129 @@ mod tests {
             "should surface the script's error field: {}",
             result.text()
         );
+    }
+
+    /// Locate a usable host python so the Python happy-path test can
+    /// run against it. Mirrors host_node_version_or_skip's contract:
+    /// returns the version string the bootstrap should target, or
+    /// `None` to skip-with-log.
+    fn host_python_version_or_skip(test_name: &str) -> Option<String> {
+        for candidate in ["python3", "python"] {
+            let out = std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                continue;
+            }
+            // `python --version` writes to stdout on 3.4+; older 2.x
+            // wrote to stderr. We combine both to be tolerant.
+            let raw = if !out.stdout.is_empty() {
+                String::from_utf8_lossy(&out.stdout).to_string()
+            } else {
+                String::from_utf8_lossy(&out.stderr).to_string()
+            };
+            // Format is "Python 3.11.7" (or "Python 3.12.0+", etc.)
+            let parts: Vec<&str> = raw.trim().splitn(2, ' ').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let version = parts[1].trim();
+            if version.is_empty() {
+                continue;
+            }
+            return Some(version.to_string());
+        }
+        log::info!("{LOG_PREFIX} test={test_name} skipped: no system python on PATH");
+        None
+    }
+
+    #[tokio::test]
+    async fn python_entrypoint_happy_path_returns_result_object() {
+        // Full path through PythonBootstrap.resolve() against the host
+        // python. Same skip-on-missing-runtime convention as the Node
+        // happy-path test.
+        let Some(host_version) =
+            host_python_version_or_skip("python_entrypoint_happy_path_returns_result_object")
+        else {
+            return;
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _ = crate::openhuman::skills::ops_discover::init_skills_dir(tmp.path());
+        let workspace_skills = tmp.path().join("skills");
+        let script = r#"
+import json, sys
+payload = json.loads(sys.stdin.read())
+print(json.dumps({
+    "ok": True,
+    "result": {
+        "echo": payload["args"],
+        "skill_id": payload["meta"]["skill_id"],
+        "runtime": payload["meta"]["runtime"],
+    }
+}))
+"#;
+        let skill_dir = write_fixture_skill(
+            &workspace_skills,
+            "py-echo",
+            "name: py-echo\ndescription: echoes via python\nmetadata:\n  entrypoint: scripts/main.py\n",
+            None,
+        );
+        fs::write(skill_dir.join("scripts").join("main.py"), script).expect("write py file");
+
+        // Build the tool with both Node + Python bootstraps. Node's
+        // version doesn't matter here because the dispatcher picks
+        // Python for the .py entrypoint; we still need a Node
+        // bootstrap to construct the tool.
+        let node_cache = tmp.path().join("node-cache");
+        let node_bootstrap = Arc::new(NodeBootstrap::new(
+            host_node_config(
+                host_node_version_or_skip(
+                    "python_entrypoint_happy_path_returns_result_object_node_pin",
+                )
+                .unwrap_or_else(|| "v22.11.0".to_string()),
+                &node_cache,
+            ),
+            tmp.path().to_path_buf(),
+            reqwest::Client::new(),
+        ));
+
+        let _ = host_version; // Probe runs against `python --version`; the
+                              // RuntimePythonConfig matcher uses a minimum,
+                              // not an exact, so the parsed string is only
+                              // used to confirm a binary exists.
+        let mut py_config = crate::openhuman::config::schema::RuntimePythonConfig::default();
+        py_config.prefer_system = true;
+        // Lower the minimum_version floor to 3.8 so a wider range of
+        // host pythons pass the probe — the test only needs `json.loads`
+        // / `print`, both available since 3.0.
+        py_config.minimum_version = "3.8.0".to_string();
+        py_config.cache_dir = tmp
+            .path()
+            .join("python-cache")
+            .to_string_lossy()
+            .to_string();
+        let py_bootstrap = Arc::new(PythonBootstrap::new(py_config));
+        let tool = SkillInvokeTool::new(tmp.path().to_path_buf(), node_bootstrap)
+            .with_python_bootstrap(py_bootstrap);
+
+        let result = tool
+            .execute(json!({
+                "skill_id": "py-echo",
+                "args": { "hello": "from python" }
+            }))
+            .await
+            .expect("execute should succeed");
+        assert!(
+            !result.is_error,
+            "expected success but got error: {}",
+            result.text()
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result.text()).expect("valid JSON");
+        assert_eq!(parsed["echo"], json!({"hello": "from python"}));
+        assert_eq!(parsed["skill_id"], json!("py-echo"));
+        assert_eq!(parsed["runtime"], json!("python"));
     }
 
     #[test]

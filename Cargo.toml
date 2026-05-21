@@ -62,6 +62,14 @@ hmac = "0.12"
 # `hmac`/`sha2`/`aes-gcm`; pulled in as a direct dep so the receiver
 # can reach for `ConstantTimeEq` without leaning on a re-export.
 subtle = "2"
+# Unix-only memory-cap enforcement via `setrlimit(RLIMIT_AS)` in
+# `runtime_node::execute` and `runtime_python::execute`. Transitively
+# present via tokio / reqwest already; declared as a direct dep so
+# the `libc::rlimit` + `libc::setrlimit` reach is explicit. The crate
+# is a no-op pure-bindings dep on platforms we don't use the calls
+# on (Windows compiles the bindings but never calls them).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 # ngrok agent SDK for the local Composio webhook receiver tunnel. Embeds
 # the agent in-process and forwards public HTTPS traffic on the user's
 # free `<id>.ngrok-free.dev` static domain to our loopback Axum server.

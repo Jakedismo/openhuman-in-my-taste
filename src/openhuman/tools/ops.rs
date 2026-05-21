@@ -168,19 +168,39 @@ pub fn all_tools_with_runtime(
     ];
 
     // Skill invocation (`skill_invoke`) — runs a SKILL.md package's
-    // JS entrypoint against the managed Node runtime. Only registered
-    // when the Node runtime is enabled (`node.enabled = true`) AND a
-    // NodeBootstrap was constructed above — without one there's no
-    // way to resolve the binary at call time. Mirror of the shell /
-    // node_exec / npm_exec registration policy.
+    // JS or Python entrypoint against the managed runtime(s). Only
+    // registered when the Node runtime is enabled (`node.enabled =
+    // true`) AND a NodeBootstrap was constructed above — without one
+    // there's no way to resolve the binary at call time. Mirror of the
+    // shell / node_exec / npm_exec registration policy.
+    //
+    // Python is opt-in via `runtime_python.enabled`: when set we attach
+    // a PythonBootstrap so `.py` entrypoints can run too. When Python
+    // is disabled the tool still works for `.js` / `.mjs` / `.cjs`
+    // skills and surfaces a precise "python runtime not configured"
+    // error for `.py` ones.
     if let Some(bootstrap) = node_bootstrap.as_ref() {
+        let mut skill_tool = super::implementations::SkillInvokeTool::new(
+            workspace_dir.to_path_buf(),
+            Arc::clone(bootstrap),
+        );
+        if root_config.runtime_python.enabled {
+            tracing::debug!(
+                "[tools::ops] python runtime enabled — attaching PythonBootstrap to skill_invoke"
+            );
+            let py_bootstrap = Arc::new(crate::openhuman::runtime_python::PythonBootstrap::new(
+                root_config.runtime_python.clone(),
+            ));
+            skill_tool = skill_tool.with_python_bootstrap(py_bootstrap);
+        } else {
+            tracing::debug!(
+                "[tools::ops] python runtime disabled — skill_invoke will reject .py entrypoints"
+            );
+        }
         tracing::debug!(
             "[tools::ops] node runtime enabled — registering skill_invoke against the shared NodeBootstrap"
         );
-        tools.push(Box::new(super::implementations::SkillInvokeTool::new(
-            workspace_dir.to_path_buf(),
-            Arc::clone(bootstrap),
-        )));
+        tools.push(Box::new(skill_tool));
     } else {
         tracing::debug!(
             "[tools::ops] node runtime disabled — skill_invoke is unavailable until node.enabled = true"
