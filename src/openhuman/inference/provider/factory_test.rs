@@ -142,6 +142,84 @@ fn ollama_prefix() {
 }
 
 #[test]
+fn cloud_provider_with_empty_model_falls_back_to_row_default() {
+    // The triage path resolves `provider_for_role("chat", ...)` → if
+    // the user only has an anthropic cloud_providers row with a
+    // `default_model` set, the resolved string is `anthropic:` (no
+    // model). The factory must hydrate the empty model from the row's
+    // `default_model` instead of forwarding `model: ""` and letting
+    // the upstream reject with `model: String should have at least 1
+    // character`.
+    let mut config = Config::default();
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_ant".into(),
+        slug: "anthropic".into(),
+        label: "Anthropic".into(),
+        endpoint: "https://api.anthropic.com/v1".into(),
+        auth_style: AuthStyle::Anthropic,
+        default_model: Some("claude-sonnet-4-6".into()),
+        ..Default::default()
+    });
+    let (_, model) = create_chat_provider_from_string("chat", "anthropic:", &config)
+        .expect("empty model should hydrate from row's default_model");
+    assert_eq!(model, "claude-sonnet-4-6");
+}
+
+#[test]
+fn cloud_provider_with_empty_model_and_no_defaults_errors_actionably() {
+    // No model in the resolver string, no row `default_model`, no
+    // matching global `default_model`. Factory must surface a clear
+    // "no model configured" error pointing the user at the right
+    // config knob — sending `model: ""` to Anthropic would otherwise
+    // be silent until the API rejected it.
+    let mut config = Config::default();
+    config.default_model = None;
+    config.cloud_providers.push(CloudProviderCreds {
+        id: "p_ant".into(),
+        slug: "anthropic".into(),
+        label: "Anthropic".into(),
+        endpoint: "https://api.anthropic.com/v1".into(),
+        auth_style: AuthStyle::Anthropic,
+        default_model: None,
+        ..Default::default()
+    });
+    let err = create_chat_provider_from_string("chat", "anthropic:", &config)
+        .err()
+        .expect("must error when no model is configured");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no model configured for slug 'anthropic'"),
+        "expected actionable no-model error, got: {msg}"
+    );
+}
+
+#[test]
+fn provider_for_role_chat_uses_chat_provider() {
+    // Regression for the GitHub trigger triage path: `role="chat"`
+    // was missing from `provider_for_role`'s match, so the resolver
+    // fell through to `primary_cloud` synthesis (`<slug>:` with no
+    // model). With the new `"chat"` arm, an explicit `chat_provider`
+    // is honoured the same as `reasoning_provider` etc.
+    let mut config = Config::default();
+    config.cloud_providers.push(openai_entry("p_oai", "openai"));
+    config.chat_provider = Some("openai:gpt-4o-mini".to_string());
+    assert_eq!(provider_for_role("chat", &config), "openai:gpt-4o-mini");
+}
+
+#[test]
+fn provider_for_role_chat_falls_back_to_default_model() {
+    // Without `chat_provider` set, `role="chat"` inherits the
+    // global `default_model` (the user's chosen LLM). This is the
+    // path the triage agent took when no override existed for chat —
+    // pre-fix it returned `<slug>:` with no model and the upstream
+    // rejected with `model: String should have at least 1 character`.
+    let mut config = Config::default();
+    config.cloud_providers.push(openai_entry("p_oai", "openai"));
+    config.default_model = Some("openai:gpt-5.4".to_string());
+    assert_eq!(provider_for_role("chat", &config), "openai:gpt-5.4");
+}
+
+#[test]
 fn local_runtime_slug_with_auth_none_skips_auth_lookup() {
     // Regression for the LM Studio failure where the chat-factory's
     // Bearer arm hit the auth store on every provider build and
@@ -184,9 +262,16 @@ async fn ollama_provider_does_not_require_api_key() {
 }
 
 #[test]
-fn all_workloads_default_to_openhuman() {
-    let config = Config::default();
+fn all_workloads_default_to_openhuman_when_default_model_cleared() {
+    // With `default_model = None` (and no `cloud_providers` / no
+    // `primary_cloud` / no `*_provider`), every workload falls
+    // through to the PROVIDER_OPENHUMAN sentinel — which the
+    // downstream factory then turns into the actionable
+    // "no cloud provider configured" error.
+    let mut config = Config::default();
+    config.default_model = None;
     for role in &[
+        "chat",
         "reasoning",
         "agentic",
         "coding",
@@ -199,7 +284,35 @@ fn all_workloads_default_to_openhuman() {
         assert_eq!(
             provider_for_role(role, &config),
             "openhuman",
-            "role={role} must default to openhuman"
+            "role={role} must default to openhuman when nothing else is configured"
+        );
+    }
+}
+
+#[test]
+fn workloads_inherit_global_default_model_when_no_role_override() {
+    // When `default_model` is set to a `<slug>:<model>` string, every
+    // workload that doesn't have its own `*_provider` inherits it.
+    // This was the load-bearing fix for the GitHub trigger triage path:
+    // role="chat" had no `chat_provider`, so the resolver fell through
+    // to `primary_cloud` and synthesised `<slug>:` with no model.
+    let mut config = Config::default();
+    config.default_model = Some("openai:gpt-5.4".to_string());
+    for role in &[
+        "chat",
+        "reasoning",
+        "agentic",
+        "coding",
+        "memory",
+        "embeddings",
+        "heartbeat",
+        "learning",
+        "subconscious",
+    ] {
+        assert_eq!(
+            provider_for_role(role, &config),
+            "openai:gpt-5.4",
+            "role={role} must inherit default_model when no role override is set"
         );
     }
 }
@@ -207,6 +320,7 @@ fn all_workloads_default_to_openhuman() {
 #[test]
 fn workload_override_respected() {
     let mut config = Config::default();
+    config.default_model = None;
     config.heartbeat_provider = Some("ollama:llama3.2:3b".to_string());
     assert_eq!(
         provider_for_role("heartbeat", &config),
@@ -345,17 +459,21 @@ async fn cloud_provider_with_malformed_endpoint_surfaces_url_error() {
 
 #[test]
 fn primary_cloud_with_no_providers_errors_in_local_fork() {
-    // No cloud_providers, no primary_cloud, no workload override —
-    // factory must error with the backend-removed pointer rather
-    // than silently return the dead OpenHumanBackendProvider.
+    // No cloud_providers, no primary_cloud, no workload override,
+    // and a `default_model = "openai:gpt-5.4"` that points at a slug
+    // that isn't in `cloud_providers`. Factory must surface a clear
+    // "no cloud provider configured" error pointing the user at
+    // Settings → AI, not silently degrade to the dead OpenHuman
+    // backend.
     let config = Config::default();
     let err = create_chat_provider("reasoning", &config)
         .err()
         .expect("must error");
+    let msg = err.to_string();
     assert!(
-        err.to_string()
-            .contains("OpenHuman backend provider is not available"),
-        "expected backend-removed error, got: {err}"
+        msg.contains("no cloud provider configured")
+            || msg.contains("OpenHuman backend provider is not available"),
+        "expected a clear 'configure a provider' error, got: {msg}"
     );
 }
 
@@ -373,14 +491,16 @@ fn summarization_aliases_memory_provider() {
 
 #[test]
 fn summarization_defaults_to_openhuman_like_memory() {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.default_model = None;
     assert_eq!(provider_for_role("memory", &config), "openhuman");
     assert_eq!(provider_for_role("summarization", &config), "openhuman");
 }
 
 #[test]
 fn unknown_workload_falls_back_to_openhuman() {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.default_model = None;
     assert_eq!(
         provider_for_role("nope-not-a-workload", &config),
         "openhuman"
