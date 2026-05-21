@@ -12,7 +12,7 @@ It is opinionated, not polished. If you want a hand-held experience, use the ups
 
 ## Why this fork exists
 
-Upstream's repo description: *"Personal AI super intelligence. Private, Simple and extremely powerful."*
+Upstream's repo description: _"Personal AI super intelligence. Private, Simple and extremely powerful."_
 
 The locality promise reads cleanly. The implementation didn't honour it.
 
@@ -35,7 +35,7 @@ The product was clearly built around the assumption that a hosted tier system wa
 
 - The free tier had hard rate limits on LLM calls counted server-side.
 - "Bring your own OpenAI key" was a UI knob in `cloud_providers` that, on save, got silently migrated to `auth_style = OpenhumanJwt`. Your key wasn't ignored by accident — it was systematically swapped for the backend session at config load (`migrate_legacy_fields` flipped `Bearer` → `OpenhumanJwt` for legacy `type = "openhuman"` rows, which any pre-existing row had).
-- The "local AI" toggle gated whether the runtime *probe* fired, but the chat path still preferred the backend when both were available.
+- The "local AI" toggle gated whether the runtime _probe_ fired, but the chat path still preferred the backend when both were available.
 - The Settings → Connections panel had a "Google" tile marked `comingSoon: true` that did nothing — meanwhile the real Gmail OAuth had to be done through Composio's web dashboard, which the docs didn't mention.
 - The orchestrator's system prompt hardcoded the line `head to Settings → Connections → Gmail to hook it up` — pointing users at the stub tile when the actual working path was elsewhere.
 
@@ -43,33 +43,33 @@ The product was clearly built around the assumption that a hosted tier system wa
 
 Once the backend was removed, the rot underneath became visible. Each of these was a real, reproducible failure mode on a clean install of the upstream build:
 
-| Bug | Why it broke | Fix |
-| --- | --- | --- |
-| `SESSION_EXPIRED: backend session not active` on every chat call | `provider/ops.rs::create_backend_inference_provider` silently constructed `OpenHumanBackendProvider` whenever `inference_url` was missing — regardless of whether the user had configured a `cloud_providers` row with their own key. | Hard-error with a Settings → AI pointer when no inference URL is configured. |
-| User-supplied OpenAI keys silently swapped for backend JWT | `cloud_providers.rs::migrate_legacy_fields` rewrote `auth_style = Bearer` → `OpenhumanJwt` for any row with legacy `type = "openhuman"`. | Migration removed; one-time sweep converts existing `OpenhumanJwt` rows back to `Bearer` (empty key) and asks the user to re-add. |
-| Memory-tree ingestion broke without a backend session | `memory/tree/chat/cloud.rs::CloudChatProvider` hardcoded the OpenHuman backend regardless of workload routing config. | File deleted; replaced by `WorkloadChatProvider` which honours `memory_provider` config. |
-| User-chosen model IDs silently rewritten | `local_ai` config layer normalised the user's model id into upstream's tier names. | Identity-preserving — what you type is what's sent. |
-| Dead defaults re-injected into `config.toml` on every save | A migration pass kept rewriting deleted backend URLs into config every time the file was touched. | Default injection removed. |
-| Bottom tab bar invisible on fresh install | Component gated on `sessionToken` being non-null. There is no session on a fresh install. | Gate removed. |
-| Chat input blocked behind missing JWT | The socket only connected when a session token was present; chat input gated on socket-connected state. | Socket connects unconditionally; chat input no longer reads the session field. |
-| `/` route bypassed onboarding | Welcome routing landed users directly on `/home` instead of the onboarding pipeline. | `/` now goes through `DefaultRedirect`. |
-| Subconscious workload ignored `subconscious_provider` config | Engine called `build_chat_provider(_, ChatConsumer::Summarise)` which hardcoded the `memory` workload, ignoring the user's `subconscious_provider` selection. | New `build_chat_provider_for_role(_, "subconscious", _)`. |
-| Composio direct mode silently dropped trigger events | The bus subscriber had a `if config.composio.mode == "direct" { return; }` guard, killing every webhook delivery even when the mode was explicitly enabled. | Gate removed. |
-| Composio v3 trigger config parsed wrong | The direct-mode parser expected a flat `{field: {required: true}}` map; Composio v3 actually returns a JSON Schema (`{properties, required: ["owner", "repo"]}`). Result: GitHub trigger UI showed plain toggles with no way to enter `owner`/`repo`. | Parser reads JSON Schema first, flat-map as legacy fallback. |
-| Sub-agent saw zero Gmail tools despite an active Composio connection | The integrations sub-agent reused a session-start catalogue snapshot that could legitimately contain zero actions for a toolkit whose OAuth had completed after the snapshot. Resulting agent reply: "Gmail isn't connected here." | New `fetch_direct_toolkit_actions` refreshes per-toolkit catalogue at spawn time. |
-| Kokoro TTS POSTed the mascot's ElevenLabs voice id | The TTS factory's voice-override gate dropped Piper-shaped ids (correct) but let ElevenLabs CamelCase ids (`Rachel`) through, where they hit the local Kokoro server as unknown voices. | Positive-match against Kokoro's published naming convention (`^[abefjz][mf]_…`). |
-| Kokoro response read errored opaquely on chunked streams | Body collector used `reqwest::Response::bytes()`, which surfaces a single unstructured "error decoding response body" when the transfer-encoded stream ends abnormally. No bytes received, no content-type, no way to tell server-crashed-mid-synth from transfer-encoding mismatch. | Streaming accumulator + RIFF/WAVE magic sniff. |
-| Piper TTS broken on macOS upstream | The only published macOS release (`2023.11.14-2`) ships a binary that depends on `@rpath/libespeak-ng.1.dylib`, `@rpath/libpiper_phonemize.1.dylib`, `@rpath/libonnxruntime.1.14.1.dylib` — none of which are bundled in the tarball, and the binary has no `LC_RPATH` entries to find them. No upstream fix. | Replaced with a Kokoro provider that talks OpenAI Audio API to a local server (mlx-audio on Apple Silicon — MLX-accelerated, ~real-time on M-series). |
-| Auto-updater pointed at upstream releases | `tauri.conf.json` had `updater.endpoints = ["https://github.com/tinyhumansai/openhuman/releases/latest/download/latest.json"]`. If installed in the fork, it would have downloaded and applied upstream binaries on top of the fork. | Disabled at three layers (Tauri plugin config, `<AppUpdatePrompt />` mount removed, Settings → About card removed). |
-| Hardcoded `APPLE_SIGNING_IDENTITY` in `pnpm dev:app` | Dev script set someone else's signing identity, breaking `dev:app` on any machine that wasn't upstream's CI. | Removed. |
-| Telegram / Discord / iMessage channel listeners didn't hot-reload | Pairing a new account required restarting the app for the listeners to pick it up. | Hot-reload on connect / disconnect. |
-| `useUsageState` spammed deleted RPCs | The hook polled `team/*` and `billing/*` RPCs that no longer exist in the fork (and never existed for non-paying users in upstream). | Hook gutted. |
-| "Reconnecting to backend" overlay covered Home | Connectivity overlay was triggered by a stale boot-check that always reported "disconnected" without a backend. | Overlay removed. |
-| `list_models` failed against loopback URLs | Runtime HTTP client applied the system proxy even when the target was `127.0.0.1`. | Loopback bypass + URL/source surfaced in errors. |
-| Channel + threads providers bypassed workload routing | Two more code paths constructed providers directly instead of routing through the factory, so the user's per-workload config was ignored. | Routed through `provider_for_role`. |
-| Composio op surface fragmented across modes | `composio_sync`, `get_user_profile`, `delete_connection`, `refresh_all_identities` only worked through the backend path; the direct-mode arm was a stub. | All re-routed through the mode-aware factory. |
-| Vault sync was synchronous + blocking | A single sync ran on the request thread; the UI froze for the duration. | Async job worker with progress callbacks + matching UI. |
-| Settings → Connections "Google" tile marked `comingSoon: true` | Tile was a stub; the real Google OAuth path was Composio (undocumented). | Tile stays cosmetic until we ship a direct OAuth flow that bypasses Composio for Google. The Composio dialog is the working path. |
+| Bug                                                                  | Why it broke                                                                                                                                                                                                                                                                                                  | Fix                                                                                                                                                   |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SESSION_EXPIRED: backend session not active` on every chat call     | `provider/ops.rs::create_backend_inference_provider` silently constructed `OpenHumanBackendProvider` whenever `inference_url` was missing — regardless of whether the user had configured a `cloud_providers` row with their own key.                                                                         | Hard-error with a Settings → AI pointer when no inference URL is configured.                                                                          |
+| User-supplied OpenAI keys silently swapped for backend JWT           | `cloud_providers.rs::migrate_legacy_fields` rewrote `auth_style = Bearer` → `OpenhumanJwt` for any row with legacy `type = "openhuman"`.                                                                                                                                                                      | Migration removed; one-time sweep converts existing `OpenhumanJwt` rows back to `Bearer` (empty key) and asks the user to re-add.                     |
+| Memory-tree ingestion broke without a backend session                | `memory/tree/chat/cloud.rs::CloudChatProvider` hardcoded the OpenHuman backend regardless of workload routing config.                                                                                                                                                                                         | File deleted; replaced by `WorkloadChatProvider` which honours `memory_provider` config.                                                              |
+| User-chosen model IDs silently rewritten                             | `local_ai` config layer normalised the user's model id into upstream's tier names.                                                                                                                                                                                                                            | Identity-preserving — what you type is what's sent.                                                                                                   |
+| Dead defaults re-injected into `config.toml` on every save           | A migration pass kept rewriting deleted backend URLs into config every time the file was touched.                                                                                                                                                                                                             | Default injection removed.                                                                                                                            |
+| Bottom tab bar invisible on fresh install                            | Component gated on `sessionToken` being non-null. There is no session on a fresh install.                                                                                                                                                                                                                     | Gate removed.                                                                                                                                         |
+| Chat input blocked behind missing JWT                                | The socket only connected when a session token was present; chat input gated on socket-connected state.                                                                                                                                                                                                       | Socket connects unconditionally; chat input no longer reads the session field.                                                                        |
+| `/` route bypassed onboarding                                        | Welcome routing landed users directly on `/home` instead of the onboarding pipeline.                                                                                                                                                                                                                          | `/` now goes through `DefaultRedirect`.                                                                                                               |
+| Subconscious workload ignored `subconscious_provider` config         | Engine called `build_chat_provider(_, ChatConsumer::Summarise)` which hardcoded the `memory` workload, ignoring the user's `subconscious_provider` selection.                                                                                                                                                 | New `build_chat_provider_for_role(_, "subconscious", _)`.                                                                                             |
+| Composio direct mode silently dropped trigger events                 | The bus subscriber had a `if config.composio.mode == "direct" { return; }` guard, killing every webhook delivery even when the mode was explicitly enabled.                                                                                                                                                   | Gate removed.                                                                                                                                         |
+| Composio v3 trigger config parsed wrong                              | The direct-mode parser expected a flat `{field: {required: true}}` map; Composio v3 actually returns a JSON Schema (`{properties, required: ["owner", "repo"]}`). Result: GitHub trigger UI showed plain toggles with no way to enter `owner`/`repo`.                                                         | Parser reads JSON Schema first, flat-map as legacy fallback.                                                                                          |
+| Sub-agent saw zero Gmail tools despite an active Composio connection | The integrations sub-agent reused a session-start catalogue snapshot that could legitimately contain zero actions for a toolkit whose OAuth had completed after the snapshot. Resulting agent reply: "Gmail isn't connected here."                                                                            | New `fetch_direct_toolkit_actions` refreshes per-toolkit catalogue at spawn time.                                                                     |
+| Kokoro TTS POSTed the mascot's ElevenLabs voice id                   | The TTS factory's voice-override gate dropped Piper-shaped ids (correct) but let ElevenLabs CamelCase ids (`Rachel`) through, where they hit the local Kokoro server as unknown voices.                                                                                                                       | Positive-match against Kokoro's published naming convention (`^[abefjz][mf]_…`).                                                                      |
+| Kokoro response read errored opaquely on chunked streams             | Body collector used `reqwest::Response::bytes()`, which surfaces a single unstructured "error decoding response body" when the transfer-encoded stream ends abnormally. No bytes received, no content-type, no way to tell server-crashed-mid-synth from transfer-encoding mismatch.                          | Streaming accumulator + RIFF/WAVE magic sniff.                                                                                                        |
+| Piper TTS broken on macOS upstream                                   | The only published macOS release (`2023.11.14-2`) ships a binary that depends on `@rpath/libespeak-ng.1.dylib`, `@rpath/libpiper_phonemize.1.dylib`, `@rpath/libonnxruntime.1.14.1.dylib` — none of which are bundled in the tarball, and the binary has no `LC_RPATH` entries to find them. No upstream fix. | Replaced with a Kokoro provider that talks OpenAI Audio API to a local server (mlx-audio on Apple Silicon — MLX-accelerated, ~real-time on M-series). |
+| Auto-updater pointed at upstream releases                            | `tauri.conf.json` had `updater.endpoints = ["https://github.com/tinyhumansai/openhuman/releases/latest/download/latest.json"]`. If installed in the fork, it would have downloaded and applied upstream binaries on top of the fork.                                                                          | Disabled at three layers (Tauri plugin config, `<AppUpdatePrompt />` mount removed, Settings → About card removed).                                   |
+| Hardcoded `APPLE_SIGNING_IDENTITY` in `pnpm dev:app`                 | Dev script set someone else's signing identity, breaking `dev:app` on any machine that wasn't upstream's CI.                                                                                                                                                                                                  | Removed.                                                                                                                                              |
+| Telegram / Discord / iMessage channel listeners didn't hot-reload    | Pairing a new account required restarting the app for the listeners to pick it up.                                                                                                                                                                                                                            | Hot-reload on connect / disconnect.                                                                                                                   |
+| `useUsageState` spammed deleted RPCs                                 | The hook polled `team/*` and `billing/*` RPCs that no longer exist in the fork (and never existed for non-paying users in upstream).                                                                                                                                                                          | Hook gutted.                                                                                                                                          |
+| "Reconnecting to backend" overlay covered Home                       | Connectivity overlay was triggered by a stale boot-check that always reported "disconnected" without a backend.                                                                                                                                                                                               | Overlay removed.                                                                                                                                      |
+| `list_models` failed against loopback URLs                           | Runtime HTTP client applied the system proxy even when the target was `127.0.0.1`.                                                                                                                                                                                                                            | Loopback bypass + URL/source surfaced in errors.                                                                                                      |
+| Channel + threads providers bypassed workload routing                | Two more code paths constructed providers directly instead of routing through the factory, so the user's per-workload config was ignored.                                                                                                                                                                     | Routed through `provider_for_role`.                                                                                                                   |
+| Composio op surface fragmented across modes                          | `composio_sync`, `get_user_profile`, `delete_connection`, `refresh_all_identities` only worked through the backend path; the direct-mode arm was a stub.                                                                                                                                                      | All re-routed through the mode-aware factory.                                                                                                         |
+| Vault sync was synchronous + blocking                                | A single sync ran on the request thread; the UI froze for the duration.                                                                                                                                                                                                                                       | Async job worker with progress callbacks + matching UI.                                                                                               |
+| Settings → Connections "Google" tile marked `comingSoon: true`       | Tile was a stub; the real Google OAuth path was Composio (undocumented).                                                                                                                                                                                                                                      | Tile stays cosmetic until we ship a direct OAuth flow that bypasses Composio for Google. The Composio dialog is the working path.                     |
 
 Full per-commit log of the rewrite is in [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -126,19 +126,19 @@ The fork uses native OAuth 2.0 PKCE with a loopback redirect (RFC 8252 §7.3). T
 **At [console.cloud.google.com](https://console.cloud.google.com):**
 
 1. **Create a project** (or use an existing one).
-2. **Enable APIs** — go to *APIs & Services → Library* and enable:
+2. **Enable APIs** — go to _APIs & Services → Library_ and enable:
    - Gmail API
    - Google Calendar API
    - Google Drive API
-3. **Configure the OAuth consent screen** — *APIs & Services → OAuth consent screen*:
+3. **Configure the OAuth consent screen** — _APIs & Services → OAuth consent screen_:
    - User type: **External** (if you're a personal Google account) or **Internal** (Workspace).
    - Scopes: add the read/write scopes for the APIs you enabled. The fork requests them per-connector at runtime.
    - **Add yourself as a test user** while the app is unverified. Unverified apps can have up to 100 test users.
-4. **Create the OAuth client** — *APIs & Services → Credentials → Create Credentials → OAuth client ID*:
+4. **Create the OAuth client** — _APIs & Services → Credentials → Create Credentials → OAuth client ID_:
    - Application type: **Desktop app**.
    - Note the **client ID** and **client secret** (Google's "desktop app" clients have one even though native PKCE technically doesn't need it — Google's token endpoint still validates it).
 5. **Build the binary with your client ID + secret baked in.** Currently these are compile-time constants in `src/openhuman/oauth/`. Open `src/openhuman/oauth/google.rs` (or wherever the constants live in the build you cloned — they get moved around) and paste in your `client_id` and `client_secret`. Then rebuild with `pnpm tauri build`.
-   - *(Future-proofing note: moving these to env / config so a fresh user doesn't need to rebuild is on the todo list. For now it's a build-time secret.)*
+   - _(Future-proofing note: moving these to env / config so a fresh user doesn't need to rebuild is on the todo list. For now it's a build-time secret.)_
 
 **Validate end-to-end without launching the GUI:**
 
@@ -154,7 +154,7 @@ Native PKCE works against GitHub without a client secret.
 
 **At [github.com/settings/developers](https://github.com/settings/developers):**
 
-1. *OAuth Apps → New OAuth app*.
+1. _OAuth Apps → New OAuth app_.
 2. **Application name**: anything (`closedhuman` is fine).
 3. **Homepage URL**: anything.
 4. **Authorization callback URL**: `http://127.0.0.1/callback` (the exact port is allocated at runtime — GitHub lets you register `127.0.0.1` and matches any port).
@@ -174,8 +174,8 @@ Native OAuth covers Google + GitHub. Everything beyond that (Slack, Notion, Disc
 **At [app.composio.dev](https://app.composio.dev):**
 
 1. **Sign up** for an account (free tier is fine for personal use).
-2. *Settings → API keys → Create new key*. Copy the API key.
-3. In the app: *Settings → Composio → API key*. Paste it.
+2. _Settings → API keys → Create new key_. Copy the API key.
+3. In the app: _Settings → Composio → API key_. Paste it.
 4. Restart the app (`Cmd+Q` then `pnpm dev:app`) so the new key is picked up.
 
 **Connect a toolkit:**
@@ -209,7 +209,7 @@ Composio delivers trigger events as outbound webhooks. For them to reach your lo
 1. **Sign up** at [ngrok.com](https://ngrok.com) (free, no credit card).
 2. **Copy your authtoken** from [dashboard.ngrok.com/get-started/your-authtoken](https://dashboard.ngrok.com/get-started/your-authtoken). It's a long hex string.
 3. **Reserve your static domain** at [dashboard.ngrok.com/domains](https://dashboard.ngrok.com/domains). If one isn't shown, click "New domain" — the free plan auto-provisions one (`<random-id>.ngrok-free.dev`).
-4. In the app: *Settings → Triggers*:
+4. In the app: _Settings → Triggers_:
    - **ngrok authtoken** — paste it.
    - **ngrok static domain** — paste it (without the `https://` prefix, just `<id>.ngrok-free.dev`).
    - Click **Test tunnel**. The green checkmark means the receiver is up.
@@ -260,14 +260,14 @@ curl -sS http://127.0.0.1:8880/v1/audio/speech \
   --output /tmp/k.wav && afplay /tmp/k.wav
 ```
 
-In the app: *Settings → Voice*:
+In the app: _Settings → Voice_:
 
-| Field | Value |
-| --- | --- |
+| Field                   | Value                                       |
+| ----------------------- | ------------------------------------------- |
 | Text-to-Speech Provider | **Kokoro (local OpenAI-compatible server)** |
-| Endpoint | `http://localhost:8880` |
-| Model | `mlx-community/Kokoro-82M-bf16` |
-| Default voice | `af_bella` |
+| Endpoint                | `http://localhost:8880`                     |
+| Model                   | `mlx-community/Kokoro-82M-bf16`             |
+| Default voice           | `af_bella`                                  |
 
 Save by tabbing out of each field (`onBlur` persists). The mascot's spoken-reply path routes through the same factory dispatch, so picking Kokoro here switches every TTS surface in the app — no separate mascot wiring needed.
 
@@ -277,7 +277,7 @@ Other Kokoro voices: `af_heart` (American female, alternate), `am_michael` (Amer
 
 The fork has no hosted LLM backend. Three valid configurations, pick whichever fits:
 
-**Option A — BYO cloud API key** (easiest, default). At *Settings → AI*:
+**Option A — BYO cloud API key** (easiest, default). At _Settings → AI_:
 
 1. Click "Add provider".
 2. Choose **OpenAI**, **Anthropic**, **OpenRouter**, or **Custom** (any OpenAI-compatible endpoint — Groq, Together, Fireworks, …).
@@ -286,12 +286,12 @@ The fork has no hosted LLM backend. Three valid configurations, pick whichever f
 
 The default config routes everything to OpenAI `gpt-5.4` with medium reasoning effort. Override at any workload row.
 
-**Option B — Local Ollama.** Install [Ollama](https://ollama.com), pull a model (`ollama pull llama3.1:70b`), and at *Settings → AI*:
+**Option B — Local Ollama.** Install [Ollama](https://ollama.com), pull a model (`ollama pull llama3.1:70b`), and at _Settings → AI_:
 
 1. The app auto-detects Ollama at `http://localhost:11434`.
 2. In the workload routing section, set the workload to `ollama:<model>` (e.g. `ollama:llama3.1:70b`).
 
-**Option C — LM Studio or any OpenAI-compatible local server.** Spin up the server, then at *Settings → AI* add a Custom provider with `auth_style = None`, endpoint `http://localhost:<port>/v1`, and use whatever model id the server exposes.
+**Option C — LM Studio or any OpenAI-compatible local server.** Spin up the server, then at _Settings → AI_ add a Custom provider with `auth_style = None`, endpoint `http://localhost:<port>/v1`, and use whatever model id the server exposes.
 
 You can mix all three — chat on cloud OpenAI, memory ingestion on local Ollama, voice/embeddings on local models. Each workload reads its own `*_provider` config.
 
@@ -313,14 +313,11 @@ This is a working fork, not a polished product. Known gaps:
 - **OAuth client IDs are build-time constants.** A fresh user has to rebuild the binary to use their own GCP / GitHub OAuth client. Moving them to runtime config is on the todo list.
 - **The Google OAuth client ships unverified.** Google's verification process for a personal-use desktop app is heavyweight; you'll hit the "this app isn't verified" screen and have to click through. Add yourself as a test user on the OAuth consent screen to skip the worst friction.
 - **Settings → Connections → Google tile is still a `comingSoon: true` stub.** The actual Google OAuth path is through the per-toolkit Manage dialog. Either remove the tile or wire it as a deeplink to the Manage dialog — listed in the next pass.
-- **The agent's orchestrator prompt** still mentions "Settings → Connections" in a few places. Most are gone but a couple instructions remain — they'll get updated as we encounter them.
 - **Telemetry, observability, error reporting** — Sentry is still wired up for crash reporting. Disable in `app/src/utils/config.ts` if you don't want any third-party reporting.
 - **Distribution** — no signed releases, no auto-update. Build locally or set up your own release pipeline.
-- **Skills / script execution** — the QuickJS runtime was removed upstream in #1061 and the replacement (`runtime_node`, `runtime_python`) isn't finished. Skill metadata works; skill execution doesn't end-to-end.
+- If you hit something that's broken, check the logs first, then `tasks/todo.md` for known issues, then file an issue against this fork (not upstream — upstream can't fix what's specific to the closedhuman path).
 
-If you hit something that's broken, check the logs first, then `tasks/todo.md` for known issues, then file an issue against this fork (not upstream — upstream can't fix what's specific to the closedhuman path).
-
----
+  ***
 
 ## License + attribution
 
