@@ -615,20 +615,53 @@ async fn run_typed_mode(
                             }
                         }
                     }
-                    Some(ComposioClientKind::Direct(_)) => {
-                        // Direct mode has no backend-allowlist catalogue
-                        // refresh path — the personal Composio tenant
-                        // governs availability. Mirror the
-                        // `ComposioListToolsTool` direct-mode short-
-                        // circuit and fall back to the cached catalogue
-                        // bulk-fetched at session start (#1710 Wave 2).
-                        tracing::info!(
-                            agent_id = %definition.id,
-                            toolkit = %tk,
-                            cached_actions = cached_integration.tools.len(),
-                            "[composio-direct] subagent_runner:typed: direct mode active — using cached catalogue, skipping backend list_tools refresh"
-                        );
-                        cached_integration.tools.clone()
+                    Some(ComposioClientKind::Direct(direct)) => {
+                        // Direct mode CAN refresh — Composio v3
+                        // `/tools?toolkit_slugs=<tk>` returns the live
+                        // per-toolkit catalogue from the user's personal
+                        // tenant. Use it so a mid-session
+                        // `composio_authorize` is visible to the
+                        // sub-agent without an app restart: the bulk
+                        // fetch at session start can populate a
+                        // zero-action entry for a toolkit whose OAuth
+                        // hadn't reached ACTIVE yet, and the cached
+                        // empty list otherwise sticks for the lifetime
+                        // of the process. The previous behaviour (just
+                        // returning the cached vec) surfaced as
+                        // "Gmail isn't connected" to the user even when
+                        // the user had just connected Gmail.
+                        match crate::openhuman::composio::fetch_direct_toolkit_actions(direct, tk)
+                            .await
+                        {
+                            Ok(actions) if !actions.is_empty() => {
+                                tracing::info!(
+                                    agent_id = %definition.id,
+                                    toolkit = %tk,
+                                    action_count = actions.len(),
+                                    cached_actions = cached_integration.tools.len(),
+                                    "[composio-direct] subagent_runner:typed: refreshed direct catalogue"
+                                );
+                                actions
+                            }
+                            Ok(_) => {
+                                tracing::info!(
+                                    agent_id = %definition.id,
+                                    toolkit = %tk,
+                                    cached_actions = cached_integration.tools.len(),
+                                    "[composio-direct] subagent_runner:typed: direct refresh returned empty; falling back to cached catalogue"
+                                );
+                                cached_integration.tools.clone()
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent_id = %definition.id,
+                                    toolkit = %tk,
+                                    error = %e,
+                                    "[composio-direct] subagent_runner:typed: direct refresh failed; falling back to cached catalogue"
+                                );
+                                cached_integration.tools.clone()
+                            }
+                        }
                     }
                     None => {
                         tracing::debug!(

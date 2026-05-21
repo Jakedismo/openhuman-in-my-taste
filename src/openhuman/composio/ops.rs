@@ -2204,6 +2204,61 @@ pub async fn fetch_toolkit_actions(
     Ok(actions)
 }
 
+/// Direct-mode counterpart to [`fetch_toolkit_actions`].
+///
+/// Hits Composio v3 `/tools?toolkit_slugs=<toolkit>` against the user's
+/// personal tenant via [`direct_list_tools`] and applies the same curated-
+/// whitelist + user-scope filter the backend path uses, so the sub-agent
+/// sees a consistent action surface across modes.
+///
+/// **Why this exists**: the session-start bulk fetch
+/// (`fetch_connected_integrations_uncached`) can populate the parent's
+/// `connected_integrations` Vec with zero actions for a toolkit even when
+/// the per-toolkit endpoint returns a full catalogue — for example when the
+/// user authorises Gmail mid-session, when the bulk fetch raced an
+/// in-flight OAuth, or when the integrations cache was warmed before the
+/// connection went `ACTIVE`. The `integrations_agent` spawn path
+/// (`subagent_runner::ops`) previously fell back to that cached zero-action
+/// list in direct mode, which left the sub-agent with nothing to call and
+/// surfaced as "Gmail isn't connected" to the user even when Composio
+/// reported the connection as active.
+pub async fn fetch_direct_toolkit_actions(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    toolkit: &str,
+) -> anyhow::Result<Vec<ConnectedIntegrationTool>> {
+    let toolkit_slug = toolkit.trim();
+    if toolkit_slug.is_empty() {
+        anyhow::bail!("fetch_direct_toolkit_actions: toolkit must not be empty");
+    }
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        "[composio-direct] fetch_direct_toolkit_actions"
+    );
+    let scope = vec![toolkit_slug.to_string()];
+    let resp = direct_list_tools(direct, &scope).await.map_err(|e| {
+        anyhow::anyhow!("direct_list_tools failed for toolkit `{toolkit_slug}`: {e:#}")
+    })?;
+    let action_prefix = format!("{}_", toolkit_slug.to_uppercase());
+    let pref = super::providers::load_user_scope_or_default(toolkit_slug).await;
+    let actions: Vec<ConnectedIntegrationTool> = resp
+        .tools
+        .into_iter()
+        .filter(|t| t.function.name.starts_with(&action_prefix))
+        .filter(|t| super::providers::is_action_visible_with_pref(&t.function.name, &pref))
+        .map(|t| ConnectedIntegrationTool {
+            name: t.function.name,
+            description: t.function.description.unwrap_or_default(),
+            parameters: t.function.parameters,
+        })
+        .collect();
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        action_count = actions.len(),
+        "[composio-direct] fetch_direct_toolkit_actions: done"
+    );
+    Ok(actions)
+}
+
 // ── Direct mode (BYO API key) ───────────────────────────────────────
 
 /// Read the current Composio routing mode and whether a direct-mode API

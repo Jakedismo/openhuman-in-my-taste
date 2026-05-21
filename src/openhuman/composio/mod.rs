@@ -60,7 +60,7 @@ pub use bus::{
 pub use client::ComposioClient;
 pub use ops::{
     cached_active_integrations, connected_set_hash, fetch_connected_integrations,
-    fetch_connected_integrations_status, fetch_toolkit_actions,
+    fetch_connected_integrations_status, fetch_direct_toolkit_actions, fetch_toolkit_actions,
     invalidate_connected_integrations_cache, FetchConnectedIntegrationsStatus,
 };
 pub use periodic::{record_sync_success, start_periodic_sync};
