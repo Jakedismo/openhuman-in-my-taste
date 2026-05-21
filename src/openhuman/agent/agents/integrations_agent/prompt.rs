@@ -4,8 +4,14 @@
 //! directly — every other agent delegates to it via `spawn_subagent`.
 //! That means the prompt owns two blocks nobody else renders:
 //!
-//! * `## Available Skills` — the QuickJS skill catalogue it can invoke
-//!   through the runtime.
+//! * `## Available Skills` — the SKILL.md catalogue the agent can invoke
+//!   via the `skill_invoke` tool. Each skill declares an entrypoint
+//!   (`.js` / `.mjs` / `.cjs` for the Node runtime, `.py` for Python) and
+//!   the agent calls `skill_invoke({ skill_id, args })` to run it.
+//!   Replaces the upstream QuickJS catalogue that ran in-process; the
+//!   replacement runs as an out-of-process Node/Python subprocess via
+//!   [`crate::openhuman::runtime_node::execute_script`] /
+//!   [`crate::openhuman::runtime_python::execute_script`].
 //! * `## Connected Integrations` — the list of Composio toolkits the
 //!   user has connected, framed as "you have direct access to the
 //!   action tools in your tool list" rather than "delegate to integrations_agent".
@@ -73,14 +79,30 @@ pub fn build(ctx: &PromptContext<'_>) -> Result<String> {
     Ok(out)
 }
 
-/// Render the `## Available Skills` XML catalogue of QuickJS skills
-/// this agent can invoke through the host runtime. Empty when no skills
-/// are registered.
+/// Render the `## Available Skills` XML catalogue of SKILL.md packages
+/// this agent can invoke via the `skill_invoke` tool. Empty when no
+/// skills are registered.
+///
+/// Each `<skill>` entry includes `<dir_name>` (the slug to pass as
+/// `skill_id`) and an `<entrypoint>` when the skill declares one in its
+/// frontmatter `metadata.entrypoint`. Skills without an entrypoint are
+/// metadata-only — the agent reads their SKILL.md body for instructions
+/// but cannot call them directly.
 fn render_available_skills(skills: &[Skill], workspace_dir: &Path) -> String {
     if skills.is_empty() {
         return String::new();
     }
-    let mut out = String::from("## Available Skills\n\n<available_skills>\n");
+    let mut out = String::from(
+        "## Available Skills\n\n\
+         The skills below are SKILL.md packages the user installed. \
+         Each one with an `<entrypoint>` element can be executed directly by \
+         calling the `skill_invoke` tool: `skill_invoke({ skill_id: \"<dir_name>\", args: {...} })`. \
+         The script reads `{ args, meta }` from stdin and prints \
+         `{ ok: bool, result|error }` to stdout. \
+         Skills without an entrypoint are metadata-only — read their \
+         SKILL.md body for instructions but do not try to `skill_invoke` them.\n\n\
+         <available_skills>\n",
+    );
     for skill in skills {
         let location = skill.location.clone().unwrap_or_else(|| {
             workspace_dir
@@ -88,13 +110,25 @@ fn render_available_skills(skills: &[Skill], workspace_dir: &Path) -> String {
                 .join(&skill.name)
                 .join("SKILL.md")
         });
+        let entrypoint = skill
+            .frontmatter
+            .metadata
+            .get("entrypoint")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let _ = writeln!(
             out,
-            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>",
+            "  <skill>\n    <name>{}</name>\n    <dir_name>{}</dir_name>\n    <description>{}</description>\n    <location>{}</location>",
             xml_escape(&skill.name),
+            xml_escape(&skill.dir_name),
             xml_escape(&skill.description),
             xml_escape(&location.display().to_string()),
         );
+        if let Some(ep) = entrypoint {
+            let _ = writeln!(out, "    <entrypoint>{}</entrypoint>", xml_escape(ep));
+        }
+        out.push_str("  </skill>\n");
     }
     out.push_str("</available_skills>");
     out
@@ -209,5 +243,73 @@ mod tests {
         }];
         let body = build(&ctx_with(&integrations, &[])).unwrap();
         assert!(!body.contains("## Connected Integrations"));
+    }
+
+    fn make_skill(name: &str, dir_name: &str, entrypoint: Option<&str>) -> Skill {
+        let mut fm = crate::openhuman::skills::ops_types::SkillFrontmatter::default();
+        fm.name = name.to_string();
+        fm.description = format!("{name} description");
+        if let Some(ep) = entrypoint {
+            fm.metadata.insert(
+                "entrypoint".to_string(),
+                serde_yaml::Value::String(ep.to_string()),
+            );
+        }
+        Skill {
+            name: name.to_string(),
+            dir_name: dir_name.to_string(),
+            description: format!("{name} description"),
+            frontmatter: fm,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn available_skills_block_mentions_skill_invoke_when_skills_present() {
+        let skills = vec![make_skill(
+            "image-resize",
+            "image-resize",
+            Some("scripts/main.js"),
+        )];
+        let body = build(&ctx_with(&[], &skills)).unwrap();
+        assert!(body.contains("## Available Skills"));
+        assert!(
+            body.contains("skill_invoke"),
+            "agent should be told to invoke skills via skill_invoke; got: {body}"
+        );
+        assert!(body.contains("<dir_name>image-resize</dir_name>"));
+        assert!(body.contains("<entrypoint>scripts/main.js</entrypoint>"));
+    }
+
+    #[test]
+    fn available_skills_block_omits_entrypoint_element_for_metadata_only_skills() {
+        // No metadata.entrypoint → the rendered <skill> block must not
+        // include the closing `</entrypoint>` tag so the agent doesn't
+        // try to skill_invoke a non-callable package. The opening
+        // `<entrypoint>` literal appears once in the header paragraph
+        // (explaining the convention) — that's expected and isn't what
+        // we're checking here.
+        let skills = vec![make_skill("docs-only", "docs-only", None)];
+        let body = build(&ctx_with(&[], &skills)).unwrap();
+        assert!(body.contains("## Available Skills"));
+        assert!(body.contains("<dir_name>docs-only</dir_name>"));
+        assert!(
+            !body.contains("</entrypoint>"),
+            "metadata-only skill should not render an <entrypoint>…</entrypoint> pair"
+        );
+    }
+
+    #[test]
+    fn available_skills_block_xml_escapes_user_data() {
+        let skills = vec![make_skill(
+            "naughty<&\">",
+            "naughty-slug",
+            Some("scripts/<main>.js"),
+        )];
+        let body = build(&ctx_with(&[], &skills)).unwrap();
+        // Raw `<`/`&`/`>` from user data must be escaped so they don't
+        // close the <available_skills> block early.
+        assert!(body.contains("naughty&lt;&amp;&quot;&gt;"));
+        assert!(body.contains("<entrypoint>scripts/&lt;main&gt;.js</entrypoint>"));
     }
 }
