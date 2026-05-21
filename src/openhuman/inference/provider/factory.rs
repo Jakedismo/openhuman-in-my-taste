@@ -45,6 +45,14 @@ pub fn auth_key_for_slug(slug: &str) -> String {
 /// Returns `"openhuman"` when the workload has no explicit override.
 pub fn provider_for_role(role: &str, config: &Config) -> String {
     let opt = match role {
+        // The triage routing path (`agent::triage::routing::build_remote_provider`)
+        // and any general chat dispatch resolve through this role; missing
+        // this arm caused triage to fall through to `primary_cloud` with no
+        // model, which the downstream factory then sent as `model=""` and
+        // the upstream rejected with `model: String should have at least 1
+        // character`. Symmetric with `Config::workload_local_model` which
+        // already mapped `"chat"` to `chat_provider`.
+        "chat" => config.chat_provider.as_deref(),
         "reasoning" => config.reasoning_provider.as_deref(),
         "agentic" => config.agentic_provider.as_deref(),
         "coding" => config.coding_provider.as_deref(),
@@ -62,34 +70,53 @@ pub fn provider_for_role(role: &str, config: &Config) -> String {
     };
     let s = opt.unwrap_or("").trim();
     if s.is_empty() || s == "cloud" {
-        // When no explicit per-workload provider is set, resolve
-        // primary_cloud. If it points to a non-openhuman entry, use
-        // it. If primary_cloud is missing or stale, fall back to the
-        // first non-openhuman entry in `cloud_providers` (typically
-        // the migration-seeded "openai" entry). The OpenHuman backend
-        // sentinel is no longer a valid fallback in this fork — when
-        // nothing matches we return it only so callers see the
-        // factory's typed "no cloud provider configured" error
-        // instead of silently degrading.
-        let primary_slug = config.primary_cloud.as_deref().and_then(|pid| {
+        // When no explicit per-workload provider is set, walk three
+        // fallbacks IN ORDER:
+        //
+        // 1. The global `default_model` field (e.g. `"openai:gpt-5.4"`).
+        //    If it's a complete `<slug>:<model>` string, use it directly
+        //    so the role inherits the user's chosen default model rather
+        //    than emitting `<slug>:` with no model and forcing a per-row
+        //    `default_model` lookup downstream.
+        // 2. The `primary_cloud` entry, with its own `default_model`
+        //    column appended after the colon. This keeps the per-row
+        //    default working when the user has set one but no global
+        //    `default_model`.
+        // 3. The first non-openhuman row in `cloud_providers`, same
+        //    `slug:default_model` composition.
+        //
+        // Whichever resolves first wins. If nothing matches the OpenHuman
+        // backend sentinel surfaces, which `make_openhuman_backend` then
+        // turns into the actionable "no cloud provider configured" error.
+        if let Some(default) = config.default_model.as_deref() {
+            let trimmed = default.trim();
+            // Only honor a full `<slug>:<model>` here — a bare model
+            // string (no colon) lacks the routing information needed
+            // to pick a provider.
+            if trimmed.contains(':') && !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        let primary_entry = config.primary_cloud.as_deref().and_then(|pid| {
             config
                 .cloud_providers
                 .iter()
                 .find(|e| e.id == pid && e.slug != PROVIDER_OPENHUMAN)
-                .map(|e| e.slug.clone())
         });
-        let resolved = primary_slug.or_else(|| {
+        let entry = primary_entry.or_else(|| {
             config
                 .cloud_providers
                 .iter()
                 .find(|e| e.slug != PROVIDER_OPENHUMAN)
-                .map(|e| e.slug.clone())
         });
-        if let Some(slug) = resolved {
-            format!("{slug}:")
-        } else {
-            PROVIDER_OPENHUMAN.to_string()
+        if let Some(entry) = entry {
+            let model = entry.default_model.as_deref().unwrap_or("").trim();
+            // `<slug>:<model>` when the row has a default model;
+            // `<slug>:` (downstream will hard-error with a clear
+            // "no model" pointer) when it doesn't.
+            return format!("{}:{}", entry.slug, model);
         }
+        PROVIDER_OPENHUMAN.to_string()
     } else {
         s.to_string()
     }
@@ -308,12 +335,60 @@ fn make_cloud_provider_by_slug(
         )
     })?;
 
+    // Bail out on the dead OpenhumanJwt path before computing the
+    // effective model — the backend provider doesn't consult the entry's
+    // model field, and surfacing "no model configured" here would mask
+    // the real "backend not available" error the user needs to act on.
+    if matches!(entry.auth_style, AuthStyle::OpenhumanJwt) {
+        log::debug!(
+            "[providers][chat-factory] slug='{}' has auth_style=OpenhumanJwt → routing to openhuman backend",
+            slug
+        );
+        return make_openhuman_backend(config);
+    }
+
     // Resolve effective model: use provided model if non-empty, else fall back
-    // to the entry's legacy default_model (if any), else empty → error.
-    let effective_model = if model.trim().is_empty() {
-        entry.default_model.clone().unwrap_or_default()
-    } else {
+    // to the entry's legacy default_model (if any), else fall back to the
+    // global `default_model` field (when it's a bare model string — without
+    // the `<slug>:` prefix — meant as a universal default).
+    let effective_model = if !model.trim().is_empty() {
         model.to_string()
+    } else if let Some(row_default) = entry
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        row_default.to_string()
+    } else if let Some(global) = config
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .and_then(|m| {
+            // If the global default is `<slug>:<model>` for the SAME slug
+            // we're building, peel off the model half. If the slug differs
+            // (e.g. global is `openai:gpt-5.4` but we're building anthropic),
+            // it's not a valid default for this row — ignore.
+            match m.find(':') {
+                Some(idx) if &m[..idx] == slug => Some(m[idx + 1..].trim().to_string()),
+                Some(_) => None,
+                None => Some(m.to_string()),
+            }
+        })
+    {
+        global
+    } else {
+        anyhow::bail!(
+            "[chat-factory] no model configured for slug '{}' (role '{}'). \
+             Set `<slug>:<model>` on the workload (e.g. `{}_provider = \"{}:<model>\"`), \
+             a `default_model` on the cloud_providers row, or the global `default_model`. \
+             The upstream provider rejects `model = \"\"` with a 400.",
+            slug,
+            role,
+            role,
+            slug,
+        );
     };
 
     log::info!(
@@ -338,13 +413,11 @@ fn make_cloud_provider_by_slug(
             Ok((p, effective_model))
         }
         AuthStyle::OpenhumanJwt => {
-            // Route to the OpenHuman backend — ignore the entry's endpoint
-            // and model; use the backend provider with the configured default.
-            log::debug!(
-                "[providers][chat-factory] slug='{}' has auth_style=OpenhumanJwt → routing to openhuman backend",
-                slug
-            );
-            make_openhuman_backend(config)
+            // Unreachable — the early-return at the top of this function
+            // catches OpenhumanJwt before any model resolution. Kept so
+            // the match stays exhaustive without a catch-all arm that
+            // would hide a future enum variant.
+            unreachable!("OpenhumanJwt handled before model resolution")
         }
         AuthStyle::None => {
             // No-auth providers (LM Studio, Ollama's OpenAI-compat

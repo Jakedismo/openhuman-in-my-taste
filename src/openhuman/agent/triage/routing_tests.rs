@@ -38,18 +38,21 @@ fn build_remote_provider_uses_workload_factory_and_default_model() {
 
 #[test]
 fn build_remote_provider_errors_when_no_cloud_provider_configured() {
-    // Local-OAuth fork: `Config::default()` has no `cloud_providers`
-    // and no `chat_provider`, so the factory falls through to the
-    // dead OpenHuman backend slug — the resolver pre-empts that with
-    // a clear actionable error that matches the rest of the fork's
-    // "Settings → AI" pointers.
+    // Local-OAuth fork: `Config::default()` carries `default_model =
+    // Some("openai:gpt-5.4")` but no `cloud_providers` entry for the
+    // `openai` slug, so the workload factory bails with a
+    // "no cloud provider configured for slug 'openai'" pointer. The
+    // exact wording changed when the factory grew global-default_model
+    // fallback support; pin on the substring set that survived.
     let config = Config::default();
     let err = build_remote_provider(&config)
         .err()
         .expect("expected error when no provider is configured");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("no chat provider configured") || msg.contains("Settings → AI"),
+        msg.contains("no chat provider configured")
+            || msg.contains("no cloud provider configured")
+            || msg.contains("Settings → AI"),
         "unexpected error message: {msg}"
     );
 }
