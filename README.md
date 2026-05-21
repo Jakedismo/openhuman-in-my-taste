@@ -321,6 +321,8 @@ This is a working fork, not a polished product. Known gaps:
 
 ## License + attribution
 
-closedhuman is a fork of [`tinyhumansai/openhuman`](https://github.com/tinyhumansai/openhuman), which is licensed under the terms in [`LICENSE`](LICENSE). The fork inherits that license. All credit for the original architecture, design language, and the parts of the codebase still standing goes to the OpenHuman team. The criticism above is criticism of specific implementation choices, not of the project or its authors — building a hosted-tier business model and an open-source product on the same codebase is a genuine tension, and the fork resolves it by simply dropping the hosted side.
+closedhuman is licensed under the **GNU General Public License v3.0** (GPLv3) — same as the upstream `tinyhumansai/openhuman` project it forks. The full license text is in [`LICENSE`](LICENSE). In short: you can run, study, share, and modify the code, but any redistributed version (including modifications) must also be GPLv3 and ship the source. There is no closed-source re-license path: the "closed" in *closedhuman* refers to closing the loop on the OpenHuman product backend, not to closing the source.
+
+All credit for the original architecture, design language, and the parts of the codebase still standing goes to the OpenHuman team. The criticism above is criticism of specific implementation choices, not of the project or its authors — building a hosted-tier business model and an open-source product on the same codebase is a genuine tension, and the fork resolves it by simply dropping the hosted side.
 
 The fork is maintained by [Jokke Ruokolainen](https://github.com/jruokola). PRs welcome against the fork's own `main` branch.

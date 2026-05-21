@@ -7,6 +7,9 @@ local Ollama / LM Studio / mlx-audio). See `docs/RUN_IT_TODAY.md` for the
 build runbook and `kokoro-tts-provider-installation.md` for the Kokoro
 TTS reminder.
 
+closedhuman is released under the **GNU General Public License v3.0**
+([`LICENSE`](LICENSE)) — same as upstream `tinyhumansai/openhuman`.
+
 Dates are in DD.MM.YYYY.
 
 ## 19.5.2026 — Forked from OpenHuman
@@ -187,3 +190,82 @@ and Composio direct-mode took over from the deleted backend proxy.
   API key under Settings → AI, but the misleading `SESSION_EXPIRED`
   error path is closed. Migration that minted new `OpenhumanJwt` entries
   is gone.
+
+### Added (later in the day — skill execution + namespace-graph LLM)
+
+- **Skill / script execution restored.** Upstream PR #1061 ripped out the
+  QuickJS in-process runtime; the closedhuman replacement runs each skill
+  as an out-of-process subprocess managed by the existing `runtime_node`
+  and `runtime_python` bootstrappers, with a clean stdin/stdout JSON wire
+  contract.
+  - `runtime_node::execute_script` — primitive: takes a resolved Node
+    binary, a script path, a stdin payload, and `ExecuteOptions { cwd,
+    env, timeout }`. Returns `ExecuteOutcome { stdout, stderr, exit_code,
+    elapsed_ms, timed_out }`. 8 tests (4 require system Node; skip with
+    log when absent).
+  - `runtime_python::execute_script` — mirror primitive for `.py`
+    entrypoints. Spawns `python -u` and applies `ExecuteOptions.memory_limit_bytes`
+    via `setrlimit(RLIMIT_AS)` in `pre_exec` on Unix; the kernel kills the
+    child with exit 137 on overrun. Windows JobObject path deferred.
+    6 tests.
+  - **`SkillInvokeTool`** — agent-facing wrapper registered as the
+    `skill_invoke` tool. Resolves the SKILL.md's `metadata.entrypoint`,
+    rejects absolute paths / wrong extensions / `../` traversal (via
+    `canonicalize` prefix check), dispatches `.js` / `.mjs` / `.cjs` to
+    Node and `.py` to Python, sends stdin
+    `{args, meta: {skill_id, skill_dir, host, tool, runtime}}` to the
+    child, expects stdout JSON `{ok: bool, result|error}`. 15 tests.
+  - Tool registration gated on `node_bootstrap.is_some()`; the Python
+    bootstrap is attached when `root_config.runtime_python.enabled`.
+  - `integrations_agent` prompt's `## Available Skills` block now teaches
+    the agent about `skill_invoke({skill_id, args})` and renders
+    `<dir_name>` + `<entrypoint>` per skill so it knows which ones are
+    callable. Metadata-only skills get no `<entrypoint>` tag,
+    signalling "read the SKILL.md, don't invoke."
+- **LLM-driven namespace-graph entity extraction.**
+  `UnifiedMemory::upsert_document` used to pin entity / relation
+  extraction to a hard-coded heuristic regex path
+  (`DEFAULT_MEMORY_EXTRACTION_MODEL = "heuristic-only"`). On arbitrary
+  vault HTML / prose / source code the namespace graph stayed sparse.
+  The new path runs the user's configured `memory_provider` workload
+  alongside the heuristic so the same `(subject, predicate, object)`
+  graph `graph_query_namespace` reads gets populated by the model too.
+  - New `memory/ingestion/llm_extract.rs` — `LlmGraphExtractor` trait,
+    `ChatBackedLlmGraphExtractor` impl, JSON envelope parser tolerant of
+    markdown fences, alias field names, and out-of-range confidences.
+  - `parse_document` runs the heuristic loop first (structural metadata:
+    preferences, decisions, doc_kind, tags), then merges LLM-extracted
+    triples into the same `ExtractionAccumulator` so alias resolution,
+    predicate-rule validation, and dedup all apply uniformly. Soft-falls
+    back to heuristic-only on any LLM failure with a `[memory:ingestion]`
+    warn — ingest stays write-through.
+  - `IngestionJob` carries an `Option<Arc<dyn LlmGraphExtractor>>` so the
+    background worker (`memory::ingestion::queue`) runs the LLM call on
+    its own task rather than blocking `put_doc` / vault sync / archivist.
+  - `MemoryClient::from_workspace_dir` reads `config.toml`, builds the
+    chat provider for the `memory` workload via the existing
+    `build_chat_provider_for_role`, wraps it in
+    `ChatBackedLlmGraphExtractor`, and threads it into every
+    `IngestionJob` it submits.
+  - New `[memory] graph_extraction = "heuristic" | "llm" | "auto"`
+    config knob (default `auto` → LLM when wired, heuristic otherwise).
+    Same field on `MemoryIngestionConfig` for per-request override.
+  - `MemoryIngestionResult` grows `extraction_backend` (one of
+    `heuristic`, `llm`, `llm+heuristic`, `heuristic (llm fallback)`)
+    and updates `model_name` to the actual resolved identifier (e.g.
+    `openai:gpt-5.4-mini` instead of the cosmetic `heuristic-only`).
+    Namespace graph row attrs gain `extraction_backend` +
+    `graph_extraction` so downstream queries can filter LLM-extracted
+    vs heuristic-extracted triples.
+  - 12 new tests: 7 in the extractor module (envelope shapes, alias
+    field names, markdown-fence stripping, empty-entry drop) + 5
+    integration tests (heuristic-only when unwired, LLM merge with
+    graph_query_namespace round-trip, LLM-error → heuristic fallback,
+    Heuristic mode skips a wired extractor, Auto mode degrades silently).
+
+### Changed (later in the day)
+
+- **Agent prompts.** `orchestrator` and `crypto_agent` prompts swap the
+  dead "Settings → Connections" pointer for the live
+  `<openhuman-link path="accounts/setup">connect your apps</openhuman-link>`
+  pill so chat suggestions actually deeplink into the working UI.
