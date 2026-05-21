@@ -137,6 +137,18 @@ and Composio direct-mode took over from the deleted backend proxy.
 
 ## 21.5.2026 — Direct-mode polish + Kokoro
 
+### Changed
+
+- **Closedhuman mascot — Ghosty 2.0.** Replaces the upstream yellow-blob
+  mascot on the Human page and in the floating mascot window with a
+  distinct ghost character: single luminous translucent body, six wispy
+  scallops along the bottom, outer cyan glow, no separate head-dot /
+  arms / humanoid legs / blush. Reuses the existing `MascotFace` API +
+  viseme system so lipsync, blink, and the agent/voice lifecycle
+  wiring carry over unchanged. The Meet virtual-camera pipeline
+  (`MascotFrameProducer`) still uses the upstream YellowMascot for now —
+  follow-up migration tracked separately.
+
 ### Fixed
 
 - **Kokoro provider rejects foreign per-call voice IDs.** The mascot's
