@@ -84,3 +84,118 @@ export async function openhumanComposioClearApiKey(): Promise<
     method: 'openhuman.composio_clear_api_key',
   });
 }
+
+// ── Local webhook receiver (direct-mode trigger delivery) ───────────
+//
+// These back the Settings → Triggers panel. The frontend never sees
+// the ngrok authtoken or the Composio webhook signing secret — both
+// are stored encrypted in AuthService and surfaced only via the
+// `has_authtoken` boolean on status.
+
+export type ComposioTunnelState = 'idle' | 'connecting' | 'ready' | 'error' | string;
+
+export interface ComposioLocalWebhookStatus {
+  tunnel_state: ComposioTunnelState;
+  public_url: string | null;
+  error: string | null;
+  subscription_id: string;
+  local_port: number;
+  ngrok_domain: string;
+  has_authtoken: boolean;
+}
+
+/// Snapshot of the local webhook receiver: tunnel state, configured
+/// ngrok domain, persisted subscription ID, and whether an authtoken
+/// has been stored. Token itself is never returned.
+export async function openhumanComposioLocalWebhookStatus(): Promise<
+  CommandResponse<{ status: ComposioLocalWebhookStatus }>
+> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ status: ComposioLocalWebhookStatus }>>({
+    method: 'openhuman.composio_local_webhook_status',
+  });
+}
+
+/// Explicit (re)start of the receiver + tunnel. Idempotent.
+export async function openhumanComposioLocalWebhookStart(): Promise<
+  CommandResponse<{ status: ComposioLocalWebhookStatus }>
+> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ status: ComposioLocalWebhookStatus }>>({
+    method: 'openhuman.composio_local_webhook_start',
+  });
+}
+
+/// Stop the tunnel + abort the local listener.
+export async function openhumanComposioLocalWebhookStop(): Promise<
+  CommandResponse<{ status: ComposioLocalWebhookStatus }>
+> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ status: ComposioLocalWebhookStatus }>>({
+    method: 'openhuman.composio_local_webhook_stop',
+  });
+}
+
+/// Round-trip self-test — hit /healthz on the public ngrok URL.
+/// Independent of Composio. Used by the "Test tunnel" button.
+export async function openhumanComposioLocalWebhookTest(): Promise<
+  CommandResponse<{ result: { ok: boolean; url: string; body: string } }>
+> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<
+    CommandResponse<{ result: { ok: boolean; url: string; body: string } }>
+  >({
+    method: 'openhuman.composio_local_webhook_test',
+  });
+}
+
+/// Persist the ngrok authtoken into the encrypted credential store.
+/// Token is never echoed back through any RPC.
+export async function openhumanComposioSetNgrokAuthtoken(
+  authtoken: string
+): Promise<CommandResponse<{ stored: boolean }>> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ stored: boolean }>>({
+    method: 'openhuman.composio_set_ngrok_authtoken',
+    params: { authtoken },
+  });
+}
+
+/// Remove the stored ngrok authtoken.
+export async function openhumanComposioClearNgrokAuthtoken(): Promise<
+  CommandResponse<{ removed: boolean }>
+> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ removed: boolean }>>({
+    method: 'openhuman.composio_clear_ngrok_authtoken',
+  });
+}
+
+/// Patch the non-secret webhook config fields (enabled toggle, port,
+/// ngrok domain) and persist to config.toml. None of the fields are
+/// required — only the ones present in the call are changed.
+export async function openhumanComposioSetWebhookConfig(patch: {
+  enabled?: boolean;
+  port?: number;
+  ngrok_domain?: string;
+}): Promise<CommandResponse<{ status: ComposioLocalWebhookStatus }>> {
+  if (!isTauri()) {
+    throw new Error('Not running in Tauri');
+  }
+  return await callCoreRpc<CommandResponse<{ status: ComposioLocalWebhookStatus }>>({
+    method: 'openhuman.composio_set_webhook_config',
+    params: patch,
+  });
+}

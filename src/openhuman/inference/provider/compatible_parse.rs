@@ -8,7 +8,8 @@ use crate::openhuman::inference::provider::traits::{
 };
 
 use super::compatible_types::{
-    ApiChatResponse, ResponsesInput, ResponsesResponse, StreamChunkResponse,
+    ApiChatResponse, Choice, ResponseMessage, ResponsesInput, ResponsesResponse,
+    StreamChunkResponse,
 };
 
 // ── Think-tag stripping ───────────────────────────────────────────────────────
@@ -92,12 +93,59 @@ pub(crate) fn parse_chat_response_body(
     provider_name: &str,
     body: &str,
 ) -> anyhow::Result<ApiChatResponse> {
-    serde_json::from_str::<ApiChatResponse>(body).map_err(|error| {
-        let snippet = compact_sanitized_body_snippet(body);
-        anyhow::anyhow!(
-            "{provider_name} API returned an unexpected chat-completions payload: {error}; body={snippet}"
-        )
-    })
+    match serde_json::from_str::<ApiChatResponse>(body) {
+        Ok(parsed) => Ok(parsed),
+        Err(chat_err) => {
+            // Salvage path: some OpenAI-compatible servers (notably LM Studio
+            // with reasoning models, and any provider that routes a
+            // `/v1/chat/completions` call internally through the
+            // Responses-API handler) return a `{output: [...]}` envelope
+            // even on the chat-completions endpoint. The chat-completions
+            // strict deserializer rejects it with `missing field
+            // 'choices'`. Try the Responses-API shape and synthesize a
+            // one-choice ApiChatResponse from its `output_text` /
+            // `output[].content[].text` chain so the rest of the pipeline
+            // doesn't have to know about the dual-shape.
+            if let Ok(responses) = serde_json::from_str::<ResponsesResponse>(body) {
+                if let Some(text) = extract_responses_text(responses) {
+                    log::warn!(
+                        "[provider:{provider_name}] chat-completions endpoint returned a \
+                         Responses-API-shaped body (`output[...]` instead of `choices[...]`). \
+                         Salvaged the text from `output_text` / `output[].content[].text`. \
+                         If this happens often, configure the provider to speak chat \
+                         completions or pin a non-reasoning model.",
+                    );
+                    return Ok(ApiChatResponse {
+                        choices: vec![Choice {
+                            message: ResponseMessage {
+                                content: Some(text),
+                                reasoning_content: None,
+                                tool_calls: None,
+                                function_call: None,
+                            },
+                        }],
+                        usage: None,
+                        openhuman: None,
+                    });
+                }
+            }
+            let snippet = compact_sanitized_body_snippet(body);
+            // Detect the "missing field `choices`" case and add an
+            // actionable hint about LM Studio / reasoning models.
+            let chat_err_display = chat_err.to_string();
+            let hint = if chat_err_display.contains("missing field `choices`") {
+                " — body lacked the `choices` field; if this is LM Studio, \
+                 check that the loaded model supports the chat-completions \
+                 endpoint (some reasoning models only serve `/v1/responses`)"
+            } else {
+                ""
+            };
+            Err(anyhow::anyhow!(
+                "{provider_name} API returned an unexpected chat-completions payload: \
+                 {chat_err}{hint}; body={snippet}",
+            ))
+        }
+    }
 }
 
 pub(crate) fn parse_responses_response_body(

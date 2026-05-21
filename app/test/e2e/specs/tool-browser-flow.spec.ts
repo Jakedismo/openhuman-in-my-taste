@@ -64,8 +64,7 @@ interface ListDefinitionsResult {
 }
 
 describe('System tools — Browser (open URL + automation registry)', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     await startMockServer();
     await waitForApp();
     await resetApp(USER_ID);
@@ -83,10 +82,7 @@ describe('System tools — Browser (open URL + automation registry)', () => {
     const status = await callOpenhumanRpc<ServerStatus>('openhuman.agent_server_status', {});
     stepLog('agent_server_status response', status);
     expect(status.ok).toBe(true);
-    // agent_server_status uses RpcOutcome::single_log so the JSON-RPC result
-    // is { result: { running, url }, logs: [...] } — unwrap one level.
-    const statusPayload = (status.result as any)?.result ?? status.result;
-    expect(statusPayload?.running).toBe(true);
+    expect(status.result?.running).toBe(true);
 
     const list = await callOpenhumanRpc<ListDefinitionsResult>(
       'openhuman.agent_list_definitions',

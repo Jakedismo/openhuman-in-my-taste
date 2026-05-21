@@ -131,7 +131,7 @@ const CronJobsPanel = () => {
   };
 
   return (
-    <div data-testid="cron-jobs-panel">
+    <div>
       <SettingsHeader
         title={t('cron.title')}
         showBackButton={true}
@@ -166,7 +166,6 @@ const CronJobsPanel = () => {
         <div>
           <button
             type="button"
-            data-testid="cron-refresh"
             className="btn btn-outline btn-sm"
             onClick={() => void loadCoreCronJobsOnly()}>
             {t('cron.refreshCronJobs')}

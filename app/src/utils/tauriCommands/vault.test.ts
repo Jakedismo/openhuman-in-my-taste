@@ -24,6 +24,7 @@ describe('tauriCommands/vault', () => {
   let openhumanVaultRemove: typeof import('./vault').openhumanVaultRemove;
   let openhumanVaultSync: typeof import('./vault').openhumanVaultSync;
   let openhumanVaultSyncStatus: typeof import('./vault').openhumanVaultSyncStatus;
+  let openhumanVaultSyncAll: typeof import('./vault').openhumanVaultSyncAll;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -36,6 +37,7 @@ describe('tauriCommands/vault', () => {
     openhumanVaultRemove = actual.openhumanVaultRemove;
     openhumanVaultSync = actual.openhumanVaultSync;
     openhumanVaultSyncStatus = actual.openhumanVaultSyncStatus;
+    openhumanVaultSyncAll = actual.openhumanVaultSyncAll;
   });
 
   afterEach(() => {
@@ -164,9 +166,16 @@ describe('tauriCommands/vault', () => {
       await expect(openhumanVaultSync('v-1')).rejects.toThrow('Not running in Tauri');
     });
 
-    test('dispatches openhuman.vault_sync with vault_id and returns started status', async () => {
+    // Local-OAuth fork: `vault_sync` is now async — returns a job
+    // handle, not the final report. Final report is fetched via
+    // `vault_sync_status` once `status='completed'`.
+    test('dispatches openhuman.vault_sync with vault_id and returns a job handle', async () => {
       mockCallCoreRpc.mockResolvedValue({
-        result: { status: 'started', vault_id: 'v-1' },
+        result: {
+          job_id: 'vsj_abc123',
+          vault_id: 'v-1',
+          status: 'queued',
+        },
         logs: [],
       });
       const resp = await openhumanVaultSync('v-1');
@@ -174,44 +183,72 @@ describe('tauriCommands/vault', () => {
         method: 'openhuman.vault_sync',
         params: { vault_id: 'v-1' },
       });
-      expect(resp.result.status).toBe('started');
-      expect(resp.result.vault_id).toBe('v-1');
+      expect(resp.result.job_id).toBe('vsj_abc123');
+      expect(resp.result.status).toBe('queued');
     });
   });
 
   describe('openhumanVaultSyncStatus', () => {
     test('throws when not running in Tauri', async () => {
       mockIsTauri.mockReturnValue(false);
-      await expect(openhumanVaultSyncStatus('v-1')).rejects.toThrow('Not running in Tauri');
-      expect(mockCallCoreRpc).not.toHaveBeenCalled();
+      await expect(openhumanVaultSyncStatus('vsj_abc123')).rejects.toThrow(
+        'Not running in Tauri'
+      );
     });
 
-    test('dispatches openhuman.vault_sync_status with vault_id', async () => {
+    test('dispatches openhuman.vault_sync_status and returns the live snapshot', async () => {
       mockCallCoreRpc.mockResolvedValue({
         result: {
+          job_id: 'vsj_abc123',
           vault_id: 'v-1',
-          status: 'completed',
-          scanned: 4,
-          ingested: 4,
-          unchanged: 0,
-          removed: 0,
-          failed: 0,
-          skipped_unsupported: 0,
-          total: 4,
-          started_at_ms: 1000,
-          finished_at_ms: 2000,
-          duration_ms: 1000,
+          status: 'running',
+          processed: 4,
+          total: null,
+          current_file: 'docs/notes.md',
           errors: [],
+          report: null,
+          queued_at: '2026-05-20T12:00:00Z',
+          started_at: '2026-05-20T12:00:01Z',
+          completed_at: null,
         },
         logs: [],
       });
-      const resp = await openhumanVaultSyncStatus('v-1');
+      const resp = await openhumanVaultSyncStatus('vsj_abc123');
       expect(mockCallCoreRpc).toHaveBeenCalledWith({
         method: 'openhuman.vault_sync_status',
-        params: { vault_id: 'v-1' },
+        params: { job_id: 'vsj_abc123' },
       });
-      expect(resp.result.status).toBe('completed');
-      expect(resp.result.vault_id).toBe('v-1');
+      expect(resp.result?.status).toBe('running');
+      expect(resp.result?.processed).toBe(4);
+      expect(resp.result?.current_file).toBe('docs/notes.md');
+    });
+
+    test('returns null when the job id is unknown', async () => {
+      mockCallCoreRpc.mockResolvedValue({ result: null, logs: [] });
+      const resp = await openhumanVaultSyncStatus('vsj_unknown');
+      expect(resp.result).toBeNull();
+    });
+  });
+
+  describe('openhumanVaultSyncAll', () => {
+    test('throws when not running in Tauri', async () => {
+      mockIsTauri.mockReturnValue(false);
+      await expect(openhumanVaultSyncAll()).rejects.toThrow('Not running in Tauri');
+    });
+
+    test('dispatches openhuman.vault_sync_all and returns one handle per vault', async () => {
+      mockCallCoreRpc.mockResolvedValue({
+        result: [
+          { job_id: 'vsj_a', vault_id: 'v-1', status: 'queued' },
+          { job_id: 'vsj_b', vault_id: 'v-2', status: 'running' },
+        ],
+        logs: [],
+      });
+      const resp = await openhumanVaultSyncAll();
+      expect(mockCallCoreRpc).toHaveBeenCalledWith({ method: 'openhuman.vault_sync_all' });
+      expect(resp.result).toHaveLength(2);
+      expect(resp.result[0].vault_id).toBe('v-1');
+      expect(resp.result[1].status).toBe('running');
     });
   });
 });

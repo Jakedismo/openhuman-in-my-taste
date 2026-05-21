@@ -20,8 +20,11 @@ export const selectConnectivityErrors = (s: RootState) => s.connectivity.lastErr
 export const selectBlockingState = (s: RootState): BlockingState => {
   if (s.connectivity.internet === 'offline') return 'internet-offline';
   if (s.connectivity.core === 'unreachable') return 'core-unreachable';
-  if (s.connectivity.backend === 'disconnected' || s.connectivity.backend === 'connecting') {
-    return 'backend-only';
-  }
+  // `backend-only` (Socket.IO link to the hosted OpenHuman backend
+  // disconnected) is intentionally never returned in the local-OAuth
+  // fork — the backend was removed, so the channel is permanently
+  // "disconnected" and the soft banner would never lift. The
+  // connectivity slice still tracks the field for transport-layer
+  // diagnostics but it no longer gates the Home / chat UI.
   return 'ok';
 };

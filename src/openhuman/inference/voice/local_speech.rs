@@ -242,7 +242,11 @@ async fn read_and_clean_wav(path: &std::path::Path) -> Result<Vec<u8>, String> {
 /// least one frame to render the mouth; without it the rig snaps closed
 /// for the entire utterance. A real forced-aligner pass would replace
 /// this — see the module-level note.
-fn synthetic_viseme_timeline(text: &str) -> Vec<VisemeFrame> {
+///
+/// Visible to sibling TTS modules (e.g. [`super::system_speech`]) so they
+/// can produce a consistent viseme contract regardless of the underlying
+/// engine.
+pub(super) fn synthetic_viseme_timeline(text: &str) -> Vec<VisemeFrame> {
     let chars = text.chars().filter(|c| !c.is_whitespace()).count().max(1);
     // ~80 ms per non-whitespace char is a reasonable average for English
     // speech at conversational tempo. The mascot smooths between frames

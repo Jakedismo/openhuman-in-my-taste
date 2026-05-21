@@ -44,8 +44,7 @@ async function rootTextLength(): Promise<number> {
 }
 
 describe('Navigation', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     await waitForApp();
     await resetApp(USER_ID);
   });

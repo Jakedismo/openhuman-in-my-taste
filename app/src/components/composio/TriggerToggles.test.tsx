@@ -131,7 +131,12 @@ describe('<TriggerToggles>', () => {
     expect(sw).toHaveAttribute('aria-checked', 'false');
   });
 
-  it('disables and shows a hint for static triggers that require config', async () => {
+  it('opens an inline config form for static triggers that require config', async () => {
+    // The old behavior was to disable the toggle entirely and show a
+    // "Needs configuration" hint, which left direct-mode users with
+    // no way to enable triggers like GITHUB_COMMIT_EVENT (owner + repo
+    // required). The new behavior keeps the toggle clickable; clicking
+    // expands an inline form with one text input per required key.
     mockListAvailable.mockResolvedValue({
       triggers: [{ slug: 'SLACK_NEW_MESSAGE', scope: 'static', requiredConfigKeys: ['channel'] }],
     });
@@ -140,8 +145,91 @@ describe('<TriggerToggles>', () => {
     render(<TriggerToggles toolkitSlug="slack" toolkitName="Slack" connectionId="c1" />);
 
     const sw = await screen.findByLabelText(/Enable Slack New Message/);
-    expect(sw).toBeDisabled();
-    expect(screen.getByText('Needs configuration')).toBeInTheDocument();
+    expect(sw).not.toBeDisabled();
+    expect(screen.getByText(/Requires:\s*channel/)).toBeInTheDocument();
+    // No config form is open until the user clicks the toggle.
+    expect(screen.queryByTestId(/^trigger-config-form-/)).not.toBeInTheDocument();
+    expect(mockEnable).not.toHaveBeenCalled();
+  });
+
+  it('submits the inline config form with the typed values and flips the toggle on', async () => {
+    mockListAvailable.mockResolvedValue({
+      triggers: [
+        {
+          slug: 'GITHUB_COMMIT_EVENT',
+          scope: 'static',
+          requiredConfigKeys: ['owner', 'repo'],
+        },
+      ],
+    });
+    mockListTriggers.mockResolvedValue({ triggers: [] });
+    mockEnable.mockResolvedValue({
+      triggerId: 'ti_commit_evt',
+      slug: 'GITHUB_COMMIT_EVENT',
+      connectionId: 'c1',
+    });
+
+    render(<TriggerToggles toolkitSlug="github" toolkitName="GitHub" connectionId="c1" />);
+
+    const sw = await screen.findByLabelText(/Enable GITHUB COMMIT EVENT/i);
+    // Clicking the toggle opens the inline form rather than calling
+    // enableTrigger immediately.
+    fireEvent.click(sw);
+    const form = await screen.findByTestId('trigger-config-form-GITHUB_COMMIT_EVENT');
+    expect(form).toBeInTheDocument();
+    expect(mockEnable).not.toHaveBeenCalled();
+
+    // Type values into the two required fields…
+    const ownerInput = screen.getByLabelText('owner') as HTMLInputElement;
+    const repoInput = screen.getByLabelText('repo') as HTMLInputElement;
+    fireEvent.change(ownerInput, { target: { value: 'jruokola' } });
+    fireEvent.change(repoInput, { target: { value: 'closedhuman' } });
+
+    // …and submit. enableTrigger gets the trimmed values; the toggle
+    // flips to aria-checked=true once the promise resolves.
+    fireEvent.click(screen.getByRole('button', { name: /Enable$/ }));
+    await waitFor(() => {
+      expect(mockEnable).toHaveBeenCalledWith('c1', 'GITHUB_COMMIT_EVENT', {
+        owner: 'jruokola',
+        repo: 'closedhuman',
+      });
+    });
+    await waitFor(() => {
+      expect(sw).toHaveAttribute('aria-checked', 'true');
+    });
+    // Form closes after successful submission.
+    expect(
+      screen.queryByTestId('trigger-config-form-GITHUB_COMMIT_EVENT')
+    ).not.toBeInTheDocument();
+  });
+
+  it('rejects an empty required field with an inline error', async () => {
+    mockListAvailable.mockResolvedValue({
+      triggers: [
+        {
+          slug: 'GITHUB_COMMIT_EVENT',
+          scope: 'static',
+          requiredConfigKeys: ['owner', 'repo'],
+        },
+      ],
+    });
+    mockListTriggers.mockResolvedValue({ triggers: [] });
+
+    render(<TriggerToggles toolkitSlug="github" toolkitName="GitHub" connectionId="c1" />);
+
+    const sw = await screen.findByLabelText(/Enable GITHUB COMMIT EVENT/i);
+    fireEvent.click(sw);
+    await screen.findByTestId('trigger-config-form-GITHUB_COMMIT_EVENT');
+
+    // Only fill owner, leave repo blank.
+    fireEvent.change(screen.getByLabelText('owner'), { target: { value: 'jruokola' } });
+    fireEvent.click(screen.getByRole('button', { name: /Enable$/ }));
+
+    // No upstream call, error surfaced inline naming the missing field.
+    expect(mockEnable).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByText(/Fill in:\s*repo/)).toBeInTheDocument();
+    });
   });
 
   it('enables a trigger via enableTrigger and flips the toggle on', async () => {

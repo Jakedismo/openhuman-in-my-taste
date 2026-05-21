@@ -41,9 +41,19 @@ pub struct VoiceStatus {
     /// the settings panel can render the picker without an extra RPC.
     #[serde(default)]
     pub stt_provider: String,
-    /// Currently selected TTS provider ("cloud" or "piper").
+    /// Currently selected TTS provider ("cloud", "piper", "kokoro", "system").
     #[serde(default)]
     pub tts_provider: String,
+    /// Configured Kokoro endpoint base URL (echoed so Settings → Voice can
+    /// render its inputs without an extra RPC).
+    #[serde(default)]
+    pub kokoro_endpoint_url: String,
+    /// Configured Kokoro model name.
+    #[serde(default)]
+    pub kokoro_model: String,
+    /// Configured Kokoro default voice id.
+    #[serde(default)]
+    pub kokoro_voice: String,
 }
 
 impl From<LocalAiSpeechResult> for VoiceSpeechResult {
@@ -108,6 +118,9 @@ mod tests {
             llm_cleanup_enabled: true,
             stt_provider: "whisper".into(),
             tts_provider: "cloud".into(),
+            kokoro_endpoint_url: "http://localhost:8880".into(),
+            kokoro_model: "mlx-community/Kokoro-82M-bf16".into(),
+            kokoro_voice: "af_bella".into(),
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["stt_available"], true);

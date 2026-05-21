@@ -10,7 +10,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/lib.sh"
 
 issue="${1:-}"
-auto_assign="${DEEP_WORK_AUTO_ASSIGN:-${WORK_AUTO_ASSIGN:-1}}"
 
 # If no issue provided, try to detect from current directory
 if [ -z "$issue" ]; then
@@ -209,11 +208,6 @@ ${body}
               --base main \
               --repo "$repo")
 
-            pr_number="${pr_url##*/}"
-            if [ "$auto_assign" = "1" ]; then
-              gh_assign_self_pr "$pr_number" "$repo"
-            fi
-
             echo "[deep-work] 📝 PR created: $pr_url"
           else
             echo "[deep-work] ✅ PR already exists"
@@ -294,8 +288,4 @@ fi
 
 echo ""
 echo "[deep-work] 🎯 Continue session complete!"
-if worktree_exists "$issue"; then
-  echo "[deep-work] Use 'pnpm deep-work continue $issue' to resume anytime."
-else
-  echo "[deep-work] Worktree was cleaned up. Use 'pnpm deep-work start $issue' to begin again."
-fi
+echo "[deep-work] Use 'pnpm deep-work continue $issue' to resume anytime."

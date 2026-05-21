@@ -36,44 +36,12 @@ describe('DefaultRedirect', () => {
     expect(screen.queryByText('Home')).not.toBeInTheDocument();
   });
 
-  it('redirects to / when no session token', () => {
+  it('redirects to /onboarding when onboarding has not been completed', () => {
+    // In the local-OAuth fork there is no user-account auth gate;
+    // onboarding state alone decides between /onboarding and /home.
     mockUseCoreState.mockReturnValue({
       isBootstrapping: false,
-      snapshot: { sessionToken: null, currentUser: null, onboardingCompleted: false },
-    });
-
-    renderRedirect();
-
-    expect(screen.getByText('Welcome')).toBeInTheDocument();
-  });
-
-  it('shows loading when session token arrived but currentUser is not yet set (post-login race)', () => {
-    // This is the race: token set by core-state:session-token-updated but
-    // refresh() hasn't resolved yet — currentUser is still null from
-    // toSignedOutSnapshot(), onboardingCompleted is still false.
-    mockUseCoreState.mockReturnValue({
-      isBootstrapping: false,
-      snapshot: { sessionToken: 'token-abc', currentUser: null, onboardingCompleted: false },
-    });
-
-    renderRedirect();
-
-    // Must NOT navigate to /onboarding — that would be the stale-snapshot bug
-    expect(screen.queryByText('Onboarding')).not.toBeInTheDocument();
-    expect(screen.queryByText('Home')).not.toBeInTheDocument();
-    expect(screen.queryByText('Welcome')).not.toBeInTheDocument();
-    // Positively assert the loading screen rendered (not just "nothing visible")
-    expect(screen.getByText('Initializing OpenHuman...')).toBeInTheDocument();
-  });
-
-  it('redirects to /onboarding for a genuinely new user (currentUser set, onboarding false)', () => {
-    mockUseCoreState.mockReturnValue({
-      isBootstrapping: false,
-      snapshot: {
-        sessionToken: 'token-abc',
-        currentUser: { _id: 'user-1', email: 'new@test.com' },
-        onboardingCompleted: false,
-      },
+      snapshot: { onboardingCompleted: false },
     });
 
     renderRedirect();
@@ -81,14 +49,10 @@ describe('DefaultRedirect', () => {
     expect(screen.getByText('Onboarding')).toBeInTheDocument();
   });
 
-  it('redirects to /home for a returning user who already completed onboarding', () => {
+  it('redirects to /home when onboarding has been completed', () => {
     mockUseCoreState.mockReturnValue({
       isBootstrapping: false,
-      snapshot: {
-        sessionToken: 'token-abc',
-        currentUser: { _id: 'user-1', email: 'returning@test.com' },
-        onboardingCompleted: true,
-      },
+      snapshot: { onboardingCompleted: true },
     });
 
     renderRedirect();

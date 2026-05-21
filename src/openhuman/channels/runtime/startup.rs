@@ -58,6 +58,21 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // is intentionally cheap and the loop body no-ops when there are
     // no connections.
     crate::openhuman::composio::start_periodic_sync();
+    // Bring up the Composio direct-mode webhook receiver if the user
+    // has opted in (ngrok authtoken stored + static domain set +
+    // local_receiver_enabled = true). The init call is gated
+    // internally and is a no-op when any prerequisite is missing —
+    // safe to call unconditionally here. Errors are logged and
+    // swallowed so the app continues to run if ngrok is unreachable.
+    {
+        let cfg_arc = std::sync::Arc::new(config.clone());
+        if let Err(e) = crate::openhuman::composio::webhook_receiver::init(&cfg_arc).await {
+            tracing::warn!(
+                error = %e,
+                "[composio-webhook] init at startup failed (non-fatal); trigger writes will surface a clearer error"
+            );
+        }
+    }
     // Native request handlers. Re-registering is safe (latest wins) so
     // this is idempotent even if `bootstrap_core_runtime` also runs.
     // Must happen before `run_message_dispatch_loop` begins, because
@@ -180,20 +195,21 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.autonomy,
         &config.workspace_dir,
     ));
-    // Phase 1 of #1401: audit logger is wired with defaults so emission paths
-    // are exercised at runtime. A follow-up promotes `SecurityConfig` (and
-    // therefore the `audit` knob) onto the runtime `Config` schema so users
-    // can override `enabled`, `log_path`, and `max_size_mb` via TOML. The
-    // logger is workspace-scoped and shared, so concurrent sessions append to
-    // one `audit.log` without racing on rotation.
-    let audit = crate::openhuman::security::get_or_create_workspace_audit_logger(
-        crate::openhuman::config::AuditConfig::default(),
-        config.workspace_dir.clone(),
-    )?;
-    let model = config
+    // `model` is the literal string that gets sent over the wire to
+    // whatever LLM endpoint the workload provider points at. When
+    // `default_model` is a slug-prefixed string like `openai:gpt-5.4`
+    // we MUST strip the slug — otherwise the OpenAI / Ollama / etc.
+    // endpoint receives the slug-prefixed string verbatim and 404s
+    // (the user-visible symptom was Telegram bot errors naming
+    // `openhuman:gpt-5.4-mini` as the model).
+    let raw_model = config
         .default_model
         .clone()
         .unwrap_or_else(|| crate::openhuman::config::DEFAULT_MODEL.into());
+    let model = match raw_model.split_once(':') {
+        Some((_slug, real)) if !real.trim().is_empty() => real.trim().to_string(),
+        _ => raw_model,
+    };
     let temperature = config.default_temperature;
     let local_embedding = config.workload_local_model("embeddings");
     let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_local_ai(
@@ -209,7 +225,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
         Arc::new(config.clone()),
         &security,
         runtime,
-        audit,
         Arc::clone(&mem),
         &config.browser,
         &config.http_request,
@@ -542,15 +557,26 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // Single message bus — all channels send messages here
     let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
 
-    // Spawn a listener for each channel
-    let mut handles = Vec::new();
+    // Wire the process-wide listener registry so connect/disconnect
+    // RPCs can hot-swap channel listeners without restarting the core
+    // process. Idempotent — re-calling `start_channels` keeps the
+    // first sender (subsequent calls would be a no-op).
+    super::listener_registry::init(tx.clone(), initial_backoff_secs, max_backoff_secs);
+
+    // Spawn a listener for each channel. The registry owns each handle
+    // so a later `connect/disconnect` RPC can abort + respawn it. The
+    // tokio runtime drives them to completion regardless of who holds
+    // the handle, so we don't separately await them at the end of
+    // `start_channels` anymore — `run_message_dispatch_loop` is the
+    // process-lifetime gate.
     for ch in &channels {
-        handles.push(spawn_supervised_listener(
+        let handle = spawn_supervised_listener(
             ch.clone(),
             tx.clone(),
             initial_backoff_secs,
             max_backoff_secs,
-        ));
+        );
+        super::listener_registry::track(ch.name().to_string(), handle);
     }
     drop(tx); // Drop our copy so rx closes when all channels stop
 
@@ -615,10 +641,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
 
-    // Wait for all channel tasks
-    for h in handles {
-        let _ = h.await;
-    }
-
+    // Listener tasks are owned by `listener_registry`. The tokio
+    // runtime drains them on shutdown; no explicit await needed here.
     Ok(())
 }

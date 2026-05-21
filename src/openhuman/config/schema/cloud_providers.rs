@@ -100,13 +100,10 @@ impl Default for CloudProviderCreds {
 /// Reserved slugs that may not be used for user-configured providers.
 /// These are sentinels in the factory's routing grammar.
 ///
-/// `ollama` is deliberately NOT reserved: the AI settings panel registers an
-/// `ollama` `cloud_providers` entry so `list_configured_models` can resolve
-/// the user's chosen base_url for the model dropdown. The factory's chat
-/// routing is unaffected — the `ollama:<model>` prefix branch in
-/// `factory::create_chat_provider_from_string` fires before the
-/// `<slug>:<model>` cloud-provider lookup, so a synthetic `ollama` entry
-/// never reaches `make_cloud_provider_by_slug`.
+/// `ollama` and `lmstudio` are intentionally *not* reserved — users can
+/// add cloud-provider rows for local OpenAI-compatible runtimes. The
+/// factory checks `cloud_providers` first, so the row's endpoint wins
+/// over the legacy `ollama:<model>` → `local_ai.base_url` special path.
 pub fn is_slug_reserved(s: &str) -> bool {
     matches!(s.trim(), "" | "cloud" | "openhuman" | "pid")
 }
@@ -154,17 +151,46 @@ pub fn migrate_legacy_fields(entry: &mut CloudProviderCreds) {
     }
 
     // Auth style from legacy type when still at default Bearer.
-    if entry.auth_style == AuthStyle::Bearer {
-        match lt {
-            "anthropic" => {
-                entry.auth_style = AuthStyle::Anthropic;
-            }
-            "openhuman" => {
-                entry.auth_style = AuthStyle::OpenhumanJwt;
-            }
-            _ => {}
+    //
+    // The legacy `"openhuman"` → `OpenhumanJwt` branch is intentionally
+    // gone in the closedhuman fork: the OpenHuman product backend is not
+    // available, so minting OpenhumanJwt entries would only route the
+    // chat factory into the dead make_openhuman_backend path. Existing
+    // OpenhumanJwt rows already on disk are normalised at load time by
+    // `migrate_openhuman_jwt_entries` (below).
+    if entry.auth_style == AuthStyle::Bearer && lt == "anthropic" {
+        entry.auth_style = AuthStyle::Anthropic;
+    }
+}
+
+/// Closedhuman-fork-only sweep: rewrite any `OpenhumanJwt` entries to
+/// `Bearer` with empty credentials. These rows are leftovers from the
+/// upstream backend-shipped era and can't be honoured here — the factory
+/// would route them at the dead `make_openhuman_backend` path and produce
+/// the misleading `SESSION_EXPIRED: backend session not active` error.
+///
+/// Run at config load time, after `migrate_legacy_fields`. Returns the
+/// list of slugs that were converted so the caller can surface a
+/// one-time toast / log line pointing the user at Settings → AI.
+pub fn migrate_openhuman_jwt_entries(entries: &mut [CloudProviderCreds]) -> Vec<String> {
+    let mut converted = Vec::new();
+    for entry in entries.iter_mut() {
+        if entry.auth_style == AuthStyle::OpenhumanJwt {
+            log::warn!(
+                "[config][cloud_providers] OpenhumanJwt entry slug='{}' id='{}' converted to Bearer with empty key — \
+                 add your own API key under Settings → AI to re-enable this provider",
+                entry.slug,
+                entry.id
+            );
+            entry.auth_style = AuthStyle::Bearer;
+            // Clear the legacy_type so a future re-migration doesn't
+            // bounce it back to OpenhumanJwt. (The branch is gone but
+            // be defensive in case downstream code still inspects it.)
+            entry.legacy_type = None;
+            converted.push(entry.slug.clone());
         }
     }
+    converted
 }
 
 /// Map a legacy type string (or slug) to a human-readable label.
@@ -174,7 +200,6 @@ fn legacy_label_for(type_str: &str) -> &'static str {
         "openai" => "OpenAI",
         "anthropic" => "Anthropic",
         "openrouter" => "OpenRouter",
-        "orcarouter" => "OrcaRouter",
         "custom" => "Custom",
         _ => "Custom",
     }
@@ -187,7 +212,6 @@ fn legacy_default_endpoint(type_str: &str) -> &'static str {
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com/v1",
         "openrouter" => "https://openrouter.ai/api/v1",
-        "orcarouter" => "https://api.orcarouter.ai/v1",
         _ => "",
     }
 }
@@ -245,7 +269,6 @@ pub enum CloudProviderType {
     Openai,
     Anthropic,
     Openrouter,
-    Orcarouter,
     Custom,
 }
 
@@ -257,7 +280,6 @@ impl CloudProviderType {
             Self::Openai => "https://api.openai.com/v1",
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::Openrouter => "https://openrouter.ai/api/v1",
-            Self::Orcarouter => "https://api.orcarouter.ai/v1",
             Self::Custom => "",
         }
     }
@@ -269,7 +291,6 @@ impl CloudProviderType {
             Self::Openai => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::Openrouter => "OpenRouter",
-            Self::Orcarouter => "OrcaRouter",
             Self::Custom => "Custom",
         }
     }
@@ -281,7 +302,6 @@ impl CloudProviderType {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
             Self::Openrouter => "openrouter",
-            Self::Orcarouter => "orcarouter",
             Self::Custom => "custom",
         }
     }
@@ -298,30 +318,75 @@ impl CloudProviderType {
 
 #[cfg(test)]
 mod tests {
-    use super::is_slug_reserved;
+    use super::*;
 
-    #[test]
-    fn reserved_slugs() {
-        for s in ["", " ", "cloud", "openhuman", "pid"] {
-            assert!(is_slug_reserved(s), "{s:?} must stay reserved");
+    fn entry(slug: &str, auth: AuthStyle, legacy_type: Option<&str>) -> CloudProviderCreds {
+        CloudProviderCreds {
+            id: generate_provider_id(slug),
+            slug: slug.to_string(),
+            label: slug.to_string(),
+            endpoint: format!("https://api.{slug}.example.com/v1"),
+            auth_style: auth,
+            legacy_type: legacy_type.map(str::to_string),
+            default_model: None,
         }
     }
 
-    // Regression: `ollama` was previously reserved, which made the AI settings
-    // panel unable to persist an `ollama` cloud_providers entry — so the
-    // model-list dropdown failed with "no cloud provider with id or slug
-    // 'ollama' found". The factory's chat routing is unaffected by this
-    // change because the `ollama:<model>` prefix branch fires before any
-    // cloud_providers lookup.
     #[test]
-    fn ollama_and_lmstudio_are_not_reserved() {
-        assert!(
-            !is_slug_reserved("ollama"),
-            "ollama must be usable as a cloud_providers slug for the /models probe"
-        );
-        assert!(
-            !is_slug_reserved("lmstudio"),
-            "lmstudio is a free-form OpenAI-compatible slug"
-        );
+    fn migrate_legacy_fields_no_longer_mints_openhuman_jwt() {
+        // The legacy branch that flipped Bearer → OpenhumanJwt for
+        // `lt == "openhuman"` is gone in the closedhuman fork. Migration
+        // should leave the auth_style as Bearer so the dead backend
+        // path is never re-entered for a fresh upgrade.
+        let mut e = entry("openhuman", AuthStyle::Bearer, Some("openhuman"));
+        migrate_legacy_fields(&mut e);
+        assert_eq!(e.auth_style, AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn migrate_legacy_fields_still_promotes_anthropic() {
+        // Anthropic's legacy entries (auth_style = Bearer, type =
+        // "anthropic") still get promoted to AuthStyle::Anthropic so the
+        // x-api-key + anthropic-version headers go on outgoing calls.
+        let mut e = entry("anthropic", AuthStyle::Bearer, Some("anthropic"));
+        migrate_legacy_fields(&mut e);
+        assert_eq!(e.auth_style, AuthStyle::Anthropic);
+    }
+
+    #[test]
+    fn migrate_openhuman_jwt_entries_converts_to_bearer_and_returns_slugs() {
+        let mut entries = vec![
+            entry("openai", AuthStyle::Bearer, None),
+            entry("openhuman", AuthStyle::OpenhumanJwt, Some("openhuman")),
+            entry("anthropic", AuthStyle::Anthropic, None),
+            entry(
+                "legacy-openhuman",
+                AuthStyle::OpenhumanJwt,
+                Some("openhuman"),
+            ),
+        ];
+        let converted = migrate_openhuman_jwt_entries(&mut entries);
+        assert_eq!(converted, vec!["openhuman", "legacy-openhuman"]);
+        // Both OpenhumanJwt rows became Bearer; the other two are untouched.
+        assert_eq!(entries[0].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[1].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[2].auth_style, AuthStyle::Anthropic);
+        assert_eq!(entries[3].auth_style, AuthStyle::Bearer);
+        // legacy_type cleared on the converted rows so a re-run of
+        // migrate_legacy_fields can't bounce them back.
+        assert!(entries[1].legacy_type.is_none());
+        assert!(entries[3].legacy_type.is_none());
+    }
+
+    #[test]
+    fn migrate_openhuman_jwt_entries_is_noop_when_nothing_to_convert() {
+        let mut entries = vec![
+            entry("openai", AuthStyle::Bearer, None),
+            entry("anthropic", AuthStyle::Anthropic, None),
+        ];
+        let converted = migrate_openhuman_jwt_entries(&mut entries);
+        assert!(converted.is_empty());
+        assert_eq!(entries[0].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[1].auth_style, AuthStyle::Anthropic);
     }
 }

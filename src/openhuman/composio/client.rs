@@ -13,15 +13,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::openhuman::integrations::IntegrationClient;
 
 use super::types::{
-    ComposioActiveTriggersResponse, ComposioAuthorizeResponse, ComposioAvailableTriggersResponse,
-    ComposioConnectionsResponse, ComposioCreateTriggerResponse, ComposioDeleteResponse,
-    ComposioDisableTriggerResponse, ComposioEnableTriggerResponse, ComposioExecuteResponse,
-    ComposioGithubReposResponse, ComposioToolkitsResponse, ComposioToolsResponse,
+    ComposioActiveTrigger, ComposioActiveTriggersResponse, ComposioAuthorizeResponse,
+    ComposioAvailableTrigger, ComposioAvailableTriggersResponse, ComposioConnectionsResponse,
+    ComposioCreateTriggerResponse, ComposioDeleteResponse, ComposioDisableTriggerResponse,
+    ComposioEnableTriggerResponse, ComposioExecuteResponse, ComposioGithubReposResponse,
+    ComposioToolkitsResponse, ComposioToolsResponse,
 };
 
 const POST_OAUTH_ACTION_RETRY_DELAY: Duration = Duration::from_secs(10);
@@ -30,8 +31,6 @@ const POST_OAUTH_ACTION_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// trailing punctuation or wrapper text from the gateway does not silently
 /// disable the retry.
 const POST_OAUTH_AUTH_ERROR_STRINGS: &[&str] = &["connection error, try to authenticate"];
-const AUTHORIZE_OAUTH_SCOPES_FIELD: &str = "oauth_scopes";
-const GMAIL_REQUIRED_OAUTH_SCOPES: &[&str] = &["https://www.googleapis.com/auth/gmail.readonly"];
 
 /// High-level client for all backend-proxied Composio operations.
 #[derive(Clone)]
@@ -108,7 +107,6 @@ impl ComposioClient {
                 obj.insert(k.clone(), v.clone());
             }
         }
-        merge_required_oauth_scopes(&mut body, toolkit)?;
         self.inner
             .post::<ComposioAuthorizeResponse>("/agent-integrations/composio/authorize", &body)
             .await
@@ -545,75 +543,6 @@ fn is_post_oauth_auth_readiness_error(resp: &ComposioExecuteResponse) -> bool {
         .any(|needle| normalized.contains(needle))
 }
 
-fn required_oauth_scopes_for_toolkit(toolkit: &str) -> &'static [&'static str] {
-    match toolkit.trim().to_ascii_lowercase().as_str() {
-        // GMAIL_NEW_GMAIL_MESSAGE and the native Gmail sync path need read access
-        // to messages. Without this hint fresh OAuth handoffs can complete with a
-        // profile-only Google token and trigger enable fails with 403 insufficient
-        // authentication scopes (#2186).
-        "gmail" => GMAIL_REQUIRED_OAUTH_SCOPES,
-        _ => &[],
-    }
-}
-
-fn merge_required_oauth_scopes(body: &mut Value, toolkit: &str) -> anyhow::Result<()> {
-    let required = required_oauth_scopes_for_toolkit(toolkit);
-    if required.is_empty() {
-        return Ok(());
-    }
-
-    let obj = body
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("composio.authorize: internal payload must be an object"))?;
-    match obj.get_mut(AUTHORIZE_OAUTH_SCOPES_FIELD) {
-        Some(existing) => append_missing_oauth_scopes(existing, required)?,
-        None => {
-            obj.insert(AUTHORIZE_OAUTH_SCOPES_FIELD.to_string(), json!(required));
-        }
-    }
-    Ok(())
-}
-
-fn append_missing_oauth_scopes(value: &mut Value, required: &[&str]) -> anyhow::Result<()> {
-    let mut scopes = match value {
-        Value::Null => Vec::new(),
-        Value::String(raw) => raw
-            .split(|ch: char| ch == ',' || ch.is_whitespace())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .collect(),
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len() + required.len());
-            for item in items {
-                let Some(scope) = item.as_str() else {
-                    anyhow::bail!(
-                        "composio.authorize: {AUTHORIZE_OAUTH_SCOPES_FIELD} entries must be strings"
-                    );
-                };
-                let scope = scope.trim();
-                if !scope.is_empty() {
-                    out.push(scope.to_string());
-                }
-            }
-            out
-        }
-        _ => {
-            anyhow::bail!(
-                "composio.authorize: {AUTHORIZE_OAUTH_SCOPES_FIELD} must be a string or array"
-            );
-        }
-    };
-
-    for scope in required {
-        if !scopes.iter().any(|existing| existing == scope) {
-            scopes.push((*scope).to_string());
-        }
-    }
-    *value = json!(scopes);
-    Ok(())
-}
-
 /// Backend-mode [`ComposioClient`] constructor. **Internal to the
 /// composio module** — external callers should use
 /// [`create_composio_client`] (factory) or
@@ -910,6 +839,28 @@ pub async fn direct_execute(
 /// (`ComposioConnection::is_active`) treats empty status as inactive,
 /// so a malformed row will simply not be presented as connected — the
 /// fail-safe shape the user expects.
+/// Direct-mode counterpart to [`ComposioClient::delete_connection`].
+/// Calls Composio v3 `DELETE /connected_accounts/{id}` against the
+/// user's personal tenant (via
+/// [`crate::openhuman::tools::ComposioTool::delete_connected_account`])
+/// and returns the same [`ComposioDeleteResponse { deleted: true }`]
+/// shape the backend-proxied path emits so the
+/// [`composio_delete_connection`] op call site stays single-shape.
+///
+/// [`composio_delete_connection`]:
+///     crate::openhuman::composio::ops::composio_delete_connection
+pub async fn direct_delete_connection(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    connection_id: &str,
+) -> anyhow::Result<ComposioDeleteResponse> {
+    tracing::debug!(
+        connection_id,
+        "[composio-direct] delete_connection: DELETE v3 /connected_accounts/{{id}}"
+    );
+    direct.delete_connected_account(connection_id).await?;
+    Ok(ComposioDeleteResponse { deleted: true })
+}
+
 pub async fn direct_list_connections(
     direct: &Arc<crate::openhuman::tools::ComposioTool>,
 ) -> anyhow::Result<ComposioConnectionsResponse> {
@@ -937,6 +888,412 @@ pub async fn direct_list_connections(
         "[composio-direct] list_connections: mapped v3 connected accounts"
     );
     Ok(ComposioConnectionsResponse { connections })
+}
+
+/// Derive a toolkit slug from a Composio trigger slug.
+///
+/// Composio v3 trigger slugs prefix the toolkit (e.g.
+/// `GMAIL_NEW_GMAIL_MESSAGE` → `gmail`, `SLACK_RECEIVE_MESSAGE` →
+/// `slack`). The `trigger_instances/active` endpoint does not echo back
+/// the toolkit explicitly, so we derive it from the prefix to populate
+/// [`ComposioActiveTrigger::toolkit`].
+///
+/// Returns an empty string when the slug has no underscore — callers
+/// treat that as "unknown toolkit" rather than panic.
+fn derive_toolkit_from_trigger_slug(slug: &str) -> String {
+    slug.split_once('_')
+        .map(|(prefix, _)| prefix.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Direct-mode counterpart to [`ComposioClient::list_active_triggers`].
+///
+/// Calls Composio v3 `GET /trigger_instances/active` (via
+/// [`crate::openhuman::tools::ComposioTool::list_active_triggers_v3`])
+/// and reshapes each row into the canonical [`ComposioActiveTrigger`]
+/// envelope. `toolkit` filtering is done client-side since the v3
+/// endpoint does not expose a single-toolkit query parameter on the
+/// row (only on `connected_account_id` / `trigger_names` lists).
+///
+/// State derivation: v3's `disabled_at` (ISO timestamp, nullable)
+/// indicates whether a row is currently disabled. We map non-null →
+/// `"DISABLED"` and null → `"ENABLED"` so the existing UI badge keeps
+/// rendering the right state.
+pub async fn direct_list_active_triggers(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    toolkit_filter: Option<&str>,
+) -> anyhow::Result<ComposioActiveTriggersResponse> {
+    tracing::debug!(
+        toolkit_filter,
+        "[composio-direct] list_active_triggers: GET v3 /trigger_instances/active"
+    );
+    let raw_items = direct.list_active_triggers_v3().await?;
+    let normalized_filter = toolkit_filter
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_lowercase());
+
+    let mut triggers: Vec<ComposioActiveTrigger> = Vec::with_capacity(raw_items.len());
+    for item in raw_items {
+        let id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| item.get("uuid").and_then(serde_json::Value::as_str))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let slug = item
+            .get("trigger_name")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| item.get("triggerName").and_then(serde_json::Value::as_str))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let toolkit = derive_toolkit_from_trigger_slug(&slug);
+        if let Some(filter) = &normalized_filter {
+            if &toolkit != filter {
+                continue;
+            }
+        }
+        let connection_id = item
+            .get("connected_account_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                item.get("connectedAccountId")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let trigger_config = item
+            .get("trigger_config")
+            .or_else(|| item.get("triggerConfig"))
+            .cloned();
+        let disabled = item
+            .get("disabled_at")
+            .or_else(|| item.get("disabledAt"))
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+        let state = Some(if disabled { "DISABLED" } else { "ENABLED" }.to_string());
+
+        triggers.push(ComposioActiveTrigger {
+            id,
+            slug,
+            toolkit,
+            connection_id,
+            trigger_config,
+            state,
+        });
+    }
+    tracing::debug!(
+        count = triggers.len(),
+        "[composio-direct] list_active_triggers: mapped v3 trigger instances"
+    );
+    Ok(ComposioActiveTriggersResponse { triggers })
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::list_available_triggers`].
+///
+/// Calls Composio v3 `GET /triggers_types?toolkit_slugs=<toolkit>` (via
+/// [`crate::openhuman::tools::ComposioTool::list_trigger_types_v3`])
+/// and reshapes each row into the canonical
+/// [`ComposioAvailableTrigger`] envelope.
+///
+/// Scope semantics: v3 does not surface the backend's `github_repo`
+/// fan-out (the backend used to expand a single static catalog entry
+/// into one entry per accessible repo on the user's connection). All
+/// entries surface as `scope="static"` so callers that branched on
+/// scope still compile — direct mode users with a GitHub connection
+/// will see the single catalog entry rather than per-repo rows.
+///
+/// `default_config` is populated from Composio v3's `config` field
+/// (the JSON-Schema-like descriptor of required setup parameters) so
+/// the existing config-key extraction in `required_config_keys` keeps
+/// working unchanged.
+pub async fn direct_list_available_triggers(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    toolkit: &str,
+) -> anyhow::Result<ComposioAvailableTriggersResponse> {
+    let toolkit_slug = toolkit.trim().to_ascii_lowercase();
+    if toolkit_slug.is_empty() {
+        anyhow::bail!("composio direct_list_available_triggers: toolkit must not be empty");
+    }
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        "[composio-direct] list_available_triggers: GET v3 /triggers_types"
+    );
+    let raw_items = direct.list_trigger_types_v3(&toolkit_slug).await?;
+    let triggers: Vec<ComposioAvailableTrigger> = raw_items
+        .into_iter()
+        .filter_map(|item| {
+            let slug = item
+                .get("slug")
+                .and_then(serde_json::Value::as_str)?
+                .trim()
+                .to_string();
+            if slug.is_empty() {
+                return None;
+            }
+            let raw_config = item.get("config").cloned();
+            tracing::debug!(
+                trigger_slug = %slug,
+                raw_config = ?raw_config,
+                "[composio-direct] parsing trigger config schema"
+            );
+            // Composio v3 returns trigger `config` as a JSON Schema:
+            //   { "type": "object",
+            //     "properties": { "owner": {…}, "repo": {…} },
+            //     "required": ["owner", "repo"] }
+            // For backwards compatibility we also accept a flat-map
+            // shape `{ "field": { "required": true } }` (some non-GitHub
+            // toolkits historically used this). Whichever shape comes
+            // back, surface a flat `required_config_keys: ["owner",
+            // "repo"]` so the renderer can show the inline form without
+            // branching on schema version.
+            let required_config_keys = raw_config.as_ref().and_then(extract_required_keys);
+            // `default_config` is the *prefilled values* the UI seeds
+            // its form with — not the schema. Pull `default` per
+            // property when present; otherwise return an empty map so
+            // the renderer's `defaultConfig[key] ?? ""` falls back
+            // cleanly. The full schema would break the form input
+            // since the renderer treats `defaultConfig[owner]` as a
+            // string, not as `{type, title, description}`.
+            let default_config = raw_config.as_ref().map(extract_default_values);
+            Some(ComposioAvailableTrigger {
+                slug,
+                scope: "static".to_string(),
+                default_config,
+                required_config_keys,
+                repo: None,
+            })
+        })
+        .collect();
+    tracing::debug!(
+        count = triggers.len(),
+        "[composio-direct] list_available_triggers: mapped v3 trigger types"
+    );
+    Ok(ComposioAvailableTriggersResponse { triggers })
+}
+
+/// Extract the canonical `required_config_keys` list from a v3 trigger
+/// `config` value, tolerating two shapes Composio has used historically:
+///
+/// 1. **JSON Schema** (current — GitHub, Slack, most modern toolkits):
+///    `{ "type": "object", "properties": {…}, "required": ["owner", "repo"] }`
+///    → read `required` directly as a `Vec<String>`.
+/// 2. **Flat per-field map** (legacy fallback):
+///    `{ "channel": { "required": true }, "filter": { "required": false } }`
+///    → return the names with `required: true`.
+///
+/// Returns `None` only when the shape matches neither — leaves the
+/// renderer's `requiredConfigKeys ?? []` fallback in charge of the rest.
+fn extract_required_keys(config: &serde_json::Value) -> Option<Vec<String>> {
+    let obj = config.as_object()?;
+    if let Some(required_arr) = obj.get("required").and_then(serde_json::Value::as_array) {
+        let mut keys: Vec<String> = required_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        keys.sort();
+        return Some(keys);
+    }
+    let mut keys: Vec<String> = obj
+        .iter()
+        .filter_map(|(name, descriptor)| {
+            let is_required = descriptor
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            is_required.then(|| name.clone())
+        })
+        .collect();
+    keys.sort();
+    Some(keys)
+}
+
+/// Extract a flat `{key: default_value}` map from a v3 trigger `config`
+/// value. The renderer treats `defaultConfig` as the *prefilled form
+/// values*, not as the schema — passing the raw JSON Schema (with nested
+/// `{type, title, description}` objects) would crash the input controls.
+///
+/// Reads `properties.<key>.default` per JSON Schema; returns an empty map
+/// when no defaults are declared (so the form starts blank, which is the
+/// right behaviour for required-without-default fields like `owner`/`repo`).
+fn extract_default_values(config: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = config.as_object() else {
+        return serde_json::json!({});
+    };
+    let mut out = serde_json::Map::new();
+    if let Some(props) = obj.get("properties").and_then(serde_json::Value::as_object) {
+        for (key, descriptor) in props {
+            if let Some(default) = descriptor.get("default") {
+                out.insert(key.clone(), default.clone());
+            }
+        }
+    } else {
+        // Legacy flat-map shape — pull `default` straight off the
+        // per-field descriptor.
+        for (key, descriptor) in obj {
+            if let Some(default) = descriptor.get("default") {
+                out.insert(key.clone(), default.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::enable_trigger`].
+///
+/// Calls Composio v3
+/// `POST /trigger_instances/{slug}/upsert` (via
+/// [`crate::openhuman::tools::ComposioTool::upsert_trigger_instance_v3`])
+/// and reshapes the response into the canonical
+/// [`ComposioEnableTriggerResponse`] envelope so the
+/// `composio_enable_trigger` op stays single-shape across both modes.
+///
+/// Composio's upsert returns either a freshly-created trigger row or
+/// the existing one updated in place — either way the response carries
+/// a `trigger_id` (v3 nano id) and the `trigger_name` we sent. We
+/// derive the canonical `slug` from the request when the response
+/// omits it; backend-mode callers see exactly the same field set so
+/// downstream consumers (log emitters, frontend state) don't branch on
+/// mode.
+pub async fn direct_enable_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    connection_id: &str,
+    slug: &str,
+    trigger_config: Option<serde_json::Value>,
+) -> anyhow::Result<ComposioEnableTriggerResponse> {
+    let connection_id = connection_id.trim();
+    let slug = slug.trim();
+    if connection_id.is_empty() {
+        anyhow::bail!("composio direct_enable_trigger: connection_id must not be empty");
+    }
+    if slug.is_empty() {
+        anyhow::bail!("composio direct_enable_trigger: slug must not be empty");
+    }
+    tracing::debug!(
+        connection_id,
+        slug,
+        "[composio-direct] enable_trigger: POST v3 /trigger_instances/{{slug}}/upsert"
+    );
+    let raw = direct
+        .upsert_trigger_instance_v3(slug, Some(connection_id), trigger_config)
+        .await?;
+
+    let trigger_id = raw
+        .get("trigger_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| raw.get("triggerId").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("id").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("uuid").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if trigger_id.is_empty() {
+        anyhow::bail!(
+            "composio direct_enable_trigger: Composio response is missing trigger_id ({raw})"
+        );
+    }
+
+    Ok(ComposioEnableTriggerResponse {
+        trigger_id,
+        slug: slug.to_string(),
+        connection_id: connection_id.to_string(),
+    })
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::disable_trigger`].
+///
+/// Calls Composio v3
+/// `DELETE /trigger_instances/manage/{trigger_id}` (via
+/// [`crate::openhuman::tools::ComposioTool::delete_trigger_instance_v3`])
+/// and returns `ComposioDisableTriggerResponse { deleted: true }` on
+/// success — same single-shape contract the backend path emits so the
+/// op layer doesn't branch on mode.
+///
+/// We use DELETE rather than PATCH(status=disable) here because the
+/// `composio_disable_trigger` op semantically means "remove this
+/// trigger entirely" (the user has un-toggled it in the UI). Callers
+/// who want pause-without-delete can use the PATCH path via
+/// [`crate::openhuman::tools::ComposioTool::manage_trigger_instance_v3`]
+/// directly — no op layer exposes it today.
+pub async fn direct_disable_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    trigger_id: &str,
+) -> anyhow::Result<ComposioDisableTriggerResponse> {
+    let trigger_id = trigger_id.trim();
+    if trigger_id.is_empty() {
+        anyhow::bail!("composio direct_disable_trigger: trigger_id must not be empty");
+    }
+    tracing::debug!(
+        trigger_id,
+        "[composio-direct] disable_trigger: DELETE v3 /trigger_instances/manage/{{id}}"
+    );
+    direct.delete_trigger_instance_v3(trigger_id).await?;
+    Ok(ComposioDisableTriggerResponse { deleted: true })
+}
+
+/// Direct-mode counterpart to
+/// [`ComposioClient::create_trigger`].
+///
+/// `create_trigger` is semantically equivalent to `enable_trigger`
+/// when the trigger does not yet exist — both end up at v3's
+/// `upsert` endpoint. The difference is the op-layer shape:
+/// `enable_trigger` returns `{ trigger_id, slug, connection_id }`;
+/// `create_trigger` returns `{ trigger_id, status }`.
+///
+/// We reuse the same upstream call (via
+/// [`crate::openhuman::tools::ComposioTool::upsert_trigger_instance_v3`])
+/// and emit the `create`-shaped envelope. The `status` field is
+/// always `"active"` in direct mode because the upsert path always
+/// activates — Composio has no notion of a "pending"
+/// upsert-but-not-yet-active state for v3 instances.
+pub async fn direct_create_trigger(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    slug: &str,
+    connection_id: Option<&str>,
+    trigger_config: Option<serde_json::Value>,
+) -> anyhow::Result<ComposioCreateTriggerResponse> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        anyhow::bail!("composio direct_create_trigger: slug must not be empty");
+    }
+    let trimmed_connection = connection_id.map(str::trim).filter(|c| !c.is_empty());
+    tracing::debug!(
+        slug,
+        connection_id = trimmed_connection,
+        "[composio-direct] create_trigger: POST v3 /trigger_instances/{{slug}}/upsert"
+    );
+    let raw = direct
+        .upsert_trigger_instance_v3(slug, trimmed_connection, trigger_config)
+        .await?;
+
+    let trigger_id = raw
+        .get("trigger_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| raw.get("triggerId").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("id").and_then(serde_json::Value::as_str))
+        .or_else(|| raw.get("uuid").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if trigger_id.is_empty() {
+        anyhow::bail!(
+            "composio direct_create_trigger: Composio response is missing trigger_id ({raw})"
+        );
+    }
+
+    Ok(ComposioCreateTriggerResponse {
+        trigger_id,
+        status: Some("active".to_string()),
+    })
 }
 
 /// Direct-mode counterpart to [`ComposioClient::list_tools`]. Calls

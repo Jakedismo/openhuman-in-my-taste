@@ -86,9 +86,6 @@ async function waitForRewardsSnapshot(timeout = 15_000): Promise<void> {
 
 describe('Rewards progression & persistence', () => {
   before(async function beforeSuite() {
-    // Auth + onboarding can take longer than the default 30s per-hook budget.
-    this.timeout(90_000);
-
     if (!supportsExecuteScript()) {
       stepLog('Skipping suite on Mac2 — Rewards bottom-tab label not mapped for Appium');
       this.skip();
@@ -113,8 +110,7 @@ describe('Rewards progression & persistence', () => {
     await stopMockServer();
   });
 
-  it('12.2.1 — message-driven progress is reflected in the unlocked-count summary', async function () {
-    this.timeout(90_000);
+  it('12.2.1 — message-driven progress is reflected in the unlocked-count summary', async () => {
     stepLog(
       'priming high_usage scenario (featuresUsedCount=6, cumulativeTokens=12.5M, streak=14d)'
     );
@@ -137,8 +133,7 @@ describe('Rewards progression & persistence', () => {
     expect(await textExists('Pro Supporter')).toBe(true);
   });
 
-  it('12.2.2 — usage metrics (current streak + cumulative tokens) render the snapshot values', async function () {
-    this.timeout(90_000);
+  it('12.2.2 — usage metrics (current streak + cumulative tokens) render the snapshot values', async () => {
     stepLog('priming high_usage scenario for metrics footer');
     resetMockBehavior();
     setMockBehavior('rewardsScenario', 'high_usage');
@@ -152,12 +147,8 @@ describe('Rewards progression & persistence', () => {
     await waitForRewardsSnapshot();
 
     // Current streak row in the metrics footer.
-    // i18n key 'rewards.community.streakDays' = '{n}' so the rendered text is
-    // just the number (e.g. '14'). The label key renders as 'Current streak'.
     expect(await textExists('Current streak')).toBe(true);
-    // Accept either '14 days' (if i18n is updated) or just '14' (current i18n).
-    const hasStreak = (await textExists('14 days')) || (await textExists('14'));
-    expect(hasStreak).toBe(true);
+    expect(await textExists('14 days')).toBe(true);
 
     // Cumulative tokens row — value formatted via en-US Intl.NumberFormat
     // (see RewardsCommunityTab.formatNumber). 12_500_000 → "12,500,000".
@@ -165,8 +156,7 @@ describe('Rewards progression & persistence', () => {
     expect(await textExists('12,500,000')).toBe(true);
   });
 
-  it('12.2.3 — state persists across a simulated restart (re-fetch on remount)', async function () {
-    this.timeout(90_000);
+  it('12.2.3 — state persists across a simulated restart (re-fetch on remount)', async () => {
     // Phase 1: load the high-usage snapshot with a fixed lastSyncedAt so we
     // can prove the second fetch advanced the timestamp without changing
     // the durable counters.
@@ -184,8 +174,7 @@ describe('Rewards progression & persistence', () => {
     await waitForRewardsSnapshot();
 
     // Capture the durable counters from the rendered DOM before the restart.
-    // i18n 'rewards.community.streakDays' = '{n}' so rendered text is just '14'.
-    const phase1Streak = (await textExists('14 days')) || (await textExists('14'));
+    const phase1Streak = await textExists('14 days');
     const phase1Tokens = await textExists('12,500,000');
     expect(phase1Streak).toBe(true);
     expect(phase1Tokens).toBe(true);
@@ -207,8 +196,7 @@ describe('Rewards progression & persistence', () => {
     await waitForRewardsSnapshot();
 
     // Durable counters must survive the restart unchanged.
-    // i18n 'rewards.community.streakDays' = '{n}' so rendered text is just '14'.
-    expect((await textExists('14 days')) || (await textExists('14'))).toBe(true);
+    expect(await textExists('14 days')).toBe(true);
     expect(await textExists('12,500,000')).toBe(true);
     expect(await textExists('3 of 3 achievements unlocked')).toBe(true);
 

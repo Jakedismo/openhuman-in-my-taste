@@ -99,21 +99,16 @@ pub fn record_sync_success(toolkit: &str, connection_id: &str) {
     }
 }
 
-/// Spawn the periodic sync background task. Idempotent: only the
-/// first call actually spawns the loop, every subsequent call is a
-/// cheap no-op (logged at `debug` so it's visible during startup
-/// tracing without spamming `info`).
+/// Spawn the periodic sync background task. Idempotent — calling
+/// twice is a cheap no-op because [`SCHEDULER_STARTED`] guards the
+/// spawn. In direct mode the scheduler polls the user's personal
+/// Composio v3 tenant; in backend mode it's a no-op (no backend
+/// session in this fork).
 pub fn start_periodic_sync() {
-    if SCHEDULER_STARTED.get().is_some() {
-        tracing::debug!("[composio:periodic] scheduler already running, skipping start");
-        return;
-    }
-    // Race-safe: only the thread that wins `set` runs the spawn body.
     if SCHEDULER_STARTED.set(()).is_err() {
-        tracing::debug!("[composio:periodic] scheduler already running (race), skipping start");
+        tracing::debug!("[composio:periodic] scheduler already started; ignoring duplicate call");
         return;
     }
-
     tokio::spawn(async move {
         tracing::info!(
             tick_seconds = TICK_SECONDS,

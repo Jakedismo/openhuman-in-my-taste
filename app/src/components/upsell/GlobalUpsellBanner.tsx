@@ -6,7 +6,8 @@ import UpsellBanner from './UpsellBanner';
 
 export default function GlobalUpsellBanner() {
   const { t } = useT();
-  const { teamUsage, isLoading, isAtLimit, isNearLimit, isFreeTier, usagePct } = useUsageState();
+  const { teamUsage, isLoading, isAtLimit, isNearLimit, isFreeTier, usagePct10h, usagePct7d } =
+    useUsageState();
 
   if (isLoading || !teamUsage) return null;
 
@@ -28,7 +29,7 @@ export default function GlobalUpsellBanner() {
   }
 
   if (isNearLimit && isFreeTier) {
-    const pct = Math.round(usagePct * 100);
+    const pct = Math.round(Math.max(usagePct10h, usagePct7d) * 100);
     return (
       <div className="relative z-20">
         <UpsellBanner

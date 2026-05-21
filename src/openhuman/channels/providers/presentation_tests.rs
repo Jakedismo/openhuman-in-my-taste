@@ -270,3 +270,58 @@ fn segment_for_delivery_single_short_returns_one() {
     let r = segment_for_delivery("Quick.");
     assert_eq!(r.len(), 1);
 }
+
+// ── await_reaction_bounded ─────────────────────────────────────────────
+//
+// Regression coverage for the chat-stuck-at-"Thinking… (1)" bug: when
+// local Ollama is saturated by a background vault sync, `try_reaction`
+// can hang for tens of seconds. `chat_done` is only emitted after the
+// reaction await completes, so without an upper bound the user-visible
+// reply never finalizes. `await_reaction_bounded` enforces the bound.
+
+#[tokio::test]
+async fn await_reaction_bounded_returns_emoji_when_task_completes() {
+    let handle = tokio::spawn(async { Some("👍".to_string()) });
+    let result = await_reaction_bounded(handle, std::time::Duration::from_secs(1)).await;
+    assert_eq!(result, Some("👍".to_string()));
+}
+
+#[tokio::test]
+async fn await_reaction_bounded_returns_none_when_task_returns_none() {
+    let handle = tokio::spawn(async { None::<String> });
+    let result = await_reaction_bounded(handle, std::time::Duration::from_secs(1)).await;
+    assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn await_reaction_bounded_returns_none_when_task_exceeds_timeout() {
+    // Task sleeps for far longer than the bound — simulates a hung
+    // local-Ollama HTTP call. `await_reaction_bounded` must abandon the
+    // wait and return `None` so `chat_done` can still be published.
+    let handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        Some("🤔".to_string())
+    });
+    let started = std::time::Instant::now();
+    let result = await_reaction_bounded(handle, std::time::Duration::from_millis(50)).await;
+    let elapsed = started.elapsed();
+    assert_eq!(result, None);
+    // Guard against the timeout being silently ignored: we should be
+    // back well under the spawned task's 60s sleep.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "await_reaction_bounded waited {:?} — timeout was not enforced",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn await_reaction_bounded_returns_none_when_task_panics() {
+    let handle = tokio::spawn(async {
+        panic!("simulated reaction-task panic");
+        #[allow(unreachable_code)]
+        Some("💥".to_string())
+    });
+    let result = await_reaction_bounded(handle, std::time::Duration::from_secs(1)).await;
+    assert_eq!(result, None);
+}

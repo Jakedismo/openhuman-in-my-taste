@@ -10,8 +10,7 @@ mod schemas;
 pub mod session_support;
 
 pub use crate::api::rest::{
-    decrypt_handoff_blob, user_id_from_auth_me_payload, user_id_from_profile_payload,
-    BackendOAuthClient, ConnectResponse, IntegrationSummary, IntegrationTokensHandoff,
+    user_id_from_auth_me_payload, user_id_from_profile_payload, BackendOAuthClient,
 };
 pub use core::*;
 pub use ops as rpc;

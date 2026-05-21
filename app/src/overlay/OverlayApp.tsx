@@ -58,7 +58,7 @@ let lastPollDebugTs = 0;
 
 // ── State model ──────────────────────────────────────────────────────────
 
-type OverlayMode = 'idle' | 'stt' | 'attention' | 'companion';
+type OverlayMode = 'idle' | 'stt' | 'attention';
 type BubbleTone = 'neutral' | 'accent' | 'success';
 
 interface OverlayBubble {
@@ -86,39 +86,6 @@ interface OverlayAttentionPayload {
   tone?: BubbleTone;
   ttl_ms?: number;
   source?: string;
-}
-
-interface CompanionStateChangedPayload {
-  session_id?: string;
-  state?: string;
-  previous_state?: string;
-  message?: string;
-}
-
-/**
- * Convert companion state to a localized, user-friendly bubble label.
- *
- * Takes the translate function as an argument (rather than calling `useT`
- * directly) so the helper stays a pure function and is unit-testable
- * without rendering a React tree. The default branch wraps the raw state
- * string \u2014 it's a fallback for unknown states and not expected in practice.
- */
-export function companionStateLabel(state: string, t: (key: string) => string): string {
-  const inner = (() => {
-    switch (state) {
-      case 'listening':
-        return t('overlay.companion.listening');
-      case 'thinking':
-        return t('overlay.companion.thinking');
-      case 'speaking':
-        return t('overlay.companion.speaking');
-      case 'pointing':
-        return t('overlay.companion.pointing');
-      default:
-        return state;
-    }
-  })();
-  return `\u201C${inner}\u201D`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -308,41 +275,6 @@ export default function OverlayApp() {
     [scheduleDismiss]
   );
 
-  // ── Companion state changes ──────────────────────────────────────────────
-  const handleCompanionStateChanged = useCallback(
-    (payload: CompanionStateChangedPayload) => {
-      const state = payload?.state ?? 'idle';
-      console.debug(`[overlay] companion:state_changed state=${state}`);
-
-      if (state === 'idle') {
-        scheduleDismiss(0);
-        return;
-      }
-      if (state === 'error') {
-        setMode('companion');
-        const trimmed = payload?.message?.trim();
-        setBubble({
-          id: `companion-error-${Date.now()}`,
-          text: trimmed ? `\u201C${trimmed}\u201D` : `\u201C${t('overlay.companion.error')}\u201D`,
-          tone: 'neutral',
-          compact: true,
-        });
-        scheduleDismiss(DEFAULT_ATTENTION_TTL_MS);
-        return;
-      }
-
-      clearDismissTimer();
-      setMode('companion');
-      setBubble({
-        id: `companion-${state}-${Date.now()}`,
-        text: companionStateLabel(state, t),
-        tone: state === 'speaking' ? 'success' : 'accent',
-        compact: true,
-      });
-    },
-    [clearDismissTimer, scheduleDismiss, t]
-  );
-
   // ── Socket.IO subscription lifecycle ───────────────────────────────────
   useEffect(() => {
     let socket: Socket | null = null;
@@ -382,7 +314,6 @@ export default function OverlayApp() {
         socket.on('dictation:toggle', handleDictationToggle);
         socket.on('dictation:transcription', handleDictationTranscription);
         socket.on('overlay:attention', handleAttention);
-        socket.on('companion:state_changed', handleCompanionStateChanged);
 
         socket.connect();
       } catch (err) {
@@ -400,13 +331,7 @@ export default function OverlayApp() {
       }
       clearDismissTimer();
     };
-  }, [
-    clearDismissTimer,
-    handleAttention,
-    handleCompanionStateChanged,
-    handleDictationToggle,
-    handleDictationTranscription,
-  ]);
+  }, [clearDismissTimer, handleAttention, handleDictationToggle, handleDictationTranscription]);
 
   // ── Poll voice server status as fallback sync ─────────────────────────
   // Socket events are the primary state driver, but if an event is missed
@@ -696,9 +621,7 @@ export default function OverlayApp() {
                 ? t('overlay.ariaVoiceActive')
                 : mode === 'attention'
                   ? t('overlay.ariaAttention')
-                  : mode === 'companion'
-                    ? t('overlay.ariaCompanion')
-                    : t('overlay.ariaOrb')
+                  : t('overlay.ariaOrb')
             }
             onMouseDown={handleDragStart}
             onMouseMove={handleMouseMove}

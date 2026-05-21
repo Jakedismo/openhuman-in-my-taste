@@ -8,7 +8,6 @@ import AppearancePanel from '../components/settings/panels/AppearancePanel';
 import AutocompleteDebugPanel from '../components/settings/panels/AutocompleteDebugPanel';
 import AutocompletePanel from '../components/settings/panels/AutocompletePanel';
 import BillingPanel from '../components/settings/panels/BillingPanel';
-import CompanionPanel from '../components/settings/panels/CompanionPanel';
 import ComposioPanel from '../components/settings/panels/ComposioPanel';
 import ComposioTriagePanel from '../components/settings/panels/ComposioTriagePanel';
 import ConnectionsPanel from '../components/settings/panels/ConnectionsPanel';
@@ -16,11 +15,9 @@ import CronJobsPanel from '../components/settings/panels/CronJobsPanel';
 import DeveloperOptionsPanel from '../components/settings/panels/DeveloperOptionsPanel';
 import LocalModelDebugPanel from '../components/settings/panels/LocalModelDebugPanel';
 import MascotPanel from '../components/settings/panels/MascotPanel';
-import McpServerPanel from '../components/settings/panels/McpServerPanel';
 import MemoryDataPanel from '../components/settings/panels/MemoryDataPanel';
 import MemoryDebugPanel from '../components/settings/panels/MemoryDebugPanel';
 import MessagingPanel from '../components/settings/panels/MessagingPanel';
-import MigrationPanel from '../components/settings/panels/MigrationPanel';
 import NotificationRoutingPanel from '../components/settings/panels/NotificationRoutingPanel';
 import NotificationsPanel from '../components/settings/panels/NotificationsPanel';
 import PrivacyPanel from '../components/settings/panels/PrivacyPanel';
@@ -32,6 +29,7 @@ import TeamManagementPanel from '../components/settings/panels/TeamManagementPan
 import TeamMembersPanel from '../components/settings/panels/TeamMembersPanel';
 import TeamPanel from '../components/settings/panels/TeamPanel';
 import ToolsPanel from '../components/settings/panels/ToolsPanel';
+import TriggersPanel from '../components/settings/panels/TriggersPanel';
 import VoiceDebugPanel from '../components/settings/panels/VoiceDebugPanel';
 import VoicePanel from '../components/settings/panels/VoicePanel';
 import WebhooksDebugPanel from '../components/settings/panels/WebhooksDebugPanel';
@@ -80,16 +78,6 @@ const PrivacyIcon = (
       strokeLinejoin="round"
       strokeWidth={2}
       d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
-    />
-  </svg>
-);
-const MigrationIcon = (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth={2}
-      d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"
     />
   </svg>
 );
@@ -146,16 +134,6 @@ const LlmIcon = (
       strokeLinejoin="round"
       strokeWidth={2}
       d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"
-    />
-  </svg>
-);
-const CompanionIcon = (
-  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth={2}
-      d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
     />
   </svg>
 );
@@ -223,13 +201,6 @@ const Settings = () => {
       route: 'privacy',
       icon: PrivacyIcon,
     },
-    {
-      id: 'migration',
-      title: t('pages.settings.account.migration'),
-      description: t('pages.settings.account.migrationDesc'),
-      route: 'migration',
-      icon: MigrationIcon,
-    },
   ];
 
   const featuresSettingsItems = [
@@ -261,13 +232,6 @@ const Settings = () => {
       description: t('pages.settings.features.toolsDesc'),
       route: 'tools',
       icon: ToolsIcon,
-    },
-    {
-      id: 'companion',
-      title: t('pages.settings.features.desktopCompanion'),
-      description: t('pages.settings.features.desktopCompanionDesc'),
-      route: 'companion',
-      icon: CompanionIcon,
     },
   ];
 
@@ -340,7 +304,6 @@ const Settings = () => {
         {/* BillingPanel intentionally uses its own wider layout. */}
         <Route path="billing" element={<BillingPanel />} />
         <Route path="privacy" element={wrapSettingsPage(<PrivacyPanel />)} />
-        <Route path="migration" element={wrapSettingsPage(<MigrationPanel />)} />
         {/* Features leaf panels */}
         <Route path="screen-intelligence" element={wrapSettingsPage(<ScreenIntelligencePanel />)} />
         <Route path="autocomplete" element={wrapSettingsPage(<AutocompletePanel />)} />
@@ -350,10 +313,8 @@ const Settings = () => {
         <Route path="mascot" element={wrapSettingsPage(<MascotPanel />)} />
         <Route path="appearance" element={wrapSettingsPage(<AppearancePanel />)} />
         <Route path="tools" element={wrapSettingsPage(<ToolsPanel />)} />
-        <Route path="companion" element={wrapSettingsPage(<CompanionPanel />)} />
         {/* Developer Options */}
         <Route path="developer-options" element={wrapSettingsPage(<DeveloperOptionsPanel />)} />
-        <Route path="mcp-server" element={wrapSettingsPage(<McpServerPanel />)} />
         <Route
           path="notification-routing"
           element={wrapSettingsPage(<NotificationRoutingPanel />)}
@@ -375,6 +336,7 @@ const Settings = () => {
         <Route path="webhooks-triggers" element={<Webhooks />} />
         <Route path="composio-triggers" element={wrapSettingsPage(<ComposioTriagePanel />)} />
         <Route path="composio-routing" element={wrapSettingsPage(<ComposioPanel />)} />
+        <Route path="triggers" element={wrapSettingsPage(<TriggersPanel />)} />
         {/* About / updates */}
         <Route path="about" element={wrapSettingsPage(<AboutPanel />)} />
         {/* Fallback */}

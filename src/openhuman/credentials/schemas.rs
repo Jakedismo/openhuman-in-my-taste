@@ -57,37 +57,6 @@ struct AuthListProviderCredentialsParams {
     provider: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthOauthConnectParams {
-    provider: String,
-    #[serde(default)]
-    skill_id: Option<String>,
-    #[serde(default)]
-    response_type: Option<String>,
-    #[serde(default)]
-    encryption_mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthOauthIntegrationTokensParams {
-    integration_id: String,
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthOauthFetchClientKeyParams {
-    integration_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthOauthRevokeParams {
-    integration_id: String,
-}
-
 pub fn all_controller_schemas() -> Vec<ControllerSchema> {
     vec![
         schemas("auth_store_session"),
@@ -100,11 +69,6 @@ pub fn all_controller_schemas() -> Vec<ControllerSchema> {
         schemas("auth_store_provider_credentials"),
         schemas("auth_remove_provider_credentials"),
         schemas("auth_list_provider_credentials"),
-        schemas("auth_oauth_connect"),
-        schemas("auth_oauth_list_integrations"),
-        schemas("auth_oauth_fetch_integration_tokens"),
-        schemas("auth_oauth_fetch_client_key"),
-        schemas("auth_oauth_revoke_integration"),
     ]
 }
 
@@ -149,26 +113,6 @@ pub fn all_registered_controllers() -> Vec<RegisteredController> {
         RegisteredController {
             schema: schemas("auth_list_provider_credentials"),
             handler: handle_auth_list_provider_credentials,
-        },
-        RegisteredController {
-            schema: schemas("auth_oauth_connect"),
-            handler: handle_auth_oauth_connect,
-        },
-        RegisteredController {
-            schema: schemas("auth_oauth_list_integrations"),
-            handler: handle_auth_oauth_list_integrations,
-        },
-        RegisteredController {
-            schema: schemas("auth_oauth_fetch_integration_tokens"),
-            handler: handle_auth_oauth_fetch_integration_tokens,
-        },
-        RegisteredController {
-            schema: schemas("auth_oauth_fetch_client_key"),
-            handler: handle_auth_oauth_fetch_client_key,
-        },
-        RegisteredController {
-            schema: schemas("auth_oauth_revoke_integration"),
-            handler: handle_auth_oauth_revoke_integration,
         },
     ]
 }
@@ -257,52 +201,6 @@ pub fn schemas(function: &str) -> ControllerSchema {
             description: "List stored provider credentials.",
             inputs: vec![optional_string("provider", "Optional provider filter.")],
             outputs: vec![json_output("profiles", "Listed provider credentials.")],
-        },
-        "auth_oauth_connect" => ControllerSchema {
-            namespace: "auth",
-            function: "oauth_connect",
-            description: "Create OAuth connect URL for provider.",
-            inputs: vec![
-                required_string("provider", "Provider id."),
-                optional_string("skillId", "Optional skill id."),
-                optional_string("responseType", "Optional OAuth response type."),
-                optional_string("encryptionMode", "Optional encryption mode ('encrypted')."),
-            ],
-            outputs: vec![json_output("result", "OAuth connect payload.")],
-        },
-        "auth_oauth_list_integrations" => ControllerSchema {
-            namespace: "auth",
-            function: "oauth_list_integrations",
-            description: "List OAuth integrations for current session.",
-            inputs: vec![],
-            outputs: vec![json_output("integrations", "OAuth integration list.")],
-        },
-        "auth_oauth_fetch_integration_tokens" => ControllerSchema {
-            namespace: "auth",
-            function: "oauth_fetch_integration_tokens",
-            description: "Fetch integration handoff tokens.",
-            inputs: vec![
-                required_string("integrationId", "Integration id."),
-                required_string("key", "Encryption key."),
-            ],
-            outputs: vec![json_output("tokens", "Integration tokens handoff payload.")],
-        },
-        "auth_oauth_fetch_client_key" => ControllerSchema {
-            namespace: "auth",
-            function: "oauth_fetch_client_key",
-            description: "Fetch one-time client key share for an encrypted OAuth integration.",
-            inputs: vec![required_string(
-                "integrationId",
-                "Integration id (24-char hex).",
-            )],
-            outputs: vec![json_output("result", "Client key share payload (base64).")],
-        },
-        "auth_oauth_revoke_integration" => ControllerSchema {
-            namespace: "auth",
-            function: "oauth_revoke_integration",
-            description: "Revoke OAuth integration.",
-            inputs: vec![required_string("integrationId", "Integration id.")],
-            outputs: vec![json_output("result", "Integration revoke result.")],
         },
         _ => ControllerSchema {
             namespace: "auth",
@@ -441,73 +339,6 @@ fn handle_auth_list_provider_credentials(params: Map<String, Value>) -> Controll
         to_json(
             crate::openhuman::credentials::rpc::list_provider_credentials(&config, provider_filter)
                 .await?,
-        )
-    })
-}
-
-fn handle_auth_oauth_connect(params: Map<String, Value>) -> ControllerFuture {
-    Box::pin(async move {
-        let config = config_rpc::load_config_with_timeout().await?;
-        let payload = deserialize_params::<AuthOauthConnectParams>(params)?;
-        to_json(
-            crate::openhuman::credentials::rpc::oauth_connect(
-                &config,
-                payload.provider.trim(),
-                payload.skill_id.as_deref().map(str::trim),
-                payload.response_type.as_deref().map(str::trim),
-                payload.encryption_mode.as_deref().map(str::trim),
-            )
-            .await?,
-        )
-    })
-}
-
-fn handle_auth_oauth_list_integrations(_params: Map<String, Value>) -> ControllerFuture {
-    Box::pin(async move {
-        let config = config_rpc::load_config_with_timeout().await?;
-        to_json(crate::openhuman::credentials::rpc::oauth_list_integrations(&config).await?)
-    })
-}
-
-fn handle_auth_oauth_fetch_integration_tokens(params: Map<String, Value>) -> ControllerFuture {
-    Box::pin(async move {
-        let config = config_rpc::load_config_with_timeout().await?;
-        let payload = deserialize_params::<AuthOauthIntegrationTokensParams>(params)?;
-        to_json(
-            crate::openhuman::credentials::rpc::oauth_fetch_integration_tokens(
-                &config,
-                payload.integration_id.trim(),
-                payload.key.trim(),
-            )
-            .await?,
-        )
-    })
-}
-
-fn handle_auth_oauth_fetch_client_key(params: Map<String, Value>) -> ControllerFuture {
-    Box::pin(async move {
-        let config = config_rpc::load_config_with_timeout().await?;
-        let payload = deserialize_params::<AuthOauthFetchClientKeyParams>(params)?;
-        to_json(
-            crate::openhuman::credentials::rpc::oauth_fetch_client_key(
-                &config,
-                payload.integration_id.trim(),
-            )
-            .await?,
-        )
-    })
-}
-
-fn handle_auth_oauth_revoke_integration(params: Map<String, Value>) -> ControllerFuture {
-    Box::pin(async move {
-        let config = config_rpc::load_config_with_timeout().await?;
-        let payload = deserialize_params::<AuthOauthRevokeParams>(params)?;
-        to_json(
-            crate::openhuman::credentials::rpc::oauth_revoke_integration(
-                &config,
-                payload.integration_id.trim(),
-            )
-            .await?,
         )
     })
 }

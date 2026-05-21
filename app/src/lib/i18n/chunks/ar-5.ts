@@ -161,42 +161,6 @@ const ar5: TranslationMap = {
   'settings.localModel.status.triggering': 'جارٍ التشغيل...',
   'settings.localModel.status.unavailable': 'غير متاح',
   'settings.localModel.status.working': 'جارٍ العمل...',
-  'settings.developerMenu.ai.title': 'إعدادات الذكاء الاصطناعي',
-  'settings.developerMenu.ai.desc': 'مزودو السحابة، ونماذج Ollama المحلية، والتوجيه لكل عبء عمل',
-  'settings.developerMenu.screenAwareness.title': 'الوعي بالشاشة',
-  'settings.developerMenu.screenAwareness.desc':
-    'أذونات التقاط الشاشة، وسياسة المراقبة، وعناصر التحكم في الجلسة',
-  'settings.developerMenu.messagingChannels.title': 'قنوات المراسلة',
-  'settings.developerMenu.messagingChannels.desc':
-    'تكوين أوضاع مصادقة Telegram/Discord وتوجيه القناة الافتراضي',
-  'settings.developerMenu.tools.title': 'الأدوات',
-  'settings.developerMenu.tools.desc':
-    'تفعيل أو تعطيل الإمكانات التي يمكن لـ OpenHuman استخدامها نيابةً عنك',
-  'settings.developerMenu.agentChat.title': 'دردشة الوكيل',
-  'settings.developerMenu.agentChat.desc': 'اختبار محادثة الوكيل مع تجاوزات النموذج ودرجة الحرارة',
-  'settings.developerMenu.cronJobs.title': 'مهام Cron',
-  'settings.developerMenu.cronJobs.desc': 'عرض وتكوين المهام المجدولة لمهارات وقت التشغيل',
-  'settings.developerMenu.localModelDebug.title': 'تصحيح النموذج المحلي',
-  'settings.developerMenu.localModelDebug.desc':
-    'إعدادات Ollama، وتنزيلات الأصول، واختبارات النموذج، والتشخيصات',
-  'settings.developerMenu.webhooks.title': 'خطافات الويب',
-  'settings.developerMenu.webhooks.desc':
-    'فحص تسجيلات خطافات الويب وقت التشغيل وسجلات الطلبات الملتقطة',
-  'settings.developerMenu.intelligence.title': 'الذكاء',
-  'settings.developerMenu.intelligence.desc':
-    'مساحة عمل الذاكرة، ومحرك اللاوعي، والأحلام، والإعدادات',
-  'settings.developerMenu.notificationRouting.title': 'توجيه الإشعارات',
-  'settings.developerMenu.notificationRouting.desc':
-    'تقييم الأهمية بالذكاء الاصطناعي وتصعيد المنسق لتنبيهات التكامل',
-  'settings.developerMenu.composeioTriggers.title': 'مشغلات ComposeIO',
-  'settings.developerMenu.composeioTriggers.desc': 'عرض سجل مشغلات ComposeIO والأرشيف',
-  'settings.developerMenu.composioRouting.title': 'توجيه Composio (الوضع المباشر)',
-  'settings.developerMenu.composioRouting.desc':
-    'استخدم مفتاح Composio API الخاص بك ووجّه الاستدعاءات مباشرةً إلى backend.composio.dev',
-  'settings.developerMenu.integrationTriggers.title': 'مشغلات التكامل',
-  'settings.developerMenu.integrationTriggers.desc':
-    'تكوين إعدادات فرز الذكاء الاصطناعي لمشغلات تكامل Composio',
-  'settings.appearance.menuDesc': 'اختر الفاتح أو الداكن أو مطابقة سمة النظام',
   'settings.mascot.active': 'نشط',
   'settings.mascot.characterDesc': 'وصف الشخصية',
   'settings.mascot.characterHeading': 'عنوان الشخصية',
@@ -204,8 +168,6 @@ const ar5: TranslationMap = {
   'settings.mascot.colorHeading': 'عنوان اللون',
   'settings.mascot.loadingLibrary': 'جارٍ تحميل مكتبة OpenHuman…',
   'settings.mascot.localDefault': 'OpenHuman المحلي (افتراضي)',
-  'settings.mascot.menuTitle': 'التميمة',
-  'settings.mascot.menuDesc': 'اختر لون التميمة المستخدم في جميع أنحاء التطبيق',
   'settings.mascot.noCharacters': 'لا توجد شخصيات OpenHuman متاحة بعد',
   'settings.mascot.noColorVariants': 'لا توجد ألوان متاحة',
   'settings.mascot.voice.current': 'الحالي',
@@ -452,49 +414,6 @@ const ar5: TranslationMap = {
   'settings.localModel.status.ollamaDocs': 'وثائق Ollama',
   'settings.localModel.status.thenRetry':
     'للحصول على تعليمات الإعداد، ثم أعد المحاولة عندما يصبح وقت التشغيل قابلاً للوصول.',
-  'settings.appearance.title': 'Appearance',
-  'settings.appearance.themeHeading': 'Theme',
-  'settings.appearance.themeAria': 'Theme',
-  'settings.appearance.modeLight': 'Light',
-  'settings.appearance.modeLightDesc': 'Bright surfaces, dark text.',
-  'settings.appearance.modeDark': 'Dark',
-  'settings.appearance.modeDarkDesc': 'Dim surfaces, easier on the eyes after dusk.',
-  'settings.appearance.modeSystem': 'Match system',
-  'settings.appearance.modeSystemDesc': 'Follow your OS appearance setting.',
-  'settings.appearance.helperText':
-    'Dark mode switches the entire app — chat, settings, panels — to a dim palette. "Match system" follows your OS appearance and updates live.',
-  'settings.mascot.characterPreview': 'Preview',
-  'settings.mascot.characterStates': 'states',
-  'settings.mascot.characterVisemes': 'visemes',
-  'settings.mascot.colorAria': 'OpenHuman color',
-  'settings.mascot.colorBlack': 'Black',
-  'settings.mascot.colorBurgundy': 'Burgundy',
-  'settings.mascot.colorGreen': 'Green',
-  'settings.mascot.colorNavy': 'Navy',
-  'settings.mascot.colorYellow': 'Yellow',
-  'settings.mascot.libraryUnavailable': 'OpenHuman library unavailable',
-  'settings.mascot.title': 'OpenHuman',
-  'settings.developerMenu.mcpServer.title': 'MCP Server',
-  'settings.developerMenu.mcpServer.desc': 'Configure external MCP clients to connect to OpenHuman',
-  'settings.mcpServer.title': 'MCP Server',
-  'settings.mcpServer.toolsSectionTitle': 'Available Tools',
-  'settings.mcpServer.toolsSectionDesc':
-    'Tools exposed via the MCP stdio server when running openhuman-core mcp',
-  'settings.mcpServer.configSectionTitle': 'Client Configuration',
-  'settings.mcpServer.configSectionDesc':
-    'Select your MCP client to generate the correct configuration snippet',
-  'settings.mcpServer.copySnippet': 'Copy to Clipboard',
-  'settings.mcpServer.copied': 'Copied!',
-  'settings.mcpServer.openConfigFile': 'Open Config File',
-  'settings.mcpServer.binaryPathNotFound':
-    'OpenHuman binary not found. If running from source, build with: cargo build --bin openhuman-core',
-  'settings.mcpServer.openConfigError': 'Failed to open config file',
-  'settings.mcpServer.clientClaudeDesktop': 'Claude Desktop',
-  'settings.mcpServer.clientCursor': 'Cursor',
-  'settings.mcpServer.clientCodex': 'Codex',
-  'settings.mcpServer.clientZed': 'Zed',
-  'settings.mcpServer.configFilePath': 'Config file',
-  'settings.mcpServer.clientSelectorAriaLabel': 'MCP client selector',
 };
 
 export default ar5;

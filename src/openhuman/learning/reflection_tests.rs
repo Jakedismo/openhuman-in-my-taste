@@ -106,8 +106,6 @@ fn reflective_turn() -> TurnContext {
         }],
         turn_duration_ms: 2200,
         session_id: Some("session-1".into()),
-        agent_id: None,
-        entrypoint: None,
         iteration_count: 2,
     }
 }
@@ -333,8 +331,6 @@ async fn on_turn_complete_dedupes_reflections_across_heuristic_and_llm_paths() {
         tool_calls: Vec::new(),
         turn_duration_ms: 50,
         session_id: Some("dedupe".into()),
-        agent_id: None,
-        entrypoint: None,
         iteration_count: 1,
     };
     hook.on_turn_complete(&turn).await.unwrap();
@@ -408,8 +404,6 @@ async fn on_turn_complete_persists_heuristic_reflection_even_when_complexity_low
         tool_calls: Vec::new(),
         turn_duration_ms: 10,
         session_id: Some("s".into()),
-        agent_id: None,
-        entrypoint: None,
         iteration_count: 1,
     };
     // The LLM path is gated off by complexity, so the call returns Ok
@@ -467,8 +461,6 @@ async fn on_turn_complete_emits_candidates_to_buffer_for_heuristic_cues() {
         tool_calls: Vec::new(),
         turn_duration_ms: 10,
         session_id: Some("buffer-test".into()),
-        agent_id: None,
-        entrypoint: None,
         iteration_count: 1,
     };
     hook.on_turn_complete(&turn).await.unwrap();

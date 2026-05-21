@@ -6,6 +6,7 @@ pub mod cron;
 pub mod filesystem;
 pub mod memory;
 pub mod network;
+pub mod skill;
 pub mod system;
 pub mod whatsapp_data;
 
@@ -17,5 +18,6 @@ pub use cron::*;
 pub use filesystem::*;
 pub use memory::*;
 pub use network::*;
+pub use skill::*;
 pub use system::*;
 pub use whatsapp_data::*;

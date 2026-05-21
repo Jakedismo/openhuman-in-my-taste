@@ -1,17 +1,15 @@
 //! RPC-facing operations for the vault domain.
 
 use chrono::Utc;
-use futures::FutureExt;
 use uuid::Uuid;
 
 use crate::openhuman::config::Config;
 use crate::openhuman::memory::ops::{clear_namespace, ClearNamespaceParams};
 use crate::rpc::RpcOutcome;
 
-use super::state;
+use super::jobs;
 use super::store;
-use super::sync;
-use super::types::{Vault, VaultFile, VaultSyncState, VaultSyncStatus};
+use super::types::{Vault, VaultFile, VaultSyncJobHandle, VaultSyncJobSnapshot};
 
 /// Create a new vault pointing at a local folder.
 pub async fn vault_create(
@@ -141,126 +139,82 @@ pub async fn vault_remove(
     ))
 }
 
-/// Trigger a vault sync as a background task and return immediately.
+/// Enqueue an async vault sync. Returns immediately with a job
+/// handle the caller polls via [`vault_sync_status`].
 ///
-/// The caller should poll `vault_sync_status` to track progress and retrieve
-/// the final outcome.  Returns an error if a sync is already running for this
-/// vault so the caller can surface a user-friendly message instead of silently
-/// queuing a duplicate.
+/// Previously this RPC blocked until the entire directory walk
+/// completed — for a vault with ~16 supported files (HTML/MD) at
+/// roughly 1–2 minutes per file (chunking + embedding + tree
+/// extract jobs through a singleton ingest lock), that was a
+/// 20–30 minute synchronous RPC, with no per-file progress visible
+/// to the UI. The user reported "ingestion of the vault I added
+/// seems to have stopped based on my laptop being silent again"
+/// because the worker was draining the LLM extract queue between
+/// embed bursts and there was no surface for that. Decoupling
+/// surfaces the live state: the RPC enqueues, the registry's
+/// process-wide worker drains, and the UI polls
+/// [`vault_sync_status`] for progress + final report.
+///
+/// Coalesce: if a job is already pending/running for the same
+/// vault, the existing handle is returned (no duplicate worker
+/// spawn). Spam-clicking Sync is safe.
 pub async fn vault_sync(
     config: &Config,
     id: &str,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
+) -> Result<RpcOutcome<VaultSyncJobHandle>, String> {
     let id = id.trim();
     if id.is_empty() {
         return Err("vault_id must not be empty".to_string());
     }
-    let vault = store::get_vault(config, id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("vault not found: {id}"))?;
-
-    // Register in the state map; returns Err if already running.
-    let started_at_ms = Utc::now().timestamp_millis();
-    state::start(id, started_at_ms).map_err(|e| format!("sync already in progress: {e}"))?;
-
-    log::debug!(
-        "[vault] sync: background task spawned id={id} root={:?}",
-        vault.root_path,
+    log::debug!("[vault] sync: enqueue request id={id}");
+    let handle = jobs::enqueue(config, id).await?;
+    let msg = format!(
+        "vault sync enqueued — job_id={} vault_id={} status={}",
+        handle.job_id,
+        handle.vault_id,
+        handle.status.as_str()
     );
-
-    // Clone what the background task needs — Config is Clone (derives it).
-    let config_clone = config.clone();
-    let vault_id = id.to_string();
-
-    tokio::spawn(async move {
-        log::debug!("[vault] sync: background task running id={vault_id}");
-
-        // Wrap the work in catch_unwind so a panic inside sync_vault cannot leave
-        // the vault state permanently stuck in `Running`.  Without this guard a
-        // panic would unwind the task, the state map entry would never be updated,
-        // and every subsequent sync attempt would be rejected with "already in progress"
-        // until the app is restarted.
-        let result =
-            std::panic::AssertUnwindSafe(async { sync::sync_vault(&config_clone, &vault).await })
-                .catch_unwind()
-                .await;
-
-        match result {
-            Ok(report) => {
-                let success = report.failed == 0;
-                let finished_at_ms = Utc::now().timestamp_millis();
-
-                // Write final counters back into the state map.
-                state::update_progress(&vault_id, |s| {
-                    s.status = if success {
-                        VaultSyncStatus::Completed
-                    } else {
-                        VaultSyncStatus::Failed
-                    };
-                    s.finished_at_ms = Some(finished_at_ms);
-                    s.ingested = report.ingested;
-                    s.unchanged = report.unchanged;
-                    s.removed = report.removed;
-                    s.failed = report.failed;
-                    s.skipped_unsupported = report.skipped_unsupported;
-                    s.scanned = report.scanned;
-                    s.duration_ms = report.duration_ms;
-                    s.errors = report.errors.clone();
-                });
-
-                log::debug!(
-                    "[vault] sync: background task done id={vault_id} ingested={} failed={} duration_ms={}",
-                    report.ingested,
-                    report.failed,
-                    report.duration_ms,
-                );
-            }
-            Err(_) => {
-                log::error!(
-                    "[vault] sync: background task panicked id={vault_id} — marking state as Failed"
-                );
-                state::update_progress(&vault_id, |s| {
-                    s.status = VaultSyncStatus::Failed;
-                    s.errors = vec!["sync task panicked unexpectedly".to_string()];
-                });
-            }
-        }
-    });
-
-    Ok(RpcOutcome::single_log(
-        serde_json::json!({ "status": "started", "vault_id": id }),
-        format!("vault sync started in background: {id}"),
-    ))
+    Ok(RpcOutcome::single_log(handle, msg))
 }
 
-/// Return the current sync progress for a vault.
+/// Read the current state of a vault sync job. Returns `None` when
+/// the job id is unknown (typo, or process restart cleared the
+/// in-memory registry).
 ///
-/// Returns an `Idle` state if no sync has ever run for this vault.
-pub async fn vault_sync_status(id: &str) -> Result<RpcOutcome<VaultSyncState>, String> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Err("vault_id must not be empty".to_string());
+/// While the job is `Running`, `processed` / `current_file` /
+/// `errors` advance with each file. Once `Completed` or `Failed`,
+/// `report` carries the final `VaultSyncReport` and the job's
+/// vault slot is released so a subsequent enqueue starts a fresh
+/// job.
+pub async fn vault_sync_status(
+    _config: &Config,
+    job_id: &str,
+) -> Result<RpcOutcome<Option<VaultSyncJobSnapshot>>, String> {
+    let job_id = job_id.trim();
+    if job_id.is_empty() {
+        return Err("job_id must not be empty".to_string());
     }
-    let st = state::get(id).unwrap_or_else(|| VaultSyncState {
-        vault_id: id.to_string(),
-        status: VaultSyncStatus::Idle,
-        scanned: 0,
-        ingested: 0,
-        unchanged: 0,
-        removed: 0,
-        failed: 0,
-        skipped_unsupported: 0,
-        total: 0,
-        started_at_ms: 0,
-        finished_at_ms: None,
-        duration_ms: 0,
-        errors: vec![],
-    });
-    log::debug!(
-        "[vault] sync_status: id={id} status={:?} ingested={} total={}",
-        st.status,
-        st.ingested,
-        st.total,
-    );
-    Ok(RpcOutcome::single_log(st, "vault sync status"))
+    let snap = jobs::snapshot(job_id);
+    let msg = match snap.as_ref() {
+        Some(s) => format!(
+            "vault sync status job_id={} status={} processed={}",
+            s.job_id,
+            s.status.as_str(),
+            s.processed
+        ),
+        None => format!("vault sync status unknown job_id={job_id}"),
+    };
+    Ok(RpcOutcome::single_log(snap, msg))
+}
+
+/// Enqueue a sync job for every registered vault. Per-vault
+/// coalesce still applies, so calling this twice in a row returns
+/// the same handles for any already-active jobs.
+pub async fn vault_sync_all(
+    config: &Config,
+) -> Result<RpcOutcome<Vec<VaultSyncJobHandle>>, String> {
+    log::debug!("[vault] sync_all: enqueue request");
+    let handles = jobs::enqueue_all(config).await?;
+    let msg = format!("vault sync_all enqueued {} job(s)", handles.len());
+    Ok(RpcOutcome::single_log(handles, msg))
 }

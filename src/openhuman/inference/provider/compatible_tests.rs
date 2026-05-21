@@ -215,6 +215,69 @@ fn parse_chat_response_body_reports_sanitized_snippet() {
 }
 
 #[test]
+fn parse_chat_response_body_salvages_responses_api_shape() {
+    // LM Studio (with certain reasoning models) returns the
+    // `/v1/responses` envelope shape even on the `/v1/chat/completions`
+    // endpoint — body lacks `choices` but has `output_text`. The
+    // chat-completions parser should salvage this instead of erroring
+    // with "missing field `choices`".
+    let body = r#"{
+        "id": "resp-1",
+        "object": "response",
+        "output_text": "Hello from LM Studio",
+        "output": []
+    }"#;
+    let parsed = parse_chat_response_body("lmstudio", body)
+        .expect("should salvage the responses-api shape");
+    assert_eq!(parsed.choices.len(), 1);
+    assert_eq!(
+        parsed.choices[0].message.effective_content(),
+        "Hello from LM Studio"
+    );
+}
+
+#[test]
+fn parse_chat_response_body_salvages_output_array_responses_shape() {
+    // Alternate `/v1/responses` shape — text lives in
+    // `output[].content[].text` (the streaming-style envelope) rather
+    // than `output_text`. Salvage path must also handle this.
+    let body = r#"{
+        "id": "resp-2",
+        "output_text": null,
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": "Salvaged text"}
+                ]
+            }
+        ]
+    }"#;
+    let parsed = parse_chat_response_body("lmstudio", body)
+        .expect("should salvage the output[]-shaped responses payload");
+    assert_eq!(parsed.choices.len(), 1);
+    assert_eq!(parsed.choices[0].message.effective_content(), "Salvaged text");
+}
+
+#[test]
+fn parse_chat_response_body_missing_choices_includes_actionable_hint() {
+    // When the body is neither a chat-completions nor a responses-api
+    // shape, the error must mention `choices` and include the LM Studio
+    // hint so the operator knows what to check.
+    let body = r#"{"id":"x","object":"chat.completion"}"#;
+    let err =
+        parse_chat_response_body("lmstudio", body).expect_err("unrecognised shape should error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing field `choices`"),
+        "expected the raw serde 'missing field choices' error to surface, got: {msg}"
+    );
+    assert!(
+        msg.contains("LM Studio") || msg.contains("reasoning models"),
+        "expected the actionable hint about LM Studio / reasoning models, got: {msg}"
+    );
+}
+
+#[test]
 fn parse_responses_response_body_reports_sanitized_snippet() {
     let body = r#"{"output_text":123,"api_key":"sk-another-secret"}"#;
     let err = parse_responses_response_body("custom", body).expect_err("payload should fail");
@@ -1200,65 +1263,5 @@ fn parse_provider_tool_call_from_value_guards_malformed_arguments() {
     assert_eq!(
         call.arguments, "{}",
         "malformed arguments string must be normalised to {{}} via the first-path guard"
-    );
-}
-
-#[test]
-fn custom_openai_provider_has_no_responses_fallback() {
-    let p = OpenAiCompatibleProvider::new_no_responses_fallback(
-        "custom_openai",
-        "http://localhost:11434/v1",
-        Some("sk-test"),
-        AuthStyle::Bearer,
-    );
-    assert!(
-        !p.supports_responses_fallback,
-        "custom_openai must not attempt the /v1/responses fallback"
-    );
-}
-
-#[test]
-fn enrich_404_message_adds_hint_when_no_fallback() {
-    let p = OpenAiCompatibleProvider::new_no_responses_fallback(
-        "custom_openai",
-        "http://localhost:11434/v1",
-        Some("sk-test"),
-        AuthStyle::Bearer,
-    );
-    let base = "custom_openai API error (404 Not Found): model not found".to_string();
-    let result = p.enrich_404_message(base.clone(), reqwest::StatusCode::NOT_FOUND);
-    assert!(
-        result.starts_with(&base),
-        "must preserve original error prefix: {result}"
-    );
-    assert!(
-        result.contains("check that your endpoint URL is correct"),
-        "must contain user-actionable hint: {result}"
-    );
-
-    // Non-404 status should NOT add the hint
-    let result_200 = p.enrich_404_message(
-        "custom_openai API error (503 Service Unavailable): overloaded".to_string(),
-        reqwest::StatusCode::SERVICE_UNAVAILABLE,
-    );
-    assert!(
-        !result_200.contains("check that your endpoint URL"),
-        "must not add hint for non-404: {result_200}"
-    );
-
-    // Provider with fallback enabled should NOT add the hint even on 404
-    let p2 = OpenAiCompatibleProvider::new(
-        "openai",
-        "https://api.openai.com/v1",
-        Some("sk-real"),
-        AuthStyle::Bearer,
-    );
-    let result_with_fallback = p2.enrich_404_message(
-        "openai API error (404 Not Found): model not found".to_string(),
-        reqwest::StatusCode::NOT_FOUND,
-    );
-    assert_eq!(
-        result_with_fallback, "openai API error (404 Not Found): model not found",
-        "must not add hint when fallback is enabled: {result_with_fallback}"
     );
 }

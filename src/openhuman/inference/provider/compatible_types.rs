@@ -28,7 +28,7 @@ pub(crate) struct Message {
     pub(crate) content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct NativeChatRequest {
     pub(crate) model: String,
     pub(crate) messages: Vec<NativeMessage>,
@@ -63,12 +63,12 @@ pub(crate) struct NativeChatRequest {
 /// OpenAI-spec `stream_options` payload (sent on the wire). Distinct from
 /// `crate::openhuman::inference::provider::traits::StreamOptions`, which is the
 /// caller-side knob set on `ChatRequest` to toggle agent streaming.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct OpenAiStreamOptions {
     pub(crate) include_usage: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct NativeMessage {
     pub(crate) role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +87,46 @@ pub(crate) struct ResponsesRequest {
     pub(crate) instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stream: Option<bool>,
+    /// Reasoning effort knob for gpt-5 / o-series models on the
+    /// `/v1/responses` endpoint. Wire format is
+    /// `{ "effort": "minimal" | "low" | "medium" | "high" }`.
+    /// Omitted for non-reasoning models — the API rejects it there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning: Option<ResponsesReasoning>,
+}
+
+/// Reasoning-effort hint passed alongside a `/v1/responses` call for
+/// gpt-5 / o-series models. See OpenAI's Responses API docs.
+#[derive(Debug, Serialize)]
+pub(crate) struct ResponsesReasoning {
+    pub(crate) effort: String,
+}
+
+impl ResponsesReasoning {
+    /// Default effort to send for models that accept the field.
+    /// `medium` matches the user-facing default Jokke locked in for
+    /// the local-first build.
+    pub(crate) fn default_for(model: &str) -> Option<Self> {
+        if is_reasoning_model(model) {
+            Some(Self {
+                effort: "medium".to_string(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// True when the model name belongs to a family that accepts a
+/// `reasoning.effort` parameter on `/v1/responses`. Matches gpt-5*
+/// (current default), the o-series (o1, o3, o4-mini, …), and the
+/// gpt-4.1 reasoning-tuned variants OpenAI shipped post-gpt-5.
+pub(crate) fn is_reasoning_model(model: &str) -> bool {
+    let lowered = model.trim().to_ascii_lowercase();
+    lowered.starts_with("gpt-5")
+        || lowered.starts_with("o1")
+        || lowered.starts_with("o3")
+        || lowered.starts_with("o4")
 }
 
 #[derive(Debug, Serialize)]
@@ -206,7 +246,7 @@ impl ResponseMessage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ToolCall {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) id: Option<String>,
@@ -215,7 +255,7 @@ pub(crate) struct ToolCall {
     pub(crate) function: Option<Function>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct Function {
     pub(crate) name: Option<String>,
     pub(crate) arguments: Option<serde_json::Value>,

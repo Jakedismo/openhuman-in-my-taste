@@ -2,10 +2,6 @@ import { useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useT } from '../lib/i18n/I18nContext';
-// [#1123] Commented out — welcome-agent onboarding replaced by Joyride walkthrough
-// import { isWelcomeLocked } from '../lib/coreState/store';
-import { useCoreState } from '../providers/CoreStateProvider';
-import { selectCompanionSessionActive } from '../store/companionSlice';
 import { useAppSelector } from '../store/hooks';
 import { selectUnreadCount } from '../store/notificationSlice';
 import { isAccountsFullscreen } from '../utils/accountsFullscreen';
@@ -132,17 +128,15 @@ const BottomTabBar = () => {
   const tabs = useMemo(() => makeTabs(t), [t]);
   const location = useLocation();
   const navigate = useNavigate();
-  const { snapshot } = useCoreState();
-  const token = snapshot.sessionToken;
   const [revealed, setRevealed] = useState(false);
 
   const activeAccountId = useAppSelector(state => state.accounts.activeAccountId);
   const unreadCount = useAppSelector(state => selectUnreadCount(state.notifications.items));
-  const companionActive = useAppSelector(selectCompanionSessionActive);
 
+  // `/` is the redirect-to-/home stub; `/login` is the legacy login
+  // path that no longer exists. Either way, no tab bar.
   const hiddenPaths = ['/', '/login'];
   if (
-    !token ||
     hiddenPaths.some(path => location.pathname === path || location.pathname.startsWith(`${path}/`))
   ) {
     return null;
@@ -180,10 +174,7 @@ const BottomTabBar = () => {
   };
 
   return (
-    // pointer-events-none on the full-width shell so transparent areas (e.g.
-    // beside the centered nav pill) do not steal clicks from sticky footers
-    // such as Settings SaveBar. Only the <nav> pill re-enables hits.
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-50">
+    <div className="absolute inset-x-0 bottom-0 z-50">
       {/* Hover strip — only matters when collapsed; provides a 12px bottom
           edge the user can mouse into to reveal the bar again. */}
       {collapsed && (
@@ -206,7 +197,6 @@ const BottomTabBar = () => {
           {tabs.map(tab => {
             const active = isActive(tab.path);
             const showBadge = tab.id === 'notifications' && unreadCount > 0;
-            const showCompanionDot = tab.id === 'settings' && companionActive;
             // data-walkthrough attributes for the Joyride walkthrough steps.
             // Maps tab ids to their walkthrough target names.
             const walkthroughAttr: Record<string, string> = {
@@ -236,9 +226,6 @@ const BottomTabBar = () => {
                     <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 rounded-full bg-coral-500 text-[9px] font-bold text-white flex items-center justify-center leading-none">
                       {unreadCount > 9 ? '9+' : unreadCount}
                     </span>
-                  )}
-                  {showCompanionDot && (
-                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
                   )}
                 </span>
                 <span

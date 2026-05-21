@@ -29,7 +29,9 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { useT } from '../../lib/i18n/I18nContext';
 import type { ToastNotification } from '../../types/intelligence';
-import { openUrl, revealPath } from '../../utils/openUrl';
+import { openPath } from '@tauri-apps/plugin-opener';
+
+import { openUrl } from '../../utils/openUrl';
 import {
   type GraphExportResponse,
   type GraphMode,
@@ -61,30 +63,57 @@ interface MemoryWorkspaceProps {
 const SYNCABLE_TOOLKITS: ReadonlySet<string> = new Set(['gmail']);
 
 /**
- * Trigger the `obsidian://open?path=<abs>` deep link via the OS shell.
+ * Open the memory-tree content folder.
  *
- * We deliberately route through `openUrl` (which delegates to
- * `tauri-plugin-opener`) rather than setting `window.location.href`.
- * The webview-host intent handler intercepts in-app navigations and
- * does NOT punt custom schemes to the OS, so a direct
- * `window.location.href = "obsidian://…"` either no-ops or navigates
- * the React app away from the Memory tab. The opener plugin hands the
- * URL straight to the system handler so Obsidian launches as a
- * separate process.
+ * Previous behaviour fired only the `obsidian://open?path=<abs>` deep
+ * link. That URI scheme requires the directory to be already
+ * registered in Obsidian's vault picker — the deep link cannot
+ * register a new vault, it can only open vaults Obsidian already
+ * knows about. Users who clicked the button on a fresh install saw
+ * Obsidian pop up with "Unable to find a vault for the URL …" even
+ * though the folder existed on disk and was correctly seeded with
+ * `.obsidian/graph.json` + `types.json`.
  *
- * Returns `null` on success, or the underlying error otherwise. The
- * caller decides how to surface the outcome (toast, fallback, …); an
- * unsurfaced no-op is the bug #2281 originally reported.
+ * New behaviour: open the folder in the OS file manager
+ * (Finder / Explorer / xdg-open). The user sees the chunks /
+ * summaries / wiki tree immediately. If they want the Obsidian
+ * graph-view, they can drag the folder onto Obsidian once
+ * ("Open folder as vault") and the deep link will work on every
+ * subsequent click. We also fire the obsidian:// URL in parallel —
+ * it's a no-op for unregistered vaults but lights up the
+ * already-registered case with no extra round-trip.
+ *
+ * `openPath` from `tauri-plugin-opener` is the cross-platform
+ * filesystem-path opener; falls back to `xdg-open` / `start` /
+ * `open` per platform.
  */
-async function openVaultInObsidian(contentRootAbs: string): Promise<unknown | null> {
-  const url = `obsidian://open?path=${encodeURIComponent(contentRootAbs)}`;
-  console.debug('[ui-flow][memory-workspace] open vault in Obsidian url=%s', url);
+async function openVaultContentFolder(contentRootAbs: string): Promise<void> {
+  console.debug(
+    '[ui-flow][memory-workspace] open vault content folder path=%s',
+    contentRootAbs
+  );
+  // Open the folder in the OS file manager — always works.
   try {
-    await openUrl(url);
-    return null;
+    await openPath(contentRootAbs);
   } catch (err) {
-    console.error('[ui-flow][memory-workspace] openUrl failed', err);
-    return err;
+    console.error(
+      '[ui-flow][memory-workspace] openPath failed for %s',
+      contentRootAbs,
+      err
+    );
+  }
+  // Best-effort: also try the Obsidian deep link. If Obsidian has the
+  // vault registered, this lights up the graph-view alongside Finder.
+  // If not, Obsidian shows its own "Unable to find a vault" toast
+  // (cosmetic only — Finder still opens the folder).
+  try {
+    const url = `obsidian://open?path=${encodeURIComponent(contentRootAbs)}`;
+    await openUrl(url);
+  } catch (err) {
+    console.debug(
+      '[ui-flow][memory-workspace] obsidian deep-link skipped (non-fatal): %o',
+      err
+    );
   }
 }
 
@@ -240,48 +269,6 @@ export function MemoryWorkspace({ onToast }: MemoryWorkspaceProps) {
     }
   }, [onToast, mode]);
 
-  // #2281: clicking "View Vault" must never silently no-op. Some
-  // users don't have Obsidian installed, in which case the OS shell
-  // accepts the `obsidian://` URL and does nothing visible. We always
-  // emit a toast that names the vault path AND offers a "Reveal
-  // Folder" action so the user has an OS-native way to inspect the
-  // vault even without Obsidian.
-  const handleViewVault = useCallback(
-    async (contentRootAbs: string) => {
-      const revealHandler = () => {
-        void (async () => {
-          try {
-            await revealPath(contentRootAbs);
-          } catch (err) {
-            console.error('[ui-flow][memory-workspace] revealPath failed', err);
-            onToast?.({
-              type: 'error',
-              title: t('workspace.revealVaultFailed'),
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        })();
-      };
-      const err = await openVaultInObsidian(contentRootAbs);
-      if (err === null) {
-        onToast?.({
-          type: 'info',
-          title: t('workspace.openingVaultTitle'),
-          message: `${t('workspace.openingVaultMessage')} ${contentRootAbs}`,
-          action: { label: t('workspace.revealFolder'), handler: revealHandler },
-        });
-      } else {
-        onToast?.({
-          type: 'error',
-          title: t('workspace.openVaultFailedTitle'),
-          message: `${t('workspace.openVaultFailedMessage')} ${contentRootAbs}`,
-          action: { label: t('workspace.revealFolder'), handler: revealHandler },
-        });
-      }
-    },
-    [onToast, t]
-  );
-
   return (
     <div className="space-y-4" data-testid="memory-workspace">
       <MemorySources syncableToolkits={SYNCABLE_TOOLKITS} pollIntervalMs={5000} onToast={onToast} />
@@ -358,7 +345,7 @@ export function MemoryWorkspace({ onToast }: MemoryWorkspaceProps) {
           {graph && (
             <button
               type="button"
-              onClick={() => void handleViewVault(graph.content_root_abs)}
+              onClick={() => void openVaultContentFolder(graph.content_root_abs)}
               data-testid="memory-open-in-obsidian"
               className="inline-flex items-center gap-2 rounded-lg
                          bg-violet-500 px-4 py-2 text-sm font-semibold text-white

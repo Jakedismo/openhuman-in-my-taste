@@ -71,6 +71,60 @@ pub struct MemoryConfig {
     /// milliseconds. Defaults to 5000 ms.
     #[serde(default)]
     pub agentmemory_timeout_ms: Option<u64>,
+
+    /// Selects how the namespace knowledge graph is populated during
+    /// `UnifiedMemory::ingest_document` / `extract_graph`. See
+    /// [`GraphExtractionMode`] for the per-variant semantics. Default
+    /// `Auto` — LLM when a `memory_provider` is configured, heuristic
+    /// otherwise. Soft-falls back to heuristic on any LLM failure so
+    /// ingest stays write-through.
+    #[serde(default)]
+    pub graph_extraction: GraphExtractionMode,
+}
+
+/// Strategy for populating the namespace knowledge graph during
+/// document ingestion.
+///
+/// The heuristic path (`memory::ingestion::parse::parse_document`) extracts
+/// entities and relations from email-header / markdown-heading / explicit
+/// owner/preference regex patterns — high precision on structured text,
+/// low recall on arbitrary vault prose or source code. The LLM path
+/// (`memory::ingestion::llm_extract::ChatBackedLlmGraphExtractor`) routes
+/// the chunk through the user's configured `memory_provider` workload
+/// and merges the model's `(subject, predicate, object)` output into the
+/// same accumulator the heuristic feeds.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphExtractionMode {
+    /// Only run the heuristic regex extractor. Keeps the legacy
+    /// behaviour for users who do not want their `memory_provider`
+    /// hit on every doc upsert.
+    Heuristic,
+    /// Always attempt the LLM extractor. Falls back to heuristic on
+    /// any failure (provider unreachable, timeout, malformed JSON).
+    Llm,
+    /// Default. Use the LLM when a `memory_provider` is configured
+    /// and a chat extractor is wired; otherwise heuristic. Same
+    /// soft-fallback as `Llm` on failure.
+    #[default]
+    Auto,
+}
+
+impl GraphExtractionMode {
+    /// Stable wire string for env vars / RPCs / logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Heuristic => "heuristic",
+            Self::Llm => "llm",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Whether this mode wants the LLM extractor invoked (subject to
+    /// availability — `Auto` only invokes when an extractor is wired).
+    pub fn wants_llm(self) -> bool {
+        matches!(self, Self::Llm | Self::Auto)
+    }
 }
 
 fn default_memory_backend() -> String {
@@ -82,16 +136,24 @@ fn default_true() -> bool {
 }
 
 fn default_embedding_provider() -> String {
-    // Default to the OpenHuman backend (Voyage-backed `embedding-v1`) so a
-    // fresh install works without requiring a local Ollama daemon. Users
-    // who want fully-local embeddings can flip this to "ollama" in
-    // `config.toml` or enable `local_ai.usage.embeddings = true`, which is
-    // wired into the memory factory via [`LocalAiConfig::use_local_for_embeddings`].
-    "cloud".into()
+    // Local-OAuth fork: the OpenHuman backend is gone, so the legacy
+    // `"cloud"` default (which built `OpenHumanCloudEmbedding` against
+    // the dead backend with the `embedding-v1` model) is no longer
+    // viable. Default to local Ollama — the user manages their own
+    // embedder via `ollama pull bge-m3` (or whichever model they
+    // configured under Settings → AI). The previous behaviour caused
+    // the legacy `embedding_provider = "cloud"` line to be re-injected
+    // into `config.toml` on every `Config::save()` round-trip even
+    // after the user had picked an Ollama model in the UI, because
+    // serde's `#[serde(default)]` filled blanks with the dead default
+    // and the next save persisted the zombie value.
+    "ollama".into()
 }
 fn default_embedding_model() -> String {
-    // Keep this in sync with `embeddings::cloud::DEFAULT_CLOUD_EMBEDDING_MODEL`.
-    "embedding-v1".into()
+    // Local-OAuth fork: matches `model_ids::DEFAULT_OLLAMA_EMBED_MODEL`
+    // (`bge-m3` — 1024-dim, compatible with the memory tree's on-disk
+    // format). Replaces the dead OpenHuman backend's `embedding-v1`.
+    "bge-m3".into()
 }
 fn default_embedding_dims() -> usize {
     // Keep this in sync with `embeddings::cloud::DEFAULT_CLOUD_EMBEDDING_DIMENSIONS`.
@@ -114,6 +176,7 @@ impl Default for MemoryConfig {
             agentmemory_url: None,
             agentmemory_secret: None,
             agentmemory_timeout_ms: None,
+            graph_extraction: GraphExtractionMode::default(),
         }
     }
 }
@@ -139,6 +202,7 @@ impl std::fmt::Debug for MemoryConfig {
                 &self.agentmemory_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("agentmemory_timeout_ms", &self.agentmemory_timeout_ms)
+            .field("graph_extraction", &self.graph_extraction)
             .finish()
     }
 }
@@ -186,7 +250,16 @@ impl LlmBackend {
 
 impl Default for LlmBackend {
     fn default() -> Self {
-        Self::Cloud
+        // Local-OAuth fork: the OpenHuman backend `summarization-v1`
+        // path is dead. The new local-first default keeps
+        // memory_tree's LLM calls on the workload factory (whose
+        // routing reads `memory_provider`), and the `Local` variant of
+        // this legacy enum is the only one that's still reachable —
+        // the `Cloud` variant is a zombie kept for back-compat
+        // deserialisation of older configs. Defaulting to `Local`
+        // stops `Config::save()` round-trips from re-injecting a dead
+        // `llm_backend = "cloud"` line.
+        Self::Local
     }
 }
 
@@ -194,13 +267,21 @@ fn default_llm_backend() -> LlmBackend {
     LlmBackend::default()
 }
 
-/// Default model identifier to use when `llm_backend = "cloud"`. Routed
-/// through the OpenHuman backend; keep in sync with the backend's
-/// summariser model registry.
+/// Legacy model identifier used by the dead OpenHuman backend chat
+/// surface. Kept as a constant because `embeddings/cloud.rs` and
+/// `memory/tree/chat/cloud.rs` still reference it from unreachable
+/// code paths and the test suite, but NOT used as a default in
+/// `MemoryTreeConfig::default()` anymore — the field is `None` so
+/// the line is omitted from a fresh `config.toml`.
 pub const DEFAULT_CLOUD_LLM_MODEL: &str = "summarization-v1";
 
 fn default_cloud_llm_model() -> Option<String> {
-    Some(DEFAULT_CLOUD_LLM_MODEL.to_string())
+    // Local-OAuth fork: emit no default so `Config::save()` does not
+    // write `cloud_llm_model = "summarization-v1"` back into
+    // config.toml on every round-trip. Users who genuinely want to
+    // pin a cloud model can set it explicitly; the empty default is
+    // the right baseline now that the OpenHuman backend is gone.
+    None
 }
 
 /// Phase 4 memory-tree configuration — embedding provider wiring for the
@@ -429,9 +510,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_default_is_cloud() {
-        assert_eq!(LlmBackend::default(), LlmBackend::Cloud);
-        assert_eq!(MemoryTreeConfig::default().llm_backend, LlmBackend::Cloud);
+    fn llm_default_is_local_in_local_oauth_fork() {
+        // The OpenHuman backend `summarization-v1` chat surface is dead;
+        // the `Cloud` variant is a zombie kept only for deserialising
+        // older configs. Defaulting to `Local` prevents `Config::save()`
+        // round-trips from re-injecting a dead `llm_backend = "cloud"`
+        // line into `config.toml`.
+        assert_eq!(LlmBackend::default(), LlmBackend::Local);
+        assert_eq!(MemoryTreeConfig::default().llm_backend, LlmBackend::Local);
     }
 
     #[test]
@@ -454,12 +540,18 @@ mod tests {
     }
 
     #[test]
-    fn cloud_llm_model_default_is_summarizer_v1() {
+    fn cloud_llm_model_default_is_none_in_local_oauth_fork() {
+        // The dead OpenHuman backend chat surface used
+        // `cloud_llm_model = "summarization-v1"`. In the local-OAuth
+        // fork we DO NOT want `Config::save()` round-trips to write
+        // that zombie line back, so the default is `None` and the
+        // field is omitted from a fresh `config.toml`. The constant
+        // `DEFAULT_CLOUD_LLM_MODEL` is kept (other dead modules still
+        // reference it) but no longer used as a default.
         let cfg = MemoryTreeConfig::default();
-        assert_eq!(
-            cfg.cloud_llm_model.as_deref(),
-            Some(DEFAULT_CLOUD_LLM_MODEL)
-        );
+        assert_eq!(cfg.cloud_llm_model, None);
+        // Constant itself unchanged for back-compat with unreachable
+        // `cloud.rs` fallback paths and existing tests over there.
         assert_eq!(DEFAULT_CLOUD_LLM_MODEL, "summarization-v1");
     }
 

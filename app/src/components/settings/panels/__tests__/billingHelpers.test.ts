@@ -29,24 +29,27 @@ describe('PLANS', () => {
     expect(free.discountPercent).toBe(0);
     expect(free.monthlyBudgetUsd).toBe(0);
     expect(free.weeklyBudgetUsd).toBe(0);
+    expect(free.fiveHourCapUsd).toBe(0);
   });
 
   it('should have BASIC plan aligned with backend config', () => {
     const basic = PLANS.find(p => p.tier === 'BASIC')!;
     expect(basic.monthlyPrice).toBe(19.99);
     expect(basic.annualPrice).toBe(199);
-    expect(basic.discountPercent).toBe(50);
+    expect(basic.discountPercent).toBe(20);
     expect(basic.monthlyBudgetUsd).toBe(20);
     expect(basic.weeklyBudgetUsd).toBe(10);
+    expect(basic.fiveHourCapUsd).toBe(3);
   });
 
   it('should have PRO plan aligned with backend config', () => {
     const pro = PLANS.find(p => p.tier === 'PRO')!;
     expect(pro.monthlyPrice).toBe(199.99);
     expect(pro.annualPrice).toBe(1799.99);
-    expect(pro.discountPercent).toBe(90);
+    expect(pro.discountPercent).toBe(40);
     expect(pro.monthlyBudgetUsd).toBe(199);
     expect(pro.weeklyBudgetUsd).toBe(99);
+    expect(pro.fiveHourCapUsd).toBe(30);
   });
 
   it('should have features for every plan', () => {
@@ -137,6 +140,7 @@ describe('displayPrice', () => {
       annualPrice: 480,
       monthlyBudgetUsd: 50,
       weeklyBudgetUsd: 25,
+      fiveHourCapUsd: 7.5,
       discountPercent: 30,
       features: [],
     };
@@ -181,6 +185,7 @@ describe('annualSavings', () => {
       annualPrice: 120, // 10 * 12, no discount
       monthlyBudgetUsd: 10,
       weeklyBudgetUsd: 5,
+      fiveHourCapUsd: 1.5,
       discountPercent: 20,
       features: [],
     };
@@ -195,6 +200,7 @@ describe('annualSavings', () => {
       annualPrice: 600, // 50% off
       monthlyBudgetUsd: 100,
       weeklyBudgetUsd: 50,
+      fiveHourCapUsd: 15,
       discountPercent: 40,
       features: [],
     };

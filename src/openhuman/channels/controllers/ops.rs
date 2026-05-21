@@ -265,11 +265,14 @@ pub async fn connect_channel(
             .await
             .map_err(|e| format!("failed to persist telegram config.toml: {e}"))?;
 
+        let spawned =
+            crate::openhuman::channels::runtime::listener_registry::rebuild("telegram", &persisted);
         tracing::info!(
             target: "openhuman::channels",
             allowed_users_count,
             mention_only,
-            "[telegram] connect_channel: wrote channels_config.telegram; restart core for listener to load token"
+            hot_reloaded = spawned,
+            "[telegram] connect_channel: wrote channels_config.telegram and rebuilt listener"
         );
     } else if channel_id == "discord" && auth_mode == ChannelAuthMode::BotToken {
         let bot_token = creds_map
@@ -323,6 +326,8 @@ pub async fn connect_channel(
             .await
             .map_err(|e| format!("failed to persist discord config.toml: {e}"))?;
 
+        let spawned =
+            crate::openhuman::channels::runtime::listener_registry::rebuild("discord", &persisted);
         tracing::info!(
             target: "openhuman::channels",
             has_guild_id = guild_id.is_some(),
@@ -330,7 +335,8 @@ pub async fn connect_channel(
             allowed_users_count,
             listen_to_bots,
             mention_only,
-            "[discord] connect_channel: wrote channels_config.discord; restart core for listener to load token"
+            hot_reloaded = spawned,
+            "[discord] connect_channel: wrote channels_config.discord and rebuilt listener"
         );
     }
 
@@ -366,6 +372,7 @@ pub async fn disconnect_channel(
             .map_err(|e| format!("failed to remove credentials: {e}"))?;
     }
 
+    let mut listener_id: Option<&'static str> = None;
     if channel_id == "telegram" && auth_mode == ChannelAuthMode::BotToken {
         let mut persisted = config.clone();
         if persisted.channels_config.telegram.take().is_some() {
@@ -378,6 +385,7 @@ pub async fn disconnect_channel(
                 "[telegram] disconnect_channel: cleared channels_config.telegram"
             );
         }
+        listener_id = Some("telegram");
     } else if channel_id == "discord" && auth_mode == ChannelAuthMode::BotToken {
         let mut persisted = config.clone();
         if persisted.channels_config.discord.take().is_some() {
@@ -390,6 +398,7 @@ pub async fn disconnect_channel(
                 "[discord] disconnect_channel: cleared channels_config.discord"
             );
         }
+        listener_id = Some("discord");
     } else if channel_id == "imessage" && auth_mode == ChannelAuthMode::ManagedDm {
         let mut persisted = config.clone();
         if persisted.channels_config.imessage.take().is_some() {
@@ -402,13 +411,31 @@ pub async fn disconnect_channel(
                 "[imessage] disconnect_channel: cleared channels_config.imessage"
             );
         }
+        listener_id = Some("imessage");
     }
+
+    // Tear down any live listener task so the bot stops polling
+    // immediately. Without this the existing supervisor would keep
+    // calling `getUpdates` with the now-removed token, blocking the
+    // next reconnect with a 409 conflict.
+    let aborted = if let Some(id) = listener_id {
+        crate::openhuman::channels::runtime::listener_registry::abort(id)
+    } else {
+        false
+    };
 
     Ok(RpcOutcome::single_log(
         json!({
             "channel": channel_id,
             "auth_mode": auth_mode,
             "disconnected": true,
+            "listener_aborted": aborted,
+            // Hot-reload covers inbound polling; outbound replies
+            // through subscribers that captured the old Arc at startup
+            // still need a process restart until channels_by_name
+            // becomes hot-swappable. Leave `restart_required` true so
+            // the UI's existing prompt continues to nudge users until
+            // that follow-up lands.
             "restart_required": true,
         }),
         format!("removed credentials for {}", provider_key),

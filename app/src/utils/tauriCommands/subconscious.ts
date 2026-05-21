@@ -42,8 +42,6 @@ export interface SubconsciousEscalation {
 
 export interface SubconsciousStatus {
   enabled: boolean;
-  provider_available: boolean;
-  provider_unavailable_reason: string | null;
   interval_minutes: number;
   last_tick_at: number | null;
   total_ticks: number;

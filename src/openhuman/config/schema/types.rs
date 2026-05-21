@@ -9,11 +9,6 @@ use std::path::PathBuf;
 /// Standard model identifiers matching the backend model registry.
 pub const MODEL_AGENTIC_V1: &str = "agentic-v1";
 pub const MODEL_REASONING_V1: &str = "reasoning-v1";
-/// Conversational tier — the orchestrator (user-facing chat agent) rides on
-/// this by default. Backend maps it to Kimi K2.6 Turbo on Fireworks (128k
-/// context, `supportsThinking: false`) — tuned for time-to-first-token so
-/// chat responses feel snappy.
-pub const MODEL_CHAT_V1: &str = "chat-v1";
 /// Low-latency chat tier. Backend maps this to Kimi K2.6 Turbo on
 /// Fireworks (128k context, `supportsThinking: false`) — tuned for
 /// time-to-first-token on conversational turns. See backend PR #760.
@@ -23,16 +18,23 @@ pub const MODEL_CHAT_V1: &str = "chat-v1";
 /// reasoning is needed.
 pub const MODEL_REASONING_QUICK_V1: &str = "reasoning-quick-v1";
 pub const MODEL_CODING_V1: &str = "coding-v1";
-/// Default model used when no explicit model is configured.
+/// Slug of the built-in OpenAI cloud-provider entry that gets seeded
+/// into [`Config::cloud_providers`] by default. The user stores their
+/// API key against this slug via `auth_store_provider_credentials`.
+pub const DEFAULT_OPENAI_SLUG: &str = "openai";
+
+/// Default chat model used when no explicit model is configured.
 ///
-/// Set to `reasoning-quick-v1` (Kimi K2.6 Turbo on Fireworks — low-latency,
-/// 128k context, tuned for time-to-first-token). `chat-v1` was the previous
-/// value here but was retired from the backend strict model registry; new
-/// session threads that sent `chat-v1` received a 400 error. Existing threads
-/// had it silently remapped to `reasoning-v1` by the backend, but sub-agent
-/// spawns (new threads) failed. Migration 2 → 3 (`retire_chat_v1_model`)
-/// upgrades any persisted `config.toml` that still holds `chat-v1`.
-pub const DEFAULT_MODEL: &str = MODEL_REASONING_QUICK_V1;
+/// Routes through the seeded OpenAI cloud provider (see
+/// [`DEFAULT_OPENAI_SLUG`]) via the `/v1/responses` endpoint with
+/// `reasoning.effort = "medium"` (see
+/// [`crate::openhuman::inference::provider::compatible_types::ResponsesReasoning`]).
+///
+/// The main (user-facing) agent is a planner/router and benefits from
+/// the medium-effort reasoning tier. Sub-agents that ride on the
+/// `agentic` workload pick their own provider via the
+/// per-workload `*_provider` fields on `Config`.
+pub const DEFAULT_MODEL: &str = "openai:gpt-5.4";
 
 /// Top-level configuration (config.toml root).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -174,9 +176,6 @@ pub struct Config {
     pub seltz: SeltzConfig,
 
     #[serde(default)]
-    pub searxng: SearxngConfig,
-
-    #[serde(default)]
     pub web_search: WebSearchConfig,
 
     #[serde(default)]
@@ -205,7 +204,6 @@ pub struct Config {
     //                            build OpenAiCompatibleProvider with Bearer auth
     //   "anthropic:<model>"    → type=anthropic; Bearer auth on the compat endpoint
     //   "openrouter:<model>"   → type=openrouter; Bearer auth
-    //   "orcarouter:<model>"   → type=orcarouter; Bearer auth (e.g. "orcarouter:orcarouter/auto")
     //   "custom:<model>"       → type=custom; Bearer auth
     //   "ollama:<model>"       → local Ollama at config.local_ai.base_url
     //
@@ -354,25 +352,13 @@ fn default_temperature_value() -> f64 {
 
 /// Returns the default list of model glob patterns that do not support the
 /// `temperature` parameter. These cover OpenAI o-series and GPT-5 reasoning
-/// models that return an error when `temperature` is included in the request,
-/// as well as Moonshot's Kimi K2 family which only accepts `temperature: 1`
-/// (see #2076 — 146 Sentry events from users in China hitting *"invalid
-/// temperature: only 1 is allowed for this model"* on `kimi-k2.6`).
+/// models that return an error when `temperature` is included in the request.
 fn default_temperature_unsupported_models() -> Vec<String> {
     vec![
         "o1*".to_string(),
         "o3*".to_string(),
         "o4*".to_string(),
         "gpt-5*".to_string(),
-        // Moonshot Kimi K2 family — temperature must be omitted (the
-        // upstream defaults to 1.0). Covers `kimi-k2.6`, `kimi-k2-instruct`,
-        // and any future K2 variants. See #2076.
-        "kimi-k2*".to_string(),
-        // OpenRouter / third-party gateways often namespace Kimi as
-        // `moonshot/...` or `moonshotai/...`. Match those routings too so
-        // users hitting Kimi through OpenRouter get the same suppression.
-        "moonshot*".to_string(),
-        "moonshotai/*".to_string(),
     ]
 }
 
@@ -550,7 +536,6 @@ impl Default for Config {
             mcp_client: McpClientConfig::default(),
             multimodal: MultimodalConfig::default(),
             seltz: SeltzConfig::default(),
-            searxng: SearxngConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             cost: CostConfig::default(),

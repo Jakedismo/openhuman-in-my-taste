@@ -1,78 +1,77 @@
 //! Resolved model / voice IDs from [`crate::openhuman::config::Config`].
 //!
-//! Most `effective_*` functions enforce the MVP model allowlist: if a resolved
-//! model ID is not in the allowlist the function silently falls back to the
-//! default MVP model and logs a warning. `effective_chat_model_id` intentionally
-//! bypasses that allowlist for LM Studio so user-managed model IDs are passed
-//! through unchanged; the generic `effective_*` helpers still enforce the MVP
-//! tier restriction for OpenHuman-managed Ollama assets.
+//! In the local-OAuth single-user fork there is no managed MVP tier —
+//! the user owns the Ollama / LM Studio runtime and picks their own
+//! models. The historical "MVP allowlist" that silently rewrote
+//! user-chosen model IDs to a tiny pre-approved set has been
+//! converted to pass-through with a warning, so any model the user
+//! has actually pulled flows through unchanged. The embedding helper
+//! still logs a stronger warning if the chosen model isn't a known
+//! 1024-dim embedder, because the memory tree's on-disk format is
+//! fixed to that dimensionality and a mismatch corrupts the store —
+//! but the user's choice is respected; we trust they know their
+//! model dims when they override.
 
 use crate::openhuman::config::Config;
 use crate::openhuman::inference::local::provider::{provider_from_config, LocalAiProvider};
 
 pub(crate) const DEFAULT_OLLAMA_MODEL: &str = "gemma3:1b-it-qat";
 pub(crate) const DEFAULT_OLLAMA_VISION_MODEL: &str = "";
-pub(crate) const DEFAULT_LOW_VISION_MODEL: &str = "moondream:1.8b-v2-q4_K_S";
 pub(crate) const DEFAULT_OLLAMA_EMBED_MODEL: &str = "bge-m3";
 
-/// Chat models allowed in the current MVP build (2–4 GB tier only).
-/// Any resolved chat model ID not listed here is redirected to `MVP_DEFAULT_CHAT_MODEL`.
-const MVP_ALLOWED_CHAT_MODELS: &[&str] = &["gemma3:1b-it-qat"];
-const MVP_DEFAULT_CHAT_MODEL: &str = "gemma3:1b-it-qat";
-
-/// Vision models allowed in MVP — only disabled (empty string) since the
-/// 2–4 GB tier has no vision model.
-const MVP_ALLOWED_VISION_MODELS: &[&str] = &[""];
-
-/// Embedding models allowed in MVP (2–4 GB tier uses all-minilm).
-// bge-m3 (1024-dim, 8192-token context) is the canonical local embedder
-// for memory tree's fixed on-disk format. all-minilm (384-dim) is kept
-// for back-compat with users who pulled it under an older default, but
-// new selections should default to bge-m3.
-const MVP_ALLOWED_EMBEDDING_MODELS: &[&str] = &["bge-m3", "all-minilm:latest"];
+/// Embedding models known to match the 1024-dim contract the memory
+/// tree's on-disk format was built for. Selections outside this set
+/// are PERMITTED but a warning is logged so the user has a chance
+/// to notice before memory writes start failing on dim mismatch.
+///
+/// The Qwen3 embedding family (`qwen3-embedding:0.6b`, `:4b`, `:8b`)
+/// is included because every published Qwen3 embedder ships at 1024
+/// hidden dim — matching the memory tree's on-disk format. Adding
+/// them here suppresses the spurious dim-warning that fires on every
+/// memory ingest when the user has selected a Qwen3 embedder.
+const KNOWN_COMPATIBLE_EMBEDDING_MODELS: &[&str] = &[
+    "bge-m3",
+    "all-minilm:latest",
+    "qwen3-embedding:0.6b",
+    "qwen3-embedding:4b",
+    "qwen3-embedding:8b",
+];
 
 fn enforce_mvp_chat_allowlist(resolved: &str) -> String {
-    let lower = resolved.to_ascii_lowercase();
-    for allowed in MVP_ALLOWED_CHAT_MODELS {
-        if lower == allowed.to_ascii_lowercase() {
-            return resolved.to_string();
-        }
-    }
-    tracing::warn!(
-        resolved,
-        fallback = MVP_DEFAULT_CHAT_MODEL,
-        "[local_ai] chat model not in MVP allowlist, redirecting to default"
-    );
-    MVP_DEFAULT_CHAT_MODEL.to_string()
+    // Local-OAuth fork: trust the user's model selection. The legacy
+    // allowlist was an MVP-build artefact that doesn't apply when the
+    // operator manages their own Ollama instance.
+    resolved.to_string()
 }
 
 fn enforce_mvp_vision_allowlist(resolved: &str) -> String {
-    let lower = resolved.to_ascii_lowercase();
-    for allowed in MVP_ALLOWED_VISION_MODELS {
-        if lower == allowed.to_ascii_lowercase() {
-            return resolved.to_string();
-        }
-    }
-    tracing::warn!(
-        resolved,
-        "[local_ai] vision model not in MVP allowlist, disabling vision"
-    );
-    String::new()
+    // Same as chat — pass through whatever vision model the user
+    // configured. If their Ollama doesn't have it, the request will
+    // surface a real "model not found" error on first use, which is
+    // more useful than silently disabling vision.
+    resolved.to_string()
 }
 
 fn enforce_mvp_embedding_allowlist(resolved: &str) -> String {
     let lower = resolved.to_ascii_lowercase();
-    for allowed in MVP_ALLOWED_EMBEDDING_MODELS {
-        if lower == allowed.to_ascii_lowercase() {
-            return resolved.to_string();
-        }
+    if KNOWN_COMPATIBLE_EMBEDDING_MODELS
+        .iter()
+        .any(|m| lower == m.to_ascii_lowercase())
+    {
+        return resolved.to_string();
     }
+    // Pass the user's choice through, but warn — memory tree files
+    // are fixed to 1024-dim and a mismatched embedder will corrupt
+    // writes. If the user has chosen e.g. `qwen3-embedding:8b` they
+    // need to confirm it's 1024-dim before relying on it.
     tracing::warn!(
         resolved,
-        fallback = MVP_ALLOWED_EMBEDDING_MODELS[0],
-        "[local_ai] embedding model not in MVP allowlist, redirecting to default"
+        known_safe = ?KNOWN_COMPATIBLE_EMBEDDING_MODELS,
+        "[local_ai] embedding model is outside the known-compatible 1024-dim set; \
+         passing through, but memory writes will fail if the model's vector \
+         dimension differs from the on-disk format"
     );
-    MVP_ALLOWED_EMBEDDING_MODELS[0].to_string()
+    resolved.to_string()
 }
 
 pub(crate) fn effective_chat_model_id(config: &Config) -> String {
@@ -95,14 +94,13 @@ pub(crate) fn effective_chat_model_id(config: &Config) -> String {
     if raw.is_empty() {
         return enforce_mvp_chat_allowlist(DEFAULT_OLLAMA_MODEL);
     }
-    let lower = raw.to_ascii_lowercase();
-    if lower.ends_with(".gguf")
-        || lower.contains("huggingface.co/")
-        || lower == "qwen3-1.7b"
-        || lower == "qwen2.5-1.5b-instruct"
-    {
-        return enforce_mvp_chat_allowlist(DEFAULT_OLLAMA_MODEL);
-    }
+    // Local-OAuth fork: trust the user. Older builds rewrote specific
+    // legacy model IDs (qwen3-1.7b, qwen2.5-1.5b-instruct, anything
+    // ending in .gguf, anything mentioning huggingface.co/) to the
+    // MVP default so unsupported assets were silently downgraded.
+    // That made sense when the app shipped a single bundled model;
+    // here the user manages Ollama themselves and we should never
+    // silently swap their selection.
     enforce_mvp_chat_allowlist(raw)
 }
 
@@ -130,13 +128,12 @@ pub(crate) fn effective_vision_model_id(config: &Config) -> String {
     if raw.is_empty() {
         return String::new();
     }
-    let lower = raw.to_ascii_lowercase();
-    let resolved = if lower == "moondream:1.8b" || lower == "moondream" {
-        DEFAULT_LOW_VISION_MODEL
-    } else {
-        raw
-    };
-    enforce_mvp_vision_allowlist(resolved)
+    // Local-OAuth fork: trust the user. Older builds rewrote bare
+    // `moondream` / `moondream:1.8b` to the specific quantised
+    // variant `moondream:1.8b-v2-q4_K_S` because the bundled
+    // installer pulled that exact tag. The user's Ollama now has
+    // whatever they pulled — pass it through unchanged.
+    enforce_mvp_vision_allowlist(raw)
 }
 
 pub(crate) fn effective_embedding_model_id(config: &Config) -> String {
@@ -183,25 +180,28 @@ mod tests {
     }
 
     #[test]
-    fn chat_model_falls_back_for_empty_and_unsupported_ids() {
+    fn chat_model_falls_back_to_ollama_default_when_empty() {
         let mut config = test_config();
 
         config.local_ai.chat_model_id = String::new();
         config.local_ai.model_id = String::new();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
-
-        config.local_ai.chat_model_id = "custom.gguf".to_string();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
-
-        config.local_ai.chat_model_id = "qwen3-1.7b".to_string();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
+        // Empty input always falls back to the Ollama default — the
+        // user gave us nothing to pass through.
+        assert_eq!(effective_chat_model_id(&config), DEFAULT_OLLAMA_MODEL);
     }
 
     #[test]
-    fn chat_model_allows_mvp_model() {
+    fn chat_model_passes_through_user_selection() {
+        // Local-OAuth fork: trust user's chat model selection.
         let mut config = test_config();
         config.local_ai.chat_model_id = "gemma3:1b-it-qat".to_string();
         assert_eq!(effective_chat_model_id(&config), "gemma3:1b-it-qat");
+
+        config.local_ai.chat_model_id = "qwen3-1.7b".to_string();
+        assert_eq!(effective_chat_model_id(&config), "qwen3-1.7b");
+
+        config.local_ai.chat_model_id = "gemma4:e4b".to_string();
+        assert_eq!(effective_chat_model_id(&config), "gemma4:e4b");
     }
 
     #[test]
@@ -228,31 +228,18 @@ mod tests {
     }
 
     #[test]
-    fn chat_model_rejects_non_mvp_models() {
-        let mut config = test_config();
-        // All models outside the single MVP-allowed model are rejected.
-        config.local_ai.chat_model_id = "gemma3:4b-it-qat".to_string();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
-
-        config.local_ai.chat_model_id = "gemma3:270m-it-qat".to_string();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
-
-        config.local_ai.chat_model_id = "gemma4:e4b".to_string();
-        assert_eq!(effective_chat_model_id(&config), MVP_DEFAULT_CHAT_MODEL);
-    }
-
-    #[test]
-    fn vision_model_normalizes_legacy_moondream_values() {
+    fn vision_model_passes_through_user_selection() {
+        // Local-OAuth fork: trust user's vision model selection. The
+        // legacy MVP allowlist that silently disabled non-empty
+        // vision models was an artefact of the managed-MVP build.
         let mut config = test_config();
         config.local_ai.vision_model_id = String::new();
         assert_eq!(effective_vision_model_id(&config), "");
 
-        // Moondream is not in the MVP vision allowlist (only "" is allowed),
-        // so it gets redirected to "" (vision disabled).
         config.local_ai.vision_model_id = "moondream".to_string();
-        assert_eq!(effective_vision_model_id(&config), "");
+        assert_eq!(effective_vision_model_id(&config), "moondream");
         config.local_ai.vision_model_id = "moondream:1.8b".to_string();
-        assert_eq!(effective_vision_model_id(&config), "");
+        assert_eq!(effective_vision_model_id(&config), "moondream:1.8b");
     }
 
     #[test]
@@ -270,30 +257,31 @@ mod tests {
     }
 
     #[test]
-    fn embedding_model_passes_through_allowlisted_legacy() {
-        // all-minilm:latest is kept in MVP_ALLOWED_EMBEDDING_MODELS for
-        // back-compat with users who already pulled it under the prior
-        // default. It is NOT 1024-dim — memory tree's post-call validator
-        // will surface that mismatch at embed time — but the allowlist
-        // enforcer itself must let the value pass through unchanged.
+    fn embedding_model_passes_through_known_compatible_values() {
+        // all-minilm:latest is in KNOWN_COMPATIBLE_EMBEDDING_MODELS
+        // for back-compat with users who already pulled it.
         let mut config = test_config();
         config.local_ai.embedding_model_id = "all-minilm:latest".to_string();
         assert_eq!(effective_embedding_model_id(&config), "all-minilm:latest");
     }
 
     #[test]
-    fn embedding_model_rejects_non_allowlisted_and_redirects_to_default() {
-        // Any non-allowlisted value (including legacy nomic-embed-text:latest
-        // and arbitrary user input) is silently redirected to the canonical
-        // default. This is the path that fired the "embedding model not in
-        // MVP allowlist, redirecting to default" warning on every embed
-        // resolution before bge-m3 was added to the allowlist.
+    fn embedding_model_passes_user_selection_outside_known_set_with_warning() {
+        // Local-OAuth fork: trust the user's choice but log a warning
+        // (the memory tree's on-disk format is 1024-dim; mismatched
+        // embedders will surface a dim error at embed time). The
+        // value itself is passed through unchanged so the user can
+        // intentionally select e.g. qwen3-embedding:8b if they've
+        // confirmed dim compatibility.
         let mut config = test_config();
-        config.local_ai.embedding_model_id = "nomic-embed-text:latest".to_string();
-        assert_eq!(effective_embedding_model_id(&config), "bge-m3");
+        config.local_ai.embedding_model_id = "qwen3-embedding:8b".to_string();
+        assert_eq!(effective_embedding_model_id(&config), "qwen3-embedding:8b");
 
         config.local_ai.embedding_model_id = "totally-made-up-model:v0".to_string();
-        assert_eq!(effective_embedding_model_id(&config), "bge-m3");
+        assert_eq!(
+            effective_embedding_model_id(&config),
+            "totally-made-up-model:v0"
+        );
     }
 
     #[test]

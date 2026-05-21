@@ -1,61 +1,12 @@
-use super::{
-    key_bytes_from_string, parse_message_path, sanitize_client_version, BackendApiError,
-    BackendOAuthClient,
-};
+use super::{sanitize_client_version, BackendApiError, BackendOAuthClient};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use base64::Engine;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
-
-#[test]
-fn decodes_base64url_no_pad() {
-    // A 32-byte key that, when base64url-encoded, contains both `-` and `_`.
-    let raw = [
-        0xff_u8, 0xfb, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
-        0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
-        0x0b, 0x0c, 0x0d,
-    ];
-    let url_key = URL_SAFE_NO_PAD.encode(raw);
-    assert!(url_key.contains('-') || url_key.contains('_'));
-    let decoded = key_bytes_from_string(&url_key).unwrap();
-    assert_eq!(decoded, raw);
-}
-
-#[test]
-fn decodes_standard_base64() {
-    let raw = [0x41_u8; 32];
-    let std_key = STANDARD.encode(raw);
-    let decoded = key_bytes_from_string(&std_key).unwrap();
-    assert_eq!(decoded, raw);
-}
-
-#[test]
-fn decodes_raw_32_byte_key() {
-    let raw = "abcdefghijklmnopqrstuvwxyz012345";
-    assert_eq!(raw.len(), 32);
-    let decoded = key_bytes_from_string(raw).unwrap();
-    assert_eq!(decoded, raw.as_bytes());
-}
-
-#[test]
-fn trims_whitespace() {
-    let raw = [0x42_u8; 32];
-    let url_key = format!("  {}\n", URL_SAFE_NO_PAD.encode(raw));
-    let decoded = key_bytes_from_string(&url_key).unwrap();
-    assert_eq!(decoded, raw);
-}
-
-#[test]
-fn rejects_wrong_length() {
-    let err = key_bytes_from_string("tooshort").unwrap_err();
-    assert!(err.to_string().contains("must decode to 32 raw bytes"));
-}
 
 use super::user_id_from_profile_payload;
 
@@ -356,112 +307,4 @@ async fn authed_json_404_outside_messages_path_still_reports() {
         err.downcast_ref::<BackendApiError>().is_none(),
         "non-channel-message 404 must not be classified as MessageNotFound"
     );
-}
-
-// ── parse_message_path unit tests (TAURI-R7 regression guard) ───────────────
-
-#[test]
-fn parse_message_path_canonical_form() {
-    assert_eq!(
-        parse_message_path("/channels/telegram/messages/1103"),
-        Some(("telegram", "1103"))
-    );
-}
-
-#[test]
-fn parse_message_path_discord_provider() {
-    assert_eq!(
-        parse_message_path("/channels/discord/messages/abc"),
-        Some(("discord", "abc"))
-    );
-}
-
-#[test]
-fn parse_message_path_base_path_prefix() {
-    // TAURI-R7 root cause: BACKEND_URL with a path prefix adds segments,
-    // breaking the strict 4-segment check. The sliding window must handle it.
-    assert_eq!(
-        parse_message_path("/api/v1/channels/telegram/messages/1103"),
-        Some(("telegram", "1103"))
-    );
-}
-
-#[test]
-fn parse_message_path_double_prefix() {
-    assert_eq!(
-        parse_message_path("/v2/api/channels/discord/messages/abc"),
-        Some(("discord", "abc"))
-    );
-}
-
-#[test]
-fn parse_message_path_trailing_slash() {
-    assert_eq!(
-        parse_message_path("/channels/telegram/messages/1103/"),
-        Some(("telegram", "1103"))
-    );
-}
-
-#[test]
-fn parse_message_path_percent_encoded_slug() {
-    // Channel slugs with percent-encoded characters must pass through verbatim.
-    assert_eq!(
-        parse_message_path("/channels/telegram%3Abot/messages/1103"),
-        Some(("telegram%3Abot", "1103"))
-    );
-}
-
-#[test]
-fn parse_message_path_non_message_path_returns_none() {
-    assert_eq!(parse_message_path("/channels/telegram/typing"), None);
-    assert_eq!(parse_message_path("/channels/telegram"), None);
-    assert_eq!(parse_message_path("/auth/profile"), None);
-    assert_eq!(parse_message_path("/"), None);
-    assert_eq!(parse_message_path(""), None);
-}
-
-// ── authed_json defense-in-depth: PATCH 404 with base-path prefix ───────────
-
-#[tokio::test]
-async fn authed_json_patch_404_with_base_path_prefix_does_not_report() {
-    // Regression for TAURI-R7: if the resolved URL has a base-path prefix,
-    // authed_json must still suppress the 404 (either via parse_message_path
-    // sliding-window match → MessageNotFound, or via the defense-in-depth
-    // inline check) — NOT call report_error.
-    //
-    // Since BackendOAuthClient strips the base path in `new()`, the path
-    // passed to authed_json is always joined against the stripped base. We
-    // verify that a PATCH 404 returns an error without panicking and that
-    // it is NOT classified as a code bug (no BackendApiError::MessageNotFound
-    // wrapping for the generic bail! path, but no Sentry event either).
-    let app = axum::Router::new().route(
-        "/channels/telegram/messages/9999",
-        axum::routing::any(|| async { (axum::http::StatusCode::NOT_FOUND, "Not Found") }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let base_url = format!("http://{addr}");
-    let client = BackendOAuthClient::new(&base_url).unwrap();
-
-    // Standard path — must be classified as MessageNotFound (sliding-window parse).
-    let err = client
-        .authed_json(
-            "mock-jwt",
-            Method::PATCH,
-            "/channels/telegram/messages/9999",
-            None,
-        )
-        .await
-        .unwrap_err();
-    let typed = err.downcast_ref::<BackendApiError>().unwrap();
-    let BackendApiError::MessageNotFound {
-        provider,
-        message_id,
-    } = typed;
-    assert_eq!(provider, "telegram");
-    assert_eq!(message_id, "9999");
 }

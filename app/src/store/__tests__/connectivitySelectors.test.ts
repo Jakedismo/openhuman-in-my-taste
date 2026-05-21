@@ -34,8 +34,11 @@ describe('selectBlockingState', () => {
     expect(selectBlockingState(make({ core: 'unreachable' }))).toBe('core-unreachable');
   });
 
-  it('returns backend-only when just the websocket is degraded', () => {
-    expect(selectBlockingState(make({ backend: 'disconnected' }))).toBe('backend-only');
-    expect(selectBlockingState(make({ backend: 'connecting' }))).toBe('backend-only');
+  it('returns ok when only the backend websocket is degraded', () => {
+    // In the local-OAuth fork the hosted backend is gone, so a
+    // disconnected/connecting backend channel must not surface a
+    // user-facing "reconnecting" banner.
+    expect(selectBlockingState(make({ backend: 'disconnected' }))).toBe('ok');
+    expect(selectBlockingState(make({ backend: 'connecting' }))).toBe('ok');
   });
 });

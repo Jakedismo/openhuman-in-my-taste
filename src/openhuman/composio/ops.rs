@@ -22,7 +22,9 @@ type OpResult<T> = std::result::Result<T, String>;
 use std::sync::Arc;
 
 use super::client::{
-    build_composio_client, create_composio_client, direct_authorize, direct_list_connections,
+    build_composio_client, create_composio_client, direct_authorize, direct_create_trigger,
+    direct_delete_connection, direct_disable_trigger, direct_enable_trigger,
+    direct_list_active_triggers, direct_list_available_triggers, direct_list_connections,
     direct_list_tools, ComposioClient, ComposioClientKind,
 };
 use super::providers::{
@@ -35,19 +37,27 @@ use super::types::{
     ComposioExecuteResponse, ComposioGithubReposResponse, ComposioToolkitsResponse,
     ComposioToolsResponse, ComposioTriggerHistoryResult,
 };
+use super::webhook_receiver;
 
 /// Resolve a backend-mode [`ComposioClient`] from the root config, or
 /// return an error string that the caller can surface over RPC.
 ///
-/// Used by the **backend-only** Composio ops — `delete_connection`,
-/// `list_github_repos`, the `triggers/*` family, and the provider
-/// dispatch paths (`get_user_profile`, `refresh_all_identities`,
-/// `sync`). These rely on the backend's bookkeeping
-/// (HMAC-verified trigger fan-out, per-user provider registry, GitHub
-/// repo enumeration) that the direct-mode v3 surface does not provide,
-/// so they intentionally remain backend-only for now. The "mode-aware"
-/// `composio_authorize` / `composio_execute` / `composio_list_*`
-/// handlers go through [`create_composio_client`] instead so the
+/// Used by the **backend-only** Composio ops — `list_github_repos`
+/// and the trigger *write* family
+/// (`create_trigger` / `enable_trigger` / `disable_trigger`). These
+/// rely on backend bookkeeping that the direct-mode v3 surface cannot
+/// provide on its own: GitHub repo enumeration (per-connection),
+/// and HMAC-verified Composio webhook *delivery* into the user's app
+/// (without a backend webhook receiver, an enabled trigger fires
+/// events into the void). Trigger *reads*
+/// (`list_triggers` / `list_available_triggers`) are mode-aware via
+/// [`create_composio_client`] so direct-mode users can still browse
+/// their tenant's catalog.
+///
+/// Sync, auth (`composio_authorize`), execution (`composio_execute`),
+/// the `composio_list_*` family, `composio_get_user_profile`,
+/// `composio_refresh_all_identities`, and `composio_delete_connection`
+/// also go through [`create_composio_client`] so the
 /// `config.composio.mode` toggle is honoured per call (#1710).
 fn resolve_client(config: &Config) -> OpResult<ComposioClient> {
     build_composio_client(config).ok_or_else(|| {
@@ -289,13 +299,6 @@ pub async fn composio_authorize(
     extra_params: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioAuthorizeResponse>> {
     tracing::debug!(toolkit = %toolkit, has_extra_params = extra_params.is_some(), "[composio] rpc authorize");
-    // Route through the mode-aware factory so direct-mode users get a
-    // hosted Composio OAuth URL for THEIR personal tenant — not the
-    // backend tinyhumans tenant's OAuth proxy (#1710). The pre-factory
-    // path hard-routed through `staging-api.tinyhumans.ai`, so a user
-    // toggled into Direct mode would silently complete OAuth against
-    // the wrong tenant and never see the new connection in their
-    // own Composio account.
     let kind = create_composio_client(config).map_err(|e| format!("[composio] authorize: {e}"))?;
     let resp = match kind {
         ComposioClientKind::Backend(client) => {
@@ -354,14 +357,40 @@ pub async fn composio_delete_connection(
     connection_id: &str,
 ) -> OpResult<RpcOutcome<ComposioDeleteResponse>> {
     tracing::debug!(connection_id = %connection_id, "[composio] rpc delete_connection");
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id)
+    // Mode-aware: backend-proxied users keep going through the
+    // tinyhumans aggregator (`ComposioClient::delete_connection`),
+    // direct-mode users hit Composio v3 `/connected_accounts/{id}`
+    // against their own tenant via `direct_delete_connection`. The
+    // toolkit lookup is best-effort either way — failures degrade the
+    // post-delete bookkeeping (facets / PROFILE.md / `unknown` event
+    // toolkit) but never block the underlying delete call (matches the
+    // pre-#1710 behaviour).
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id)
         .await
         .ok();
-    let resp = client.delete_connection(connection_id).await.map_err(|e| {
-        report_composio_op_error("delete_connection", &e);
-        format!("[composio] delete_connection failed: {e:#}")
-    })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] delete_connection: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            tracing::debug!(
+                connection_id,
+                "[composio] delete_connection: backend variant"
+            );
+            client.delete_connection(connection_id).await.map_err(|e| {
+                report_composio_op_error("delete_connection", &e);
+                format!("[composio] delete_connection failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                connection_id,
+                "[composio-direct] delete_connection: routing to user's personal Composio tenant"
+            );
+            direct_delete_connection(&direct, connection_id)
+                .await
+                .map_err(|e| format!("[composio-direct] delete_connection failed: {e:#}"))?
+        }
+    };
     if let Some(toolkit) = toolkit.as_deref() {
         let deleted =
             super::providers::profile::delete_connected_identity_facets(toolkit, connection_id);
@@ -570,85 +599,127 @@ async fn filter_list_tools_response_for_direct(resp: &mut ComposioToolsResponse)
 
 // ── Execute ─────────────────────────────────────────────────────────
 
+/// Phase 3.3 native-dispatch helper. Returns `Some(RpcOutcome)` when
+/// the native provider client handled the request (success OR typed
+/// failure); `None` means "no native impl, fall through to Composio".
+/// Caller is expected to gate this with
+/// `native_dispatch::is_enabled()` so the AuthService construction is
+/// not paid on the hot path when the flag is off.
+async fn try_native_dispatch(
+    config: &Config,
+    tool: &str,
+    arguments: Option<&serde_json::Value>,
+) -> Option<RpcOutcome<ComposioExecuteResponse>> {
+    let auth_service = crate::openhuman::credentials::AuthService::from_config(config);
+    let http = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let dispatched = crate::openhuman::oauth::native_dispatch::try_dispatch_native(
+        &http,
+        &auth_service,
+        tool,
+        arguments,
+    )
+    .await?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match dispatched {
+        Ok(data) => {
+            tracing::debug!(
+                tool = %tool,
+                elapsed_ms,
+                "[composio][native] dispatch ok"
+            );
+            crate::core::event_bus::publish_global(
+                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
+                    tool: tool.to_string(),
+                    success: true,
+                    error: None,
+                    cost_usd: 0.0,
+                    elapsed_ms,
+                },
+            );
+            Some(RpcOutcome::new(
+                ComposioExecuteResponse {
+                    data,
+                    successful: true,
+                    error: None,
+                    cost_usd: 0.0,
+                    markdown_formatted: None,
+                },
+                vec![format!(
+                    "composio: executed {tool} via native dispatch ({elapsed_ms}ms)"
+                )],
+            ))
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::debug!(
+                tool = %tool,
+                elapsed_ms,
+                error = %err_msg,
+                "[composio][native] dispatch failed"
+            );
+            crate::core::event_bus::publish_global(
+                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
+                    tool: tool.to_string(),
+                    success: false,
+                    error: Some(err_msg.clone()),
+                    cost_usd: 0.0,
+                    elapsed_ms,
+                },
+            );
+            Some(RpcOutcome::new(
+                ComposioExecuteResponse {
+                    data: serde_json::Value::Null,
+                    successful: false,
+                    error: Some(err_msg),
+                    cost_usd: 0.0,
+                    markdown_formatted: None,
+                },
+                vec![format!(
+                    "composio: native dispatch failed for {tool} ({elapsed_ms}ms)"
+                )],
+            ))
+        }
+    }
+}
+
 pub async fn composio_execute(
     config: &Config,
     tool: &str,
     arguments: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioExecuteResponse>> {
     tracing::debug!(tool = %tool, "[composio] rpc execute");
-    // Route through the mode-aware factory so direct-mode users hit
-    // their personal Composio tenant for tool execution. Mirrors the
-    // agent-tool path's `ComposioExecuteTool::execute` (commit
-    // 814fdd97); the shared `direct_execute` helper in `client.rs`
-    // keeps the envelope identical between backend and direct so the
-    // `ComposioActionExecuted` event-bus payload, markdown-vs-JSON
-    // body preference, and cost-USD log line all stay uniform (#1710).
-    let kind = create_composio_client(config).map_err(|e| format!("[composio] execute: {e}"))?;
-    let started = std::time::Instant::now();
-    // Centralized prepare → retry → error-mapping pipeline (#1797),
-    // mode-aware over the backend/direct split (#1710). The dispatcher
-    // returns pre-formatted `[composio:error:<class>] …` strings so the
-    // frontend formatter at `app/src/lib/composio/formatters.ts` can
-    // parse the class regardless of which mode produced the failure.
-    let result = super::execute_dispatch::execute_composio_action_kind(
-        kind,
-        tool,
-        arguments,
-        &config.composio.entity_id,
-    )
-    .await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    match result {
-        Ok(resp) => {
-            crate::core::event_bus::publish_global(
-                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
-                    tool: tool.to_string(),
-                    success: resp.successful,
-                    error: resp.error.clone(),
-                    cost_usd: resp.cost_usd,
-                    elapsed_ms,
-                },
-            );
-            // Backend (tinyhumansai/backend#683) now parses all composio
-            // payloads server-side and returns a `markdownFormatted`
-            // string for known tools, so callers should consume that
-            // directly. Core no longer reshapes `resp.data` here. Memory
-            // ingestion paths still call `post_process_action_result`
-            // explicitly when they need the structured slim envelope.
-            Ok(RpcOutcome::new(
-                resp,
-                vec![format!("composio: executed {tool} ({elapsed_ms}ms)")],
-            ))
-        }
-        Err(e) => {
-            crate::core::event_bus::publish_global(
-                crate::core::event_bus::DomainEvent::ComposioActionExecuted {
-                    tool: tool.to_string(),
-                    success: false,
-                    error: Some(e.to_string()),
-                    cost_usd: 0.0,
-                    elapsed_ms,
-                },
-            );
-            report_composio_op_error("execute", &e);
-            // Preserve already-classified errors from the dispatcher
-            // (`[composio:error:<class>] …`) so the frontend formatter at
-            // `app/src/lib/composio/formatters.ts` can still parse the class.
-            let is_classified = e.starts_with("[composio:error:");
-            tracing::debug!(
-                tool = %tool,
-                elapsed_ms,
-                classified = is_classified,
-                "[composio] rpc execute error mapped"
-            );
-            if is_classified {
-                Err(e)
-            } else {
-                Err(format!("[composio] execute failed: {e}"))
-            }
-        }
+    // Native-OAuth dispatch wins when an arm exists (Gmail / Calendar /
+    // Drive / GitHub). Direct-mode Composio handles every other slug
+    // against the user's personal Composio tenant — backend mode is no
+    // longer reachable in this fork.
+    if let Some(result) = try_native_dispatch(config, tool, arguments.as_ref()).await {
+        return Ok(result);
     }
+
+    let kind = create_composio_client(config).map_err(|e| format!("[composio] execute: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            client.execute_tool(tool, arguments).await.map_err(|e| {
+                report_composio_op_error("execute", &e);
+                format!("[composio] execute failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                tool = %tool,
+                "[composio-direct] execute: routing to user's personal Composio tenant"
+            );
+            super::client::direct_execute(&direct, tool, arguments, &config.composio.entity_id)
+                .await
+                .map_err(|e| format!("[composio-direct] execute failed: {e:#}"))?
+        }
+    };
+    Ok(RpcOutcome::new(
+        resp,
+        vec![format!("composio: executed tool {tool}")],
+    ))
 }
 
 // ── GitHub repos + trigger provisioning ─────────────────────────────
@@ -683,14 +754,26 @@ pub async fn composio_create_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioCreateTriggerResponse>> {
     tracing::debug!(slug = %slug, ?connection_id, "[composio] rpc create_trigger");
-    let client = resolve_client(config)?;
-    let resp = client
-        .create_trigger(slug, connection_id.as_deref(), trigger_config)
-        .await
-        .map_err(|e| {
-            report_composio_op_error("create_trigger", &e);
-            format!("[composio] create_trigger failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] create_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .create_trigger(slug, connection_id.as_deref(), trigger_config)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("create_trigger", &e);
+                format!("[composio] create_trigger failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            ensure_subscription_for_trigger_write(config, &direct, slug).await?;
+            direct_create_trigger(&direct, slug, connection_id.as_deref(), trigger_config)
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("create_trigger", &e);
+                    format!("[composio] create_trigger failed: {e:#}")
+                })?
+        }
+    };
     let trigger_id = resp.trigger_id.clone();
     Ok(RpcOutcome::new(
         resp,
@@ -708,14 +791,23 @@ pub async fn composio_list_available_triggers(
     connection_id: Option<String>,
 ) -> OpResult<RpcOutcome<ComposioAvailableTriggersResponse>> {
     tracing::debug!(toolkit = %toolkit, ?connection_id, "[composio] rpc list_available_triggers");
-    let client = resolve_client(config)?;
-    let resp = client
-        .list_available_triggers(toolkit, connection_id.as_deref())
-        .await
-        .map_err(|e| {
-            report_composio_op_error("list_available_triggers", &e);
-            format!("[composio] list_available_triggers failed: {e:#}")
-        })?;
+    let kind = create_composio_client(config)
+        .map_err(|e| format!("[composio] list_available_triggers: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .list_available_triggers(toolkit, connection_id.as_deref())
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_available_triggers", &e);
+                format!("[composio] list_available_triggers failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => direct_list_available_triggers(&direct, toolkit)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_available_triggers", &e);
+                format!("[composio] list_available_triggers failed: {e:#}")
+            })?,
+    };
     let count = resp.triggers.len();
     Ok(RpcOutcome::new(
         resp,
@@ -730,14 +822,25 @@ pub async fn composio_list_triggers(
     toolkit: Option<String>,
 ) -> OpResult<RpcOutcome<ComposioActiveTriggersResponse>> {
     tracing::debug!(?toolkit, "[composio] rpc list_triggers");
-    let client = resolve_client(config)?;
-    let resp = client
-        .list_active_triggers(toolkit.as_deref())
-        .await
-        .map_err(|e| {
-            report_composio_op_error("list_triggers", &e);
-            format!("[composio] list_triggers failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] list_triggers: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .list_active_triggers(toolkit.as_deref())
+            .await
+            .map_err(|e| {
+                report_composio_op_error("list_triggers", &e);
+                format!("[composio] list_triggers failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            direct_list_active_triggers(&direct, toolkit.as_deref())
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("list_triggers", &e);
+                    format!("[composio] list_triggers failed: {e:#}")
+                })?
+        }
+    };
     let count = resp.triggers.len();
     Ok(RpcOutcome::new(
         resp,
@@ -752,14 +855,26 @@ pub async fn composio_enable_trigger(
     trigger_config: Option<serde_json::Value>,
 ) -> OpResult<RpcOutcome<ComposioEnableTriggerResponse>> {
     tracing::debug!(slug = %slug, connection_id = %connection_id, "[composio] rpc enable_trigger");
-    let client = resolve_client(config)?;
-    let resp = client
-        .enable_trigger(connection_id, slug, trigger_config)
-        .await
-        .map_err(|e| {
-            report_composio_op_error("enable_trigger", &e);
-            format!("[composio] enable_trigger failed: {e:#}")
-        })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] enable_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => client
+            .enable_trigger(connection_id, slug, trigger_config)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("enable_trigger", &e);
+                format!("[composio] enable_trigger failed: {e:#}")
+            })?,
+        ComposioClientKind::Direct(direct) => {
+            ensure_subscription_for_trigger_write(config, &direct, slug).await?;
+            direct_enable_trigger(&direct, connection_id, slug, trigger_config)
+                .await
+                .map_err(|e| {
+                    report_composio_op_error("enable_trigger", &e);
+                    format!("[composio] enable_trigger failed: {e:#}")
+                })?
+        }
+    };
     let trigger_id = resp.trigger_id.clone();
     Ok(RpcOutcome::new(
         resp,
@@ -772,17 +887,291 @@ pub async fn composio_disable_trigger(
     trigger_id: &str,
 ) -> OpResult<RpcOutcome<ComposioDisableTriggerResponse>> {
     tracing::debug!(trigger_id = %trigger_id, "[composio] rpc disable_trigger");
-    let client = resolve_client(config)?;
-    let resp = client.disable_trigger(trigger_id).await.map_err(|e| {
-        report_composio_op_error("disable_trigger", &e);
-        format!("[composio] disable_trigger failed: {e:#}")
-    })?;
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] disable_trigger: {e}"))?;
+    let resp = match kind {
+        ComposioClientKind::Backend(client) => {
+            client.disable_trigger(trigger_id).await.map_err(|e| {
+                report_composio_op_error("disable_trigger", &e);
+                format!("[composio] disable_trigger failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => direct_disable_trigger(&direct, trigger_id)
+            .await
+            .map_err(|e| {
+                report_composio_op_error("disable_trigger", &e);
+                format!("[composio] disable_trigger failed: {e:#}")
+            })?,
+    };
     let message = if resp.deleted {
         format!("composio: disabled trigger {trigger_id}")
     } else {
         format!("composio: trigger {trigger_id} was not active")
     };
     Ok(RpcOutcome::new(resp, vec![message]))
+}
+
+/// Direct-mode pre-flight: ensure the Composio webhook subscription
+/// at app.composio.dev is registered with the receiver's current
+/// public URL and includes the event type we're about to enable.
+///
+/// Called once per trigger-write operation (enable / create). The
+/// helper is cheap on the reuse path (one GET) and only does a POST
+/// or PATCH when something genuinely changed.
+///
+/// Fails the op if:
+///
+/// - The receiver isn't running (`public_webhook_url()` returns None).
+///   The user must configure ngrok in Settings → Triggers first.
+/// - Composio's subscription endpoints are unreachable.
+async fn ensure_subscription_for_trigger_write(
+    config: &Config,
+    direct: &std::sync::Arc<crate::openhuman::tools::ComposioTool>,
+    slug: &str,
+) -> OpResult<()> {
+    let webhook_url = webhook_receiver::public_webhook_url().ok_or_else(|| {
+        "composio direct-mode triggers: the local webhook receiver is not running. \
+         Open Settings → Triggers, paste your ngrok authtoken + static domain, and try again."
+            .to_string()
+    })?;
+    // Composio's webhook subscriptions take a fixed set of canonical
+    // `composio.*` event types, NOT per-trigger slugs. ALL trigger
+    // deliveries arrive under `composio.trigger.message` — the actual
+    // trigger slug (e.g. `GMAIL_NEW_GMAIL_MESSAGE`) lives inside the
+    // payload metadata. Source of truth:
+    // https://github.com/ComposioHQ/composio/blob/next/ts/packages/core/src/types/webhookEvents.types.ts
+    //   export const WebhookEventTypes = {
+    //     CONNECTION_EXPIRED: 'composio.connected_account.expired',
+    //     TRIGGER_MESSAGE:    'composio.trigger.message',
+    //   };
+    //
+    // We subscribe to BOTH so the receiver can also react to
+    // OAuth-token-expired events later if we want — they cost nothing
+    // extra at the subscription layer.
+    let _ = slug; // event-type is fixed; slug only matters for the trigger instance upsert
+    let desired_events = vec![
+        "composio.trigger.message".to_string(),
+        "composio.connected_account.expired".to_string(),
+    ];
+    let (resolved, outcome) = webhook_receiver::ensure_subscription(
+        config,
+        direct,
+        &webhook_url,
+        &desired_events,
+        &config.composio.webhook.composio_webhook_subscription_id,
+    )
+    .await
+    .map_err(|e| {
+        report_composio_op_error("ensure_subscription", &e);
+        format!("[composio] ensure_subscription failed: {e:#}")
+    })?;
+    tracing::debug!(
+        outcome = ?outcome,
+        subscription_id = %resolved.id,
+        "[composio] direct-mode trigger write: webhook subscription resolved"
+    );
+    if outcome == webhook_receiver::EnsureOutcome::Created
+        && config.composio.webhook.composio_webhook_subscription_id != resolved.id
+    {
+        if let Err(e) = persist_subscription_id(&resolved.id).await {
+            tracing::warn!(
+                error = %e,
+                subscription_id = %resolved.id,
+                "[composio] failed to persist new subscription id; future restarts will recreate it"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Load → mutate → save the subscription ID into `config.toml`.
+///
+/// Used right after [`webhook_receiver::ensure_subscription`] returns
+/// [`EnsureOutcome::Created`] so the ID survives the next restart.
+/// On reuse / patch outcomes we already had the ID persisted (the
+/// caller pulled it from config), so no write is needed.
+async fn persist_subscription_id(new_id: &str) -> Result<(), String> {
+    let mut on_disk = Config::load_or_init().await.map_err(|e| e.to_string())?;
+    if on_disk.composio.webhook.composio_webhook_subscription_id == new_id {
+        return Ok(()); // raced with another writer; nothing to do
+    }
+    on_disk.composio.webhook.composio_webhook_subscription_id = new_id.to_string();
+    on_disk.save().await.map_err(|e| e.to_string())
+}
+
+// ── Local webhook receiver (direct-mode trigger delivery) ─────────
+
+/// Status payload returned by [`composio_local_webhook_status`].
+///
+/// Shape is deliberately flat so the React Settings → Triggers panel
+/// can render it without a schema mapper.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComposioLocalWebhookStatus {
+    /// `"idle"`, `"connecting"`, `"ready"`, or `"error"` — driven by
+    /// [`webhook_receiver::tunnel_state`].
+    pub tunnel_state: String,
+    /// Currently registered Composio webhook URL (e.g.
+    /// `"https://abc-123.ngrok-free.dev/webhook"`). `None` when the
+    /// receiver is not active.
+    pub public_url: Option<String>,
+    /// Last observed tunnel error string (if any). Useful for the
+    /// settings panel to surface "ngrok said X".
+    pub error: Option<String>,
+    /// Composio webhook subscription id persisted in
+    /// `config.composio.webhook.composio_webhook_subscription_id`.
+    /// Surfaced read-only so the user can see "is this hooked up at
+    /// app.composio.dev yet?".
+    pub subscription_id: String,
+    /// Local loopback port the receiver binds to.
+    pub local_port: u16,
+    /// The static ngrok domain configured in
+    /// `config.composio.webhook.ngrok_domain`.
+    pub ngrok_domain: String,
+    /// True iff the user has stored an ngrok authtoken. The token
+    /// itself is never returned.
+    pub has_authtoken: bool,
+}
+
+/// Patch the non-secret webhook config fields and persist to disk.
+///
+/// Used by Settings → Triggers. The ngrok authtoken and Composio
+/// webhook signing secret never come through here — those go through
+/// dedicated credential setters because they belong in AuthService,
+/// not config.toml.
+pub async fn composio_set_webhook_config(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    ngrok_domain: Option<String>,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let mut on_disk = Config::load_or_init().await.map_err(|e| e.to_string())?;
+    if let Some(e) = enabled {
+        on_disk.composio.webhook.local_receiver_enabled = e;
+    }
+    if let Some(p) = port {
+        on_disk.composio.webhook.local_receiver_port = p;
+    }
+    if let Some(d) = ngrok_domain {
+        on_disk.composio.webhook.ngrok_domain = d.trim().to_string();
+    }
+    on_disk.save().await.map_err(|e| e.to_string())?;
+    composio_local_webhook_status(&on_disk).await
+}
+
+pub async fn composio_local_webhook_status(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let state = webhook_receiver::tunnel_state();
+    let (tunnel_state, error) = match &state {
+        webhook_receiver::TunnelState::Idle => ("idle".to_string(), None),
+        webhook_receiver::TunnelState::Connecting => ("connecting".to_string(), None),
+        webhook_receiver::TunnelState::Ready { .. } => ("ready".to_string(), None),
+        webhook_receiver::TunnelState::Error(msg) => ("error".to_string(), Some(msg.clone())),
+    };
+    let public_url = webhook_receiver::public_webhook_url();
+    let has_authtoken = crate::openhuman::credentials::ops::get_ngrok_authtoken(config)
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    let payload = ComposioLocalWebhookStatus {
+        tunnel_state,
+        public_url,
+        error,
+        subscription_id: config
+            .composio
+            .webhook
+            .composio_webhook_subscription_id
+            .clone(),
+        local_port: config.composio.webhook.local_receiver_port,
+        ngrok_domain: config.composio.webhook.ngrok_domain.clone(),
+        has_authtoken,
+    };
+    let log = format!(
+        "composio webhook: tunnel={}, sub_id={}",
+        payload.tunnel_state,
+        if payload.subscription_id.is_empty() {
+            "(none)"
+        } else {
+            payload.subscription_id.as_str()
+        },
+    );
+    Ok(RpcOutcome::new(payload, vec![log]))
+}
+
+/// Explicit (re)start of the local webhook receiver.
+///
+/// Idempotent: a successful start when the receiver is already up
+/// returns the current state with `"ready"`. Use this after pasting
+/// in a new ngrok authtoken or rotating the static domain — the
+/// receiver doesn't auto-restart on config-change events for v1.
+pub async fn composio_local_webhook_start(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    let config_arc = std::sync::Arc::new(config.clone());
+    webhook_receiver::init(&config_arc)
+        .await
+        .map_err(|e| format!("[composio] local webhook start: {e}"))?;
+    let mut outcome = composio_local_webhook_status(config).await?;
+    outcome.logs.insert(
+        0,
+        "composio webhook: start requested (idempotent — no-op if already running)".to_string(),
+    );
+    Ok(outcome)
+}
+
+/// Explicit stop. Drops the tunnel + aborts the local listener.
+/// Returns the post-stop status (`"idle"`).
+pub async fn composio_local_webhook_stop(
+    config: &Config,
+) -> OpResult<RpcOutcome<ComposioLocalWebhookStatus>> {
+    webhook_receiver::stop();
+    let mut outcome = composio_local_webhook_status(config).await?;
+    outcome
+        .logs
+        .insert(0, "composio webhook: stop requested".to_string());
+    Ok(outcome)
+}
+
+/// Round-trip self-test: hit the receiver's loopback `/healthz` via
+/// the ngrok public URL. Verifies the tunnel is reachable from the
+/// outside world without depending on Composio. Used by the
+/// "Test tunnel" button in Settings → Triggers.
+///
+/// Returns `Ok` with a single log line on success, or `Err` with the
+/// HTTP error / network error on failure.
+pub async fn composio_local_webhook_test(
+    _config: &Config,
+) -> OpResult<RpcOutcome<serde_json::Value>> {
+    let url = webhook_receiver::public_webhook_url().ok_or_else(|| {
+        "[composio] local webhook test: receiver is not running. Start it from \
+         Settings → Triggers first."
+            .to_string()
+    })?;
+    // The `public_webhook_url()` value ends in `/webhook`; swap to
+    // `/healthz` for the public reachability probe.
+    let probe_url = url.trim_end_matches("/webhook").to_string() + "/healthz";
+    let client = crate::openhuman::config::build_runtime_proxy_client_with_timeouts(
+        "composio.webhook.test",
+        15,
+        5,
+    );
+    let resp = client
+        .get(&probe_url)
+        .send()
+        .await
+        .map_err(|e| format!("[composio] local webhook test: GET {probe_url} failed: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+    if !status.is_success() {
+        return Err(format!(
+            "[composio] local webhook test: GET {probe_url} returned {status}: {body}"
+        ));
+    }
+    Ok(RpcOutcome::new(
+        serde_json::json!({ "ok": true, "url": probe_url, "body": body }),
+        vec![format!("composio webhook: round-trip OK via {probe_url}")],
+    ))
 }
 
 // ── Trigger history ────────────────────────────────────────────────
@@ -853,6 +1242,52 @@ async fn resolve_toolkit_for_connection(
     Ok(conn.toolkit)
 }
 
+/// Mode-aware sibling of [`resolve_toolkit_for_connection`]. Looks up
+/// the toolkit slug via the factory, so direct-mode users (no backend
+/// session token, BYO Composio API key) still resolve the connection
+/// against **their own** Composio tenant. Used by ops whose data-path
+/// runs through the mode-aware [`ProviderContext::execute`] —
+/// [`composio_sync`] today; analogous callers can be migrated later by
+/// swapping `resolve_client(config)` + `resolve_toolkit_for_connection`
+/// for a single call to this helper.
+///
+/// Returns the same `connection unknown` error shape as the legacy
+/// helper so existing UI / agent error handling continues to work.
+async fn resolve_toolkit_for_connection_mode_aware(
+    config: &Config,
+    connection_id: &str,
+) -> OpResult<String> {
+    tracing::debug!(
+        connection_id = %connection_id,
+        "[composio] resolve_toolkit_for_connection_mode_aware"
+    );
+    let kind =
+        create_composio_client(config).map_err(|e| format!("[composio] resolve_toolkit: {e}"))?;
+    let connections = match kind {
+        ComposioClientKind::Backend(client) => {
+            let resp = client.list_connections().await.map_err(|e| {
+                report_composio_op_error("resolve_toolkit_for_connection", &e);
+                format!("[composio] list_connections failed: {e:#}")
+            })?;
+            resp.connections
+        }
+        ComposioClientKind::Direct(direct) => {
+            // Walk the user's personal Composio v3 tenant rather than
+            // the (non-existent) backend session. Mirrors the direct
+            // arm in [`composio_list_connections`] (#1710).
+            let resp = direct_list_connections(&direct)
+                .await
+                .map_err(|e| format!("[composio-direct] list_connections failed: {e:#}"))?;
+            resp.connections
+        }
+    };
+    connections
+        .into_iter()
+        .find(|c| c.id == connection_id)
+        .map(|c| c.toolkit)
+        .ok_or_else(|| format!("[composio] no connection with id '{connection_id}'"))
+}
+
 /// `openhuman.composio_get_user_profile` — fetch a normalized user
 /// profile for a connected account by dispatching to the toolkit's
 /// registered [`super::providers::ComposioProvider`].
@@ -861,19 +1296,20 @@ pub async fn composio_get_user_profile(
     connection_id: &str,
 ) -> OpResult<RpcOutcome<ProviderUserProfile>> {
     tracing::debug!(connection_id = %connection_id, "[composio] rpc get_user_profile");
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id).await?;
+    // Mode-aware: identical contract to composio_sync — direct-mode
+    // users (no backend session token, BYO Composio key) previously
+    // hit "composio unavailable: no backend session token" at the
+    // legacy resolve_client gate, even with an active connection in
+    // their personal Composio tenant. The data path
+    // (provider.fetch_user_profile → ctx.execute) is already
+    // mode-aware (#1710), so once we have the toolkit slug the rest
+    // works as-is.
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id).await?;
 
     let provider = get_provider(&toolkit).ok_or_else(|| {
         format!("[composio] no native provider registered for toolkit '{toolkit}'")
     })?;
 
-    // #1710: drop the pre-baked `client` field from `ProviderContext`.
-    // The factory resolves a fresh client per `ctx.execute(...)` call so
-    // a mode toggle is honoured immediately. We keep the local `client`
-    // binding alive for the toolkit lookup above (which still uses the
-    // explicit handle); the context itself just carries `Arc<Config>`.
-    let _ = client;
     let ctx = ProviderContext {
         config: Arc::new(config.clone()),
         toolkit: toolkit.clone(),
@@ -915,11 +1351,33 @@ pub async fn composio_refresh_all_identities(
     config: &Config,
 ) -> OpResult<RpcOutcome<RefreshIdentitiesReport>> {
     tracing::info!("[composio] rpc refresh_all_identities");
-    let client = resolve_client(config)?;
-    let conns = client.list_connections().await.map_err(|e| {
-        report_composio_op_error("refresh_all_identities", &e);
-        format!("[composio] list_connections failed: {e:#}")
-    })?;
+    // Mode-aware: mirrors `periodic::run_one_tick` (the only other
+    // op that needs to enumerate ALL connections in a single pass).
+    // Backend mode walks the tinyhumans aggregator's view; direct
+    // mode walks the user's personal Composio v3 tenant via
+    // `direct_list_connections`. The iterate-and-fetch_user_profile
+    // loop below is already mode-aware — every Composio action runs
+    // through `ProviderContext::execute`, which re-resolves a fresh
+    // client per call (the #1710 contract).
+    let kind = create_composio_client(config)
+        .map_err(|e| format!("[composio] refresh_all_identities: {e}"))?;
+    let conns = match kind {
+        ComposioClientKind::Backend(client) => {
+            tracing::debug!("[composio] refresh_all_identities: backend variant");
+            client.list_connections().await.map_err(|e| {
+                report_composio_op_error("refresh_all_identities", &e);
+                format!("[composio] list_connections failed: {e:#}")
+            })?
+        }
+        ComposioClientKind::Direct(direct) => {
+            tracing::info!(
+                "[composio-direct] refresh_all_identities: walking user's personal Composio tenant"
+            );
+            direct_list_connections(&direct)
+                .await
+                .map_err(|e| format!("[composio-direct] list_connections failed: {e:#}"))?
+        }
+    };
 
     let mut report = RefreshIdentitiesReport::default();
     let mut messages: Vec<String> = Vec::with_capacity(conns.connections.len() + 1);
@@ -1018,79 +1476,35 @@ pub async fn composio_sync(
     tracing::debug!(
         connection_id = %connection_id,
         reason = reason.as_str(),
-        "[composio] rpc sync (spawned)"
+        "[composio] rpc sync"
     );
-    // Validate synchronously — a bad request (unknown connection / no native
-    // provider for toolkit) must surface to the caller via the RPC error
-    // envelope, not silently inside a spawned task.
-    let client = resolve_client(config)?;
-    let toolkit = resolve_toolkit_for_connection(&client, connection_id).await?;
+    // Mode-aware: works for backend-proxied users AND direct-mode users
+    // (BYO Composio API key, no backend session token). Previously this
+    // gated on `resolve_client(config)?` which always required a backend
+    // session — direct-mode users hit "composio unavailable: no backend
+    // session token" even after a successful authorize + active
+    // connection.  The actual data path inside `provider.sync()` runs
+    // every Composio action through `ProviderContext::execute`, which is
+    // already mode-aware (#1710), so once we have the toolkit slug the
+    // rest is identical regardless of mode.
+    let toolkit = resolve_toolkit_for_connection_mode_aware(config, connection_id).await?;
+
     let provider = get_provider(&toolkit).ok_or_else(|| {
         format!("[composio] no native provider registered for toolkit '{toolkit}'")
     })?;
-    let _ = client; // see analogous comment above — drop the pre-baked client (#1710).
 
-    // `provider.sync` walks every page of the upstream API and ingests every
-    // message in-band — on a real prod inbox a healthy run can legitimately
-    // exceed the frontend's 30s `composio_sync` RPC `.await` cap (one
-    // healthy periodic tick is already ~100s for 20 pages / 500 messages).
-    // There is no reason for the UI to block on it: per-source progress is
-    // already exposed via the polled `openhuman.memory_sync_status_list` RPC,
-    // which reads `mem_tree_chunks` directly and therefore reflects the
-    // spawned task's per-message ingest in real time. So we spawn the sync
-    // as a background task and return immediately with a "started" envelope.
-    // The periodic scheduler (`composio::periodic`) already runs
-    // `provider.sync` from inside its own `tokio::spawn` loop — same pattern.
     let ctx = ProviderContext {
         config: Arc::new(config.clone()),
         toolkit: toolkit.clone(),
         connection_id: Some(connection_id.to_string()),
     };
-    let started_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let toolkit_for_outcome = toolkit.clone();
-    let connection_id_for_log = connection_id.to_string();
 
-    tokio::spawn(async move {
-        let toolkit_in_task = ctx.toolkit.clone();
-        match provider.sync(&ctx, reason).await {
-            Ok(out) => {
-                tracing::info!(
-                    toolkit = %toolkit_in_task,
-                    connection_id = %connection_id_for_log,
-                    items_ingested = out.items_ingested,
-                    elapsed_ms = out.elapsed_ms(),
-                    "[composio] background sync ok"
-                );
-            }
-            Err(e) => {
-                report_composio_op_error("sync", &e);
-                tracing::warn!(
-                    toolkit = %toolkit_in_task,
-                    connection_id = %connection_id_for_log,
-                    error = %e,
-                    "[composio] background sync failed"
-                );
-            }
-        }
-    });
+    let outcome = provider.sync(&ctx, reason).await.map_err(|e| {
+        report_composio_op_error("sync", &e);
+        format!("[composio] sync({toolkit}) failed: {e}")
+    })?;
 
-    let summary = format!("composio: {toolkit_for_outcome} sync started (background)");
-    let outcome = SyncOutcome {
-        toolkit: toolkit_for_outcome,
-        connection_id: Some(connection_id.to_string()),
-        reason: reason.as_str().to_string(),
-        items_ingested: 0,
-        started_at_ms,
-        // Sentinel: still running. Frontend should rely on
-        // `memory_sync_status_list` for progress; `finished_at_ms == 0`
-        // means "spawned, not yet complete".
-        finished_at_ms: 0,
-        summary: summary.clone(),
-        details: serde_json::json!({ "status": "started" }),
-    };
+    let summary = outcome.summary.clone();
     Ok(RpcOutcome::new(outcome, vec![summary]))
 }
 
@@ -1114,9 +1528,7 @@ fn parse_sync_reason(raw: Option<&str>) -> OpResult<SyncReason> {
 
 // ── Prompt integration discovery ────────────────────────────────────
 
-use crate::openhuman::context::prompt::{
-    ConnectedIntegration, ConnectedIntegrationTool, GatedIntegrationTool,
-};
+use crate::openhuman::context::prompt::{ConnectedIntegration, ConnectedIntegrationTool};
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, RwLock};
 use std::time::{Duration, Instant};
@@ -1462,15 +1874,12 @@ pub async fn fetch_connected_integrations_status(
 
 /// The actual backend fetch, called on cache miss.
 ///
-/// Returns `Some(vec)` when the backend was reachable. The returned
-/// vector is the merged **integration overview** — every toolkit in
-/// the backend allowlist appears as one entry, with a `connected`
-/// flag indicating whether the user has an active OAuth connection.
-/// Connected entries also carry the per-action tool catalogue
-/// (fetched in a single batched call).
-///
-/// Returns `None` when we couldn't even build a client (no auth),
-/// signalling the caller should NOT cache this result.
+/// **Stubbed for the local-OAuth refactor**: returns `Unavailable`
+/// (`None`) without making a network call. Composio backend access
+/// was removed; the agent's "connected integrations" surface is
+/// expected to be re-sourced from `AuthService` profiles in a follow-up
+/// (it currently sees zero connections, which prompts the user-visible
+/// "no connections" state in the agent prompt).
 async fn fetch_connected_integrations_uncached(
     config: &Config,
 ) -> Option<Vec<ConnectedIntegration>> {
@@ -1685,84 +2094,38 @@ async fn fetch_connected_integrations_uncached(
         // each other's actions. `GMAIL_SEND_EMAIL` matches `gmail_`,
         // not just `gmail`, so siblings stay in their own buckets.
         let action_prefix = format!("{}_", slug.to_uppercase());
-        let (tools, gated_tools): (Vec<ConnectedIntegrationTool>, Vec<GatedIntegrationTool>) =
-            if connected {
-                // Apply the same curated-whitelist + user-scope filter the
-                // meta-tool layer uses, so the integrations_agent prompt
-                // only advertises actions the agent is actually allowed to
-                // call. One pref load per toolkit (not per action).
-                //
-                // Actions that the catalog *does* know about but the user's
-                // current scope pref denies are routed into `gated_tools` so
-                // the agent can honestly answer "I have this capability but
-                // it needs the {scope} toggle in Connections → {toolkit}".
-                // The agent cannot flip the scope itself — that's a UI-only
-                // action. Without this gated surface the LLM has no way to
-                // know the gated action exists at all and will tell the user
-                // "I don't support that" — technically correct about its
-                // callable surface, but misleading about the toolkit.
-                let pref = super::providers::load_user_scope_or_default(slug).await;
-                let mut visible: Vec<ConnectedIntegrationTool> = Vec::new();
-                let mut gated: Vec<GatedIntegrationTool> = Vec::new();
-                for t in tools_by_toolkit
-                    .iter()
-                    .filter(|t| t.function.name.starts_with(&action_prefix))
-                {
-                    if super::providers::is_action_visible_with_pref(&t.function.name, &pref) {
-                        visible.push(ConnectedIntegrationTool {
-                            name: t.function.name.clone(),
-                            description: t.function.description.clone().unwrap_or_default(),
-                            parameters: t.function.parameters.clone(),
-                        });
-                    } else if let Some(required_scope) =
-                        super::providers::curated_scope_for(&t.function.name)
-                    {
-                        // Only surface CURATED actions as `gated` — uncurated
-                        // tools (which fall through to `classify_unknown` and
-                        // happen to land outside the user's pref) are not
-                        // first-class user-facing capabilities, and listing
-                        // them would clutter the prompt with internal slugs.
-                        // Deliberately NO `parameters` field: the LLM should
-                        // not be able to construct a call envelope; it can
-                        // only describe + point at the unlock path.
-                        // Ship the unlock path as data — single path today
-                        // (the Connections UI toggle). The agent does NOT
-                        // have a tool to flip scopes; that capability was
-                        // removed because LLM-mediated scope elevation made
-                        // the safety contract depend on model behavior and
-                        // was a soft gate the model could route around. If
-                        // more unlock paths exist in future (per-action
-                        // approval modal, time-boxed elevation, etc.) they
-                        // land here and the prompt renderer picks them up.
-                        let scope_str = required_scope.as_str();
-                        let unlock_paths = vec![format!(
-                            "the user enables it themselves in \
-                             Connections → {slug} → {scope_str}"
-                        )];
-                        gated.push(GatedIntegrationTool {
-                            name: t.function.name.clone(),
-                            description: t.function.description.clone().unwrap_or_default(),
-                            required_scope: scope_str.to_string(),
-                            unlock_paths,
-                        });
-                    }
-                }
-                tracing::debug!(
-                    toolkit = %slug,
-                    visible = visible.len(),
-                    gated = gated.len(),
-                    "[composio][scopes] integrations prompt action set"
-                );
-                (visible, gated)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+        let tools: Vec<ConnectedIntegrationTool> = if connected {
+            // Apply the same curated-whitelist + user-scope filter the
+            // meta-tool layer uses, so the integrations_agent prompt
+            // only advertises actions the agent is actually allowed to
+            // call. One pref load per toolkit (not per action).
+            let pref = super::providers::load_user_scope_or_default(slug).await;
+            let filtered: Vec<&super::types::ComposioToolSchema> = tools_by_toolkit
+                .iter()
+                .filter(|t| t.function.name.starts_with(&action_prefix))
+                .filter(|t| super::providers::is_action_visible_with_pref(&t.function.name, &pref))
+                .collect();
+            tracing::debug!(
+                toolkit = %slug,
+                kept = filtered.len(),
+                "[composio][scopes] integrations prompt action set"
+            );
+            filtered
+                .into_iter()
+                .map(|t| ConnectedIntegrationTool {
+                    name: t.function.name.clone(),
+                    description: t.function.description.clone().unwrap_or_default(),
+                    parameters: t.function.parameters.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         integrations.push(ConnectedIntegration {
             toolkit: slug.clone(),
             description: toolkit_description(slug).to_string(),
             tools,
-            gated_tools,
             connected,
         });
     }
@@ -1837,6 +2200,61 @@ pub async fn fetch_toolkit_actions(
         toolkit = %toolkit_slug,
         action_count = actions.len(),
         "[composio] fetch_toolkit_actions: done"
+    );
+    Ok(actions)
+}
+
+/// Direct-mode counterpart to [`fetch_toolkit_actions`].
+///
+/// Hits Composio v3 `/tools?toolkit_slugs=<toolkit>` against the user's
+/// personal tenant via [`direct_list_tools`] and applies the same curated-
+/// whitelist + user-scope filter the backend path uses, so the sub-agent
+/// sees a consistent action surface across modes.
+///
+/// **Why this exists**: the session-start bulk fetch
+/// (`fetch_connected_integrations_uncached`) can populate the parent's
+/// `connected_integrations` Vec with zero actions for a toolkit even when
+/// the per-toolkit endpoint returns a full catalogue — for example when the
+/// user authorises Gmail mid-session, when the bulk fetch raced an
+/// in-flight OAuth, or when the integrations cache was warmed before the
+/// connection went `ACTIVE`. The `integrations_agent` spawn path
+/// (`subagent_runner::ops`) previously fell back to that cached zero-action
+/// list in direct mode, which left the sub-agent with nothing to call and
+/// surfaced as "Gmail isn't connected" to the user even when Composio
+/// reported the connection as active.
+pub async fn fetch_direct_toolkit_actions(
+    direct: &Arc<crate::openhuman::tools::ComposioTool>,
+    toolkit: &str,
+) -> anyhow::Result<Vec<ConnectedIntegrationTool>> {
+    let toolkit_slug = toolkit.trim();
+    if toolkit_slug.is_empty() {
+        anyhow::bail!("fetch_direct_toolkit_actions: toolkit must not be empty");
+    }
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        "[composio-direct] fetch_direct_toolkit_actions"
+    );
+    let scope = vec![toolkit_slug.to_string()];
+    let resp = direct_list_tools(direct, &scope).await.map_err(|e| {
+        anyhow::anyhow!("direct_list_tools failed for toolkit `{toolkit_slug}`: {e:#}")
+    })?;
+    let action_prefix = format!("{}_", toolkit_slug.to_uppercase());
+    let pref = super::providers::load_user_scope_or_default(toolkit_slug).await;
+    let actions: Vec<ConnectedIntegrationTool> = resp
+        .tools
+        .into_iter()
+        .filter(|t| t.function.name.starts_with(&action_prefix))
+        .filter(|t| super::providers::is_action_visible_with_pref(&t.function.name, &pref))
+        .map(|t| ConnectedIntegrationTool {
+            name: t.function.name,
+            description: t.function.description.unwrap_or_default(),
+            parameters: t.function.parameters,
+        })
+        .collect();
+    tracing::debug!(
+        toolkit = %toolkit_slug,
+        action_count = actions.len(),
+        "[composio-direct] fetch_direct_toolkit_actions: done"
     );
     Ok(actions)
 }

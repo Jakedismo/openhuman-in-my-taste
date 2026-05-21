@@ -35,8 +35,14 @@ export interface VoiceStatus {
   llm_cleanup_enabled: boolean;
   /** Currently selected STT provider ('cloud' or 'whisper'). */
   stt_provider: string;
-  /** Currently selected TTS provider ('cloud' or 'piper'). */
+  /** Currently selected TTS provider ('cloud', 'piper', 'kokoro', or 'system' for macOS-native say). */
   tts_provider: string;
+  /** Base URL of the user-configured Kokoro (local OpenAI-compatible TTS) server. */
+  kokoro_endpoint_url: string;
+  /** `model` field sent in the OpenAI-compatible TTS request body. */
+  kokoro_model: string;
+  /** Default voice id used when `kokoro` is the active TTS provider. */
+  kokoro_voice: string;
 }
 
 export interface VoiceServerStatus {
@@ -113,11 +119,19 @@ export async function openhumanUpdateVoiceServerSettings(update: {
   });
 }
 
+/** Supported TTS provider ids. `'system'` is macOS-only — Linux / Windows
+ *  surfaces an error from the core if selected. `'kokoro'` routes to a
+ *  user-supplied OpenAI-compatible HTTP server (kokoro-fastapi, mlx-audio). */
+export type TtsProviderId = 'cloud' | 'piper' | 'kokoro' | 'system';
+
 export interface VoiceProvidersUpdate {
   stt_provider?: 'cloud' | 'whisper';
-  tts_provider?: 'cloud' | 'piper';
+  tts_provider?: TtsProviderId;
   stt_model?: string;
   tts_voice?: string;
+  kokoro_endpoint_url?: string;
+  kokoro_model?: string;
+  kokoro_voice?: string;
 }
 
 export interface VoiceProvidersSnapshot {
@@ -125,6 +139,9 @@ export interface VoiceProvidersSnapshot {
   tts_provider: string;
   stt_model_id: string;
   tts_voice_id: string;
+  kokoro_endpoint_url: string;
+  kokoro_model: string;
+  kokoro_voice: string;
 }
 
 /**

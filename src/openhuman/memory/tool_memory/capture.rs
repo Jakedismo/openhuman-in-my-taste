@@ -299,8 +299,6 @@ mod tests {
             tool_calls,
             turn_duration_ms: 1,
             session_id: None,
-            agent_id: None,
-            entrypoint: None,
             iteration_count: 1,
         }
     }

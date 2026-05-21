@@ -1,7 +1,6 @@
 import { render } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { callCoreRpc } from '../../services/coreRpcClient';
 import { socketService } from '../../services/socketService';
 import { useCoreState } from '../CoreStateProvider';
 import SocketProvider from '../SocketProvider';
@@ -12,8 +11,6 @@ vi.mock('../../services/socketService', () => ({
   socketService: { connect: vi.fn(), disconnect: vi.fn() },
 }));
 
-vi.mock('../../services/coreRpcClient', () => ({ callCoreRpc: vi.fn().mockResolvedValue({}) }));
-
 vi.mock('../../hooks/useDaemonLifecycle', () => ({
   useDaemonLifecycle: () => ({
     isAutoStartEnabled: false,
@@ -23,19 +20,23 @@ vi.mock('../../hooks/useDaemonLifecycle', () => ({
   }),
 }));
 
-// Mock the store so we can spy on dispatch — used by the RPC-failure path tests.
-// Must use vi.hoisted so variables are available inside vi.mock factory (which is hoisted).
-const { dispatchMock, setCoreMock, setBackendMock } = vi.hoisted(() => ({
-  dispatchMock: vi.fn(),
-  setCoreMock: vi.fn((p: unknown) => ({ type: 'connectivity/setCore', payload: p })),
-  setBackendMock: vi.fn((p: unknown) => ({ type: 'connectivity/setBackend', payload: p })),
-}));
+const socketStatusMock = vi.hoisted(() => vi.fn<() => string>(() => 'connected'));
 
-vi.mock('../../store/index', () => ({ store: { dispatch: dispatchMock }, IS_DEV: false }));
+vi.mock('react-redux', async () => {
+  const actual = await vi.importActual<typeof import('react-redux')>('react-redux');
+  return {
+    ...actual,
+    useSelector: (selector: unknown) => {
+      // The provider only calls `useSelector(selectSocketStatus)` —
+      // surface whatever the test pinned via `setSocketStatus`.
+      void selector;
+      return socketStatusMock();
+    },
+  };
+});
 
-vi.mock('../../store/connectivitySlice', () => ({
-  setCore: (p: unknown) => setCoreMock(p),
-  setBackend: (p: unknown) => setBackendMock(p),
+vi.mock('../../store/socketSelectors', () => ({
+  selectSocketStatus: vi.fn(),
 }));
 
 type SnapshotShape = { sessionToken: string | null };
@@ -46,15 +47,40 @@ function setToken(token: string | null) {
   } as unknown as ReturnType<typeof useCoreState>);
 }
 
-describe('SocketProvider — token transitions', () => {
+function setSocketStatus(status: string) {
+  socketStatusMock.mockImplementation(() => status);
+}
+
+// Local-OAuth fork: the previous test suite verified token-gated
+// connect behaviour + the now-deleted `openhuman.socket_connect_with_session`
+// RPC failure handling. Both surfaces are gone:
+//
+// 1. Connect-gating-on-token was the chat-blocking bug — there is no
+//    session token in this fork, so the socket would never connect
+//    and `evaluateComposerSend` returned `blockReason='socket_disconnected'`
+//    for every send. The provider now connects on mount with the
+//    string `'local'` as a handshake placeholder (the core's
+//    Socket.IO server accepts every connection unconditionally and
+//    doesn't validate the token).
+// 2. The `socket_connect_with_session` RPC was the backend-alphahuman
+//    handshake; the OpenHuman backend is dead, so calling it now
+//    logs `unknown_method` and spams console errors. The provider
+//    no longer calls it.
+
+describe('SocketProvider — local-OAuth connect behaviour', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    dispatchMock.mockClear();
-    setCoreMock.mockClear();
-    setBackendMock.mockClear();
+    // Default to `connected` so the watchdog effect stays dormant.
+    // Individual tests flip to `disconnected` to assert the retry
+    // loop fires.
+    setSocketStatus('connected');
   });
 
-  it('does not connect when mounted with a null token', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('connects with a "local" placeholder when mounted with a null token', () => {
     setToken(null);
     render(
       <SocketProvider>
@@ -62,11 +88,11 @@ describe('SocketProvider — token transitions', () => {
       </SocketProvider>
     );
 
-    expect(vi.mocked(socketService.connect)).not.toHaveBeenCalled();
-    expect(vi.mocked(socketService.disconnect)).not.toHaveBeenCalled();
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledWith('local');
   });
 
-  it('connects socket and triggers sidecar RPC when a token first appears', () => {
+  it('connects with the session token when one is present', () => {
     setToken('jwt-abc');
     render(
       <SocketProvider>
@@ -76,9 +102,6 @@ describe('SocketProvider — token transitions', () => {
 
     expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(socketService.connect)).toHaveBeenCalledWith('jwt-abc');
-    expect(vi.mocked(callCoreRpc)).toHaveBeenCalledWith(
-      expect.objectContaining({ method: 'openhuman.socket_connect_with_session' })
-    );
   });
 
   it('does not reconnect when the same token re-renders', () => {
@@ -90,7 +113,6 @@ describe('SocketProvider — token transitions', () => {
     );
     expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
 
-    // Same token on re-render — should not trigger another connect.
     setToken('jwt-abc');
     rerender(
       <SocketProvider>
@@ -99,26 +121,6 @@ describe('SocketProvider — token transitions', () => {
     );
 
     expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(socketService.disconnect)).not.toHaveBeenCalled();
-  });
-
-  it('disconnects when the token is cleared after being set', () => {
-    setToken('jwt-abc');
-    const { rerender } = render(
-      <SocketProvider>
-        <div />
-      </SocketProvider>
-    );
-    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
-
-    setToken(null);
-    rerender(
-      <SocketProvider>
-        <div />
-      </SocketProvider>
-    );
-
-    expect(vi.mocked(socketService.disconnect)).toHaveBeenCalledTimes(1);
   });
 
   it('reconnects when the token rotates to a new value', () => {
@@ -128,7 +130,6 @@ describe('SocketProvider — token transitions', () => {
         <div />
       </SocketProvider>
     );
-    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(socketService.connect)).toHaveBeenLastCalledWith('jwt-first');
 
     setToken('jwt-second');
@@ -141,77 +142,69 @@ describe('SocketProvider — token transitions', () => {
     expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(socketService.connect)).toHaveBeenLastCalledWith('jwt-second');
   });
-});
 
-describe('SocketProvider — RPC failure dispatches (lines 62, 69-71, 73)', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    dispatchMock.mockClear();
-    setCoreMock.mockClear();
-    setBackendMock.mockClear();
+  it('reconnects with "local" when the token is cleared after being set', () => {
+    setToken('jwt-abc');
+    const { rerender } = render(
+      <SocketProvider>
+        <div />
+      </SocketProvider>
+    );
+    expect(vi.mocked(socketService.connect)).toHaveBeenLastCalledWith('jwt-abc');
+
+    setToken(null);
+    rerender(
+      <SocketProvider>
+        <div />
+      </SocketProvider>
+    );
+
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(socketService.connect)).toHaveBeenLastCalledWith('local');
   });
 
-  it('dispatches setCore(unreachable) on ECONNREFUSED transport failure (lines 69-71)', async () => {
-    vi.mocked(callCoreRpc).mockRejectedValueOnce(new Error('Failed to fetch: ECONNREFUSED'));
+  // Watchdog: when socket.io's built-in reconnection caps out and
+  // leaves the status at `disconnected` (typical after a core
+  // restart that takes >5s — every `pnpm dev:app` cycle in dev),
+  // the provider retries `socketService.connect()` every 5s. This
+  // closes the "Realtime socket is not connected" composer-block
+  // loop the user reported.
+  it('watchdog retries socketService.connect() every 5s while status=disconnected', () => {
+    vi.useFakeTimers();
+    setToken(null);
+    setSocketStatus('disconnected');
 
-    setToken('jwt-transport-fail');
     render(
       <SocketProvider>
         <div />
       </SocketProvider>
     );
 
-    // Let the async callCoreRpc rejection propagate.
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Initial mount call.
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
 
-    expect(setCoreMock).toHaveBeenCalledWith(expect.objectContaining({ value: 'unreachable' }));
+    vi.advanceTimersByTime(5_000);
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(5_000);
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(3);
   });
 
-  it('dispatches setBackend(disconnected) on non-transport RPC failure (line 73)', async () => {
-    vi.mocked(callCoreRpc).mockRejectedValueOnce(new Error('401 Unauthorized backend rejection'));
+  it('watchdog stays dormant when status is connected', () => {
+    vi.useFakeTimers();
+    setToken(null);
+    setSocketStatus('connected');
 
-    setToken('jwt-backend-fail');
     render(
       <SocketProvider>
         <div />
       </SocketProvider>
     );
 
-    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
 
-    expect(setBackendMock).toHaveBeenCalledWith(expect.objectContaining({ value: 'disconnected' }));
-  });
-
-  it('extracts message from non-Error rejection (line 62)', async () => {
-    vi.mocked(callCoreRpc).mockRejectedValueOnce('plain string rejection');
-
-    setToken('jwt-string-fail');
-    render(
-      <SocketProvider>
-        <div />
-      </SocketProvider>
-    );
-
-    await new Promise(resolve => setTimeout(resolve, 0));
-
-    // 'plain string rejection' does not match ECONNREFUSED pattern → backend channel.
-    expect(setBackendMock).toHaveBeenCalledWith(
-      expect.objectContaining({ value: 'disconnected', error: 'plain string rejection' })
-    );
-  });
-
-  it('NetworkError in message routes to core channel (line 69-71)', async () => {
-    vi.mocked(callCoreRpc).mockRejectedValueOnce(new Error('NetworkError when attempting fetch'));
-
-    setToken('jwt-network-error');
-    render(
-      <SocketProvider>
-        <div />
-      </SocketProvider>
-    );
-
-    await new Promise(resolve => setTimeout(resolve, 0));
-
-    expect(setCoreMock).toHaveBeenCalledWith(expect.objectContaining({ value: 'unreachable' }));
+    vi.advanceTimersByTime(15_000);
+    // No additional connect calls — watchdog did not fire.
+    expect(vi.mocked(socketService.connect)).toHaveBeenCalledTimes(1);
   });
 });

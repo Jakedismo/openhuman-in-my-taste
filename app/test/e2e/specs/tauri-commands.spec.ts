@@ -15,14 +15,12 @@
  *      through the same `callOpenhumanRpc` helper every product spec uses.
  *      That round-trips renderer → Tauri IPC → relay → core → response.
  *
- * The Tauri commands are invoked via `window.__TAURI_INTERNALS__.invoke`
- * inside `browser.executeAsync(...)` so the call lives inside the WebView,
- * the same way the React app reaches the shell at runtime.
- * `window.__TAURI_INTERNALS__` is the low-level IPC channel set up by the
- * Rust side; it is available on all platforms including the custom CEF
- * runtime, whereas `window.__TAURI__` (the higher-level JS namespace) is
- * only injected when the `@tauri-apps/api` init script runs and is not
- * present in the CEF harness.
+ * The Tauri commands are invoked via `window.__TAURI__.core.invoke` inside
+ * `browser.executeAsync(...)` so the call lives inside the WebView, the
+ * same way the React app reaches the shell at runtime. The
+ * `window.__TAURI__` direct-access rule from CLAUDE.md applies to product
+ * code; E2E specs whose job is to test the bridge itself are the
+ * exception.
  */
 import { waitForApp } from '../helpers/app-helpers';
 import { callOpenhumanRpc } from '../helpers/core-rpc';
@@ -42,12 +40,13 @@ async function invokeTauri<T = unknown>(
 ): Promise<TauriResult<T>> {
   return (await browser.executeAsync(
     (command, payload, done) => {
-      const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
-      if (typeof invoke !== 'function') {
-        done({ __error: 'window.__TAURI_INTERNALS__.invoke not available' });
+      const tauri = (window as any).__TAURI__;
+      if (!tauri?.core?.invoke) {
+        done({ __error: 'window.__TAURI__.core.invoke not available' });
         return;
       }
-      invoke(command, payload)
+      tauri.core
+        .invoke(command, payload)
         .then((result: unknown) => done({ __ok: result }))
         .catch((err: unknown) =>
           done({ __error: err instanceof Error ? err.message : String(err) })
@@ -74,9 +73,9 @@ describe('Tauri commands', () => {
     expect(screenshot.length).toBeGreaterThan(100);
   });
 
-  it('exposes window.__TAURI_INTERNALS__.invoke to the renderer', async () => {
+  it('exposes window.__TAURI__.core.invoke to the renderer', async () => {
     const present = await browser.execute(
-      () => typeof (window as any).__TAURI_INTERNALS__?.invoke === 'function'
+      () => typeof (window as any).__TAURI__?.core?.invoke === 'function'
     );
     expect(present).toBe(true);
   });

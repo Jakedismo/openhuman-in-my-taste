@@ -125,6 +125,9 @@ describe('VoicePanel', () => {
         llm_cleanup_enabled: true,
         stt_provider: 'cloud',
         tts_provider: 'cloud',
+        kokoro_endpoint_url: 'http://localhost:8880',
+        kokoro_model: 'mlx-community/Kokoro-82M-bf16',
+        kokoro_voice: 'af_bella',
       },
       sttState: 'ready',
       whisperStatus: makeInstallStatus('whisper'),
@@ -168,11 +171,18 @@ describe('VoicePanel', () => {
       if (update.tts_provider) runtime.voiceStatus.tts_provider = update.tts_provider;
       if (update.stt_model) runtime.voiceStatus.stt_model_id = update.stt_model;
       if (update.tts_voice) runtime.voiceStatus.tts_voice_id = update.tts_voice;
+      if (update.kokoro_endpoint_url)
+        runtime.voiceStatus.kokoro_endpoint_url = update.kokoro_endpoint_url;
+      if (update.kokoro_model) runtime.voiceStatus.kokoro_model = update.kokoro_model;
+      if (update.kokoro_voice) runtime.voiceStatus.kokoro_voice = update.kokoro_voice;
       return {
         stt_provider: runtime.voiceStatus.stt_provider,
         tts_provider: runtime.voiceStatus.tts_provider,
         stt_model_id: runtime.voiceStatus.stt_model_id,
         tts_voice_id: runtime.voiceStatus.tts_voice_id,
+        kokoro_endpoint_url: runtime.voiceStatus.kokoro_endpoint_url,
+        kokoro_model: runtime.voiceStatus.kokoro_model,
+        kokoro_voice: runtime.voiceStatus.kokoro_voice,
       };
     });
 
@@ -323,6 +333,70 @@ describe('VoicePanel', () => {
     );
   });
 
+  // ── System TTS option (macOS-only) ─────────────────────────────────────
+  //
+  // The "System (macOS say)" path exists because the upstream Piper macOS
+  // release ships a binary with broken dylib dependencies — see
+  // src/openhuman/inference/voice/system_speech.rs for the long form. The
+  // dropdown surfaces the option only on macOS so Linux/Windows users
+  // never see a TTS provider that would error on their box.
+
+  it('shows the System (macOS say) TTS option on macOS', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      const systemOption = ttsSelect.querySelector(
+        'option[value="system"]'
+      ) as HTMLOptionElement | null;
+      expect(systemOption).not.toBeNull();
+      expect(systemOption!.textContent).toMatch(/macOS say/i);
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('hides the System (macOS say) TTS option on non-macOS hosts', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      const systemOption = ttsSelect.querySelector('option[value="system"]');
+      expect(systemOption).toBeNull();
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('persists tts_provider="system" when the user picks it on macOS', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+
+    try {
+      renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
+      const ttsSelect = (await screen.findByTestId('tts-provider-select')) as HTMLSelectElement;
+      fireEvent.change(ttsSelect, { target: { value: 'system' } });
+
+      await waitFor(() =>
+        expect(vi.mocked(openhumanVoiceSetProviders)).toHaveBeenCalledWith(
+          expect.objectContaining({ tts_provider: 'system' })
+        )
+      );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, 'platform', originalPlatform);
+      }
+    }
+  });
+
   it('renders the Install Whisper button when the engine is missing', async () => {
     runtime.whisperStatus = makeInstallStatus('whisper'); // explicit missing
     renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
@@ -332,7 +406,7 @@ describe('VoicePanel', () => {
     expect(screen.getByTestId('whisper-install-state')).toHaveTextContent('Not installed');
   });
 
-  it('keeps the Local Whisper STT option selectable when the engine is missing', async () => {
+  it('disables the Local Whisper STT option when the engine is missing', async () => {
     runtime.whisperStatus = makeInstallStatus('whisper');
     renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
 
@@ -341,15 +415,8 @@ describe('VoicePanel', () => {
       'option[value="whisper"]'
     ) as HTMLOptionElement | null;
     expect(whisperOption).not.toBeNull();
-    expect(whisperOption!.disabled).toBe(false);
+    expect(whisperOption!.disabled).toBe(true);
     expect(whisperOption!.textContent).toMatch(/install required/i);
-
-    fireEvent.change(sttSelect, { target: { value: 'whisper' } });
-    await waitFor(() =>
-      expect(vi.mocked(openhumanVoiceSetProviders)).toHaveBeenCalledWith(
-        expect.objectContaining({ stt_provider: 'whisper' })
-      )
-    );
   });
 
   it('shows a Reinstall label once Whisper is installed', async () => {
@@ -397,7 +464,7 @@ describe('VoicePanel', () => {
     expect(screen.getByTestId('piper-install-state')).toHaveTextContent('Not installed');
   });
 
-  it('keeps the Local Piper TTS option selectable when the engine is missing', async () => {
+  it('disables the Local Piper TTS option when the engine is missing', async () => {
     runtime.piperStatus = makeInstallStatus('piper');
     renderWithProviders(<VoicePanel />, { initialEntries: ['/settings/voice'] });
 
@@ -406,15 +473,8 @@ describe('VoicePanel', () => {
       'option[value="piper"]'
     ) as HTMLOptionElement | null;
     expect(piperOption).not.toBeNull();
-    expect(piperOption!.disabled).toBe(false);
+    expect(piperOption!.disabled).toBe(true);
     expect(piperOption!.textContent).toMatch(/install required/i);
-
-    fireEvent.change(ttsSelect, { target: { value: 'piper' } });
-    await waitFor(() =>
-      expect(vi.mocked(openhumanVoiceSetProviders)).toHaveBeenCalledWith(
-        expect.objectContaining({ tts_provider: 'piper' })
-      )
-    );
   });
 
   it('triggers installPiper when the user clicks Install', async () => {

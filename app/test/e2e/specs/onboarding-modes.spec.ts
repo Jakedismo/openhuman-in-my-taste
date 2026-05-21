@@ -150,9 +150,7 @@ async function waitForHome(timeout = 20_000): Promise<boolean> {
 }
 
 describe('Onboarding modes — Simple (Cloud) vs Advanced (Custom)', () => {
-  before(async function beforeSuite() {
-    // Reset + auth + onboarding bootstrap can exceed the default 30s hook budget.
-    this.timeout(90_000);
+  before(async () => {
     await startMockServer();
     resetMockBehavior();
     setMockBehavior('composioConnections', '[]');
@@ -217,9 +215,7 @@ describe('Onboarding modes — Simple (Cloud) vs Advanced (Custom)', () => {
   // Phase B — Advanced (Custom), Default on every step
   // ───────────────────────────────────────────────────────────────────────
 
-  it('advanced/custom path: walks all wizard steps with Default choice', async function () {
-    // resetOnboardingFlagAndReload includes waitForWindowVisible(25_000), needs extra budget.
-    this.timeout(90_000);
+  it('advanced/custom path: walks all wizard steps with Default choice', async () => {
     await resetOnboardingFlagAndReload();
 
     // Step 0 — Welcome.
@@ -268,9 +264,7 @@ describe('Onboarding modes — Simple (Cloud) vs Advanced (Custom)', () => {
   // Phase C — Advanced (Custom), Configure on Voice mutates config.toml
   // ───────────────────────────────────────────────────────────────────────
 
-  it('advanced/custom path: Configure on Voice updates local_ai.stt_provider in config.toml', async function () {
-    // resetOnboardingFlagAndReload includes waitForWindowVisible(25_000), needs extra budget.
-    this.timeout(90_000);
+  it('advanced/custom path: Configure on Voice updates local_ai.stt_provider in config.toml', async () => {
     await resetOnboardingFlagAndReload();
 
     // Welcome → Runtime choice (Custom) → Inference (Default).

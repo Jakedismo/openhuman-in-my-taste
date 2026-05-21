@@ -7,8 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     build_http_schema_dump, default_state, escape_html, invoke_method, is_param_validation_error,
-    is_session_expired_error, is_unconfirmed_unauthorized_error, params_to_object,
-    parse_json_params, rpc_handler, type_name,
+    is_session_expired_error, params_to_object, parse_json_params, rpc_handler, type_name,
 };
 
 struct EnvVarGuard {
@@ -299,216 +298,6 @@ fn http_schema_dump_includes_openhuman_and_core_methods() {
             .any(|m| m.method == "openhuman.health_snapshot"),
         "schema dump should include migrated openhuman methods"
     );
-
-    assert!(
-        methods
-            .iter()
-            .any(|m| m.method == "openhuman.billing_get_current_plan"),
-        "schema dump should include billing methods"
-    );
-
-    assert!(
-        methods
-            .iter()
-            .any(|m| m.method == "openhuman.team_list_members"),
-        "schema dump should include team methods"
-    );
-}
-
-#[tokio::test]
-async fn billing_get_current_plan_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_get_current_plan",
-        json!({ "extra": true }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'extra'"));
-}
-
-#[tokio::test]
-async fn billing_purchase_plan_missing_plan_fails_validation() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_purchase_plan",
-        json!({}),
-    )
-    .await
-    .expect_err("missing plan should fail");
-    assert!(err.contains("missing required param 'plan'"));
-}
-
-#[tokio::test]
-async fn billing_top_up_missing_amount_fails_validation() {
-    let err = invoke_method(default_state(), "openhuman.billing_top_up", json!({}))
-        .await
-        .expect_err("missing amountUsd should fail");
-    assert!(err.contains("missing required param 'amountUsd'"));
-}
-
-#[tokio::test]
-async fn billing_top_up_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_top_up",
-        json!({ "amountUsd": 10.0, "unknownField": true }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'unknownField'"));
-}
-
-#[tokio::test]
-async fn billing_create_portal_session_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_create_portal_session",
-        json!({ "x": 1 }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'x'"));
-}
-
-#[tokio::test]
-async fn team_list_members_missing_team_id_fails_validation() {
-    let err = invoke_method(default_state(), "openhuman.team_list_members", json!({}))
-        .await
-        .expect_err("missing teamId should fail");
-    assert!(err.contains("missing required param 'teamId'"));
-}
-
-#[tokio::test]
-async fn team_list_members_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.team_list_members",
-        json!({ "teamId": "t1", "extra": true }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'extra'"));
-}
-
-#[tokio::test]
-async fn team_create_invite_missing_team_id_fails_validation() {
-    let err = invoke_method(default_state(), "openhuman.team_create_invite", json!({}))
-        .await
-        .expect_err("missing teamId should fail");
-    assert!(err.contains("missing required param 'teamId'"));
-}
-
-#[tokio::test]
-async fn team_remove_member_missing_required_params_fails_validation() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.team_remove_member",
-        json!({ "teamId": "t1" }),
-    )
-    .await
-    .expect_err("missing userId should fail");
-    assert!(err.contains("missing required param 'userId'"));
-}
-
-#[tokio::test]
-async fn team_change_member_role_missing_role_fails_validation() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.team_change_member_role",
-        json!({ "teamId": "t1", "userId": "u1" }),
-    )
-    .await
-    .expect_err("missing role should fail");
-    assert!(err.contains("missing required param 'role'"));
-}
-
-#[tokio::test]
-async fn billing_create_coinbase_charge_missing_plan_fails_validation() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_create_coinbase_charge",
-        json!({}),
-    )
-    .await
-    .expect_err("missing plan should fail");
-    assert!(err.contains("missing required param 'plan'"));
-}
-
-#[tokio::test]
-async fn billing_create_coinbase_charge_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.billing_create_coinbase_charge",
-        json!({ "plan": "pro", "extra": true }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'extra'"));
-}
-
-#[tokio::test]
-async fn team_list_invites_missing_team_id_fails_validation() {
-    let err = invoke_method(default_state(), "openhuman.team_list_invites", json!({}))
-        .await
-        .expect_err("missing teamId should fail");
-    assert!(err.contains("missing required param 'teamId'"));
-}
-
-#[tokio::test]
-async fn team_list_invites_rejects_unknown_param() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.team_list_invites",
-        json!({ "teamId": "t1", "extra": true }),
-    )
-    .await
-    .expect_err("unknown param should fail");
-    assert!(err.contains("unknown param 'extra'"));
-}
-
-#[tokio::test]
-async fn team_revoke_invite_missing_team_id_fails_validation() {
-    let err = invoke_method(default_state(), "openhuman.team_revoke_invite", json!({}))
-        .await
-        .expect_err("missing teamId should fail");
-    assert!(err.contains("missing required param 'teamId'"));
-}
-
-#[tokio::test]
-async fn team_revoke_invite_missing_invite_id_fails_validation() {
-    let err = invoke_method(
-        default_state(),
-        "openhuman.team_revoke_invite",
-        json!({ "teamId": "t1" }),
-    )
-    .await
-    .expect_err("missing inviteId should fail");
-    assert!(err.contains("missing required param 'inviteId'"));
-}
-
-#[tokio::test]
-async fn schema_dump_includes_new_billing_and_team_methods() {
-    let dump = build_http_schema_dump();
-    let methods: Vec<&str> = dump.methods.iter().map(|m| m.method.as_str()).collect();
-    for expected in &[
-        "openhuman.billing_get_current_plan",
-        "openhuman.billing_purchase_plan",
-        "openhuman.billing_create_portal_session",
-        "openhuman.billing_top_up",
-        "openhuman.billing_create_coinbase_charge",
-        "openhuman.team_list_members",
-        "openhuman.team_create_invite",
-        "openhuman.team_list_invites",
-        "openhuman.team_revoke_invite",
-        "openhuman.team_remove_member",
-        "openhuman.team_change_member_role",
-    ] {
-        assert!(
-            methods.contains(expected),
-            "schema dump missing expected method: {expected}"
-        );
-    }
 }
 
 // --- helper coverage -----------------------------------------------------
@@ -565,46 +354,26 @@ fn parse_json_params_reports_error_message() {
 }
 
 #[test]
-fn is_session_expired_error_does_not_match_generic_401_unauthorized() {
-    assert!(!is_session_expired_error(
+fn is_session_expired_error_matches_401_unauthorized() {
+    assert!(is_session_expired_error(
         "backend returned 401 Unauthorized"
     ));
-    assert!(!is_session_expired_error("401 UNAUTHORIZED"));
-    assert!(!is_session_expired_error("got 401 and unauthorized body"));
+    assert!(is_session_expired_error("401 UNAUTHORIZED"));
+    assert!(is_session_expired_error("got 401 and unauthorized body"));
 }
 
 #[test]
-fn unconfirmed_unauthorized_error_matches_generic_401_for_diagnostics_only() {
-    assert!(is_unconfirmed_unauthorized_error(
-        "backend returned 401 Unauthorized"
-    ));
-    assert!(is_unconfirmed_unauthorized_error("401 UNAUTHORIZED"));
-    assert!(is_unconfirmed_unauthorized_error(
-        "got 401 and unauthorized body"
-    ));
-}
-
-#[test]
-fn is_session_expired_error_does_not_match_partial_auth_text() {
+fn is_session_expired_error_requires_both_401_and_unauthorized() {
+    // 401 alone is not sufficient — could be HTTP/3.01 nonsense or
+    // unrelated text. We require the string "unauthorized" too.
     assert!(!is_session_expired_error("server returned 401"));
     assert!(!is_session_expired_error("unauthorized without code"));
 }
 
 #[test]
-fn is_session_expired_error_does_not_match_invalid_token_case_insensitive() {
-    assert!(!is_session_expired_error("Invalid Token"));
-    assert!(!is_session_expired_error("got an invalid token here"));
-    assert!(is_unconfirmed_unauthorized_error("Invalid Token"));
-    assert!(is_unconfirmed_unauthorized_error(
-        "got an invalid token here"
-    ));
-}
-
-#[test]
-fn is_session_expired_error_matches_openhuman_session_expired_body() {
-    assert!(is_session_expired_error(
-        r#"OpenHuman API error (401 Unauthorized): {"success":false,"error":"Session expired. Please log in again."}"#
-    ));
+fn is_session_expired_error_matches_invalid_token_case_insensitive() {
+    assert!(is_session_expired_error("Invalid Token"));
+    assert!(is_session_expired_error("got an invalid token here"));
 }
 
 #[test]
@@ -928,42 +697,4 @@ async fn invoke_method_core_version_via_tier1_reflects_state() {
         .await
         .expect("core.version should succeed");
     assert_eq!(result, json!({ "version": "0.0.1-abc" }));
-}
-
-#[tokio::test]
-async fn test_http_health_handler_returns_correct_status() {
-    use axum::body::to_bytes;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
-    // Call the handler once and derive both the status and expected status from
-    // the same response — avoids a TOCTOU race where a separate snapshot()
-    // call before/after the handler could observe different component state.
-    let resp = super::health_handler().await.into_response();
-    let status = resp.status();
-
-    let body = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("failed to read body");
-    let snapshot: serde_json::Value =
-        serde_json::from_slice(&body).expect("failed to deserialize health snapshot");
-
-    let components = snapshot["components"]
-        .as_object()
-        .expect("components should be an object");
-
-    // Derive the expected HTTP status solely from the response body so the
-    // test asserts internal consistency of the handler rather than racing on
-    // live component state.
-    let body_says_ok = components.values().all(|c| {
-        let s = c["status"].as_str().unwrap_or("");
-        s == "ok" || s == "starting"
-    });
-    let expected_status = if body_says_ok {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-
-    assert_eq!(status, expected_status);
 }

@@ -1,8 +1,21 @@
-# OpenHuman
+# closedhuman (fork of OpenHuman)
 
-**AI assistant for communities — React + Tauri v2 desktop app with a Rust core (JSON-RPC / CLI) embedded in-process.**
+**Personal AI desktop — React + Tauri v2 desktop app with a Rust core (JSON-RPC / CLI) embedded in-process.**
 
-This file orients contributors and coding agents. Authoritative narrative architecture: [`gitbooks/developing/architecture.md`](gitbooks/developing/architecture.md). Frontend layout: [`gitbooks/developing/architecture/frontend.md`](gitbooks/developing/architecture/frontend.md). Tauri shell: [`gitbooks/developing/architecture/tauri-shell.md`](gitbooks/developing/architecture/tauri-shell.md).
+This file orients contributors and coding agents. It's a fork of [`tinyhumansai/openhuman`](https://github.com/tinyhumansai/openhuman) at commit `d0d9baba` (19.5.2026). The fork strips the OpenHuman product backend and the Composio OAuth aggregator and replaces them with native OAuth, direct provider APIs, and BYO LLM API keys (or local Ollama / LM Studio / mlx-audio).
+
+**Read these in order on first contact**:
+
+| Doc | Purpose |
+| --- | --- |
+| [`README.md`](README.md) | What the fork is, what it fixed in upstream, how to install from scratch |
+| [`CHANGELOG.md`](CHANGELOG.md) | What shipped, by date |
+| [`CLAUDE.md`](CLAUDE.md) | Project memory for coding agents — terse, exhaustive |
+| [`docs/RUN_IT_TODAY.md`](docs/RUN_IT_TODAY.md) | Build + first-run runbook |
+| [`kokoro-tts-provider-installation.md`](kokoro-tts-provider-installation.md) | mlx-audio + Kokoro install reminder |
+| [`gitbooks/developing/architecture.md`](gitbooks/developing/architecture.md) | Narrative architecture |
+| [`gitbooks/developing/architecture/frontend.md`](gitbooks/developing/architecture/frontend.md) | Frontend layout |
+| [`gitbooks/developing/architecture/tauri-shell.md`](gitbooks/developing/architecture/tauri-shell.md) | Tauri shell |
 
 ---
 
@@ -10,29 +23,93 @@ This file orients contributors and coding agents. Authoritative narrative archit
 
 | Path                    | Role                                                                                                                                                                                                        |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`app/`**              | pnpm workspace **`openhuman-app`** (v0.53.45): Vite + React (`app/src/`), Tauri desktop host (`app/src-tauri/`), Vitest tests                                                                              |
-| **Repo root `src/`**    | Rust library crate **`openhuman`** (lib name) with **`openhuman-core`** CLI binary entrypoint (`src/main.rs`) — `src/core/` (transport: HTTP/JSON-RPC, CLI, dispatch, auth, event bus), `src/openhuman/*` domains. The QuickJS skills runtime has been removed; `src/openhuman/skills/` is metadata-only now. |
+| **`app/`**              | pnpm workspace **`openhuman-app`** (check `app/package.json` for the live version — currently `v0.53.50`): Vite + React (`app/src/`), Tauri desktop host (`app/src-tauri/`), Vitest tests                  |
+| **Repo root `src/`**    | Rust library crate **`openhuman`** (lib name) with **`openhuman-core`** CLI binary entrypoint (`src/main.rs`) — `src/core/` (transport: HTTP/JSON-RPC, CLI, dispatch, auth, event bus), `src/openhuman/*` domains. The QuickJS skills runtime has been removed; `src/openhuman/skills/` is metadata-only. Native OAuth + direct provider clients live under `src/openhuman/oauth/` and `src/openhuman/providers_native/`. |
 | **Skills registry**     | **[`tinyhumansai/openhuman-skills`](https://github.com/tinyhumansai/openhuman-skills)** on GitHub — canonical skill packages and TS build; not vendored in this tree.                                       |
-| **`Cargo.toml`** (root) | Core crate; `cargo build --bin openhuman-core` produces the CLI binary. Helper binaries: `slack-backfill`, `gmail-backfill-3d` in `src/bin/`.                                                              |
-| **`docs/`**             | Architecture and deep-internal references                                                                                                                                                                    |
+| **`Cargo.toml`** (root) | Core crate; `cargo build --bin openhuman-core` produces the CLI binary. Helper binaries in `src/bin/`: `slack-backfill`, `gmail-backfill-3d`, `inference-probe`, **`oauth-connect`** (end-to-end native-OAuth validation against Google / GitHub from the CLI). |
+| **`docs/`**             | Architecture references + the [`RUN_IT_TODAY.md`](docs/RUN_IT_TODAY.md) runbook                                                                                                                              |
 | **`gitbooks/developing/`** | Public contributor docs — frontend, Tauri shell, testing, release, agent harness, CEF, observability                                                                                                       |
 
 Commands in documentation assume the **repo root** unless noted: `pnpm dev` runs Vite-only inside the `app` workspace; `pnpm dev:app` runs the full Tauri desktop dev (CEF runtime).
 
-**Skills registry:** Skill sources and the bundler live in **[github.com/tinyhumansai/openhuman-skills](https://github.com/tinyhumansai/openhuman-skills)**. The desktop app's skills catalog defaults to that GitHub slug; override with `VITE_SKILLS_GITHUB_REPO` (see [`app/src/utils/config.ts`](app/src/utils/config.ts)). Note: since the QuickJS runtime was removed, the desktop app no longer *executes* skill packages — it only discovers, installs metadata, and renders catalog entries. Skill execution surfaces are being rebuilt; check the current domain modules before assuming a skill can run end-to-end.
+**Skills registry:** Skill sources and the bundler live in **[github.com/tinyhumansai/openhuman-skills](https://github.com/tinyhumansai/openhuman-skills)**. The desktop app's skills catalog defaults to that GitHub slug; override with `VITE_SKILLS_GITHUB_REPO` (see [`app/src/utils/config.ts`](app/src/utils/config.ts)). Since the QuickJS runtime was removed, the desktop app no longer *executes* skill packages — it only discovers, installs metadata, and renders catalog entries. New execution paths are being rebuilt under `src/openhuman/javascript/`, `src/openhuman/runtime_node/`, and `src/openhuman/runtime_python/`; check the current state of those modules before assuming a skill can run end-to-end.
 
 ---
 
 ## Runtime scope
 
-- **Shipped product**: desktop — Windows, macOS, Linux (see [`gitbooks/developing/architecture.md`](gitbooks/developing/architecture.md) "Platform reach").
+- **Shipped product**: desktop — Windows, macOS, Linux. **Single-user local install.** Forks the OpenHuman build into a backend-less topology — there is no hosted product backend, no app login, no team / billing / referral surface, no telemetry route to a third party (Sentry is still wired up for local crash reporting; disable in `app/src/utils/config.ts` if undesired).
 - **Tauri host** (`app/src-tauri`): **desktop-only**. Do not add Android/iOS branches.
-- **Core runs in-process** as a tokio task inside the Tauri host (sidecar removed in PR #1061). The host owns its lifetime via `core_process::CoreProcessHandle` in `app/src-tauri/src/core_process.rs`. Frontend RPC still goes over HTTP to `http://127.0.0.1:<port>/rpc` authenticated with a per-launch hex bearer in `OPENHUMAN_CORE_TOKEN`; the Tauri command `core_rpc_token` exposes it to the renderer. Set `OPENHUMAN_CORE_REUSE_EXISTING=1` to attach to an externally-started `openhuman-core` process for debugging.
+- **Core runs in-process** as a tokio task inside the Tauri host (sidecar removed in upstream PR #1061). The host owns its lifetime via `core_process::CoreProcessHandle` in `app/src-tauri/src/core_process.rs`. Frontend RPC still goes over HTTP to `http://127.0.0.1:<port>/rpc` authenticated with a per-launch hex bearer in `OPENHUMAN_CORE_TOKEN`; the Tauri command `core_rpc_token` exposes it to the renderer. Set `OPENHUMAN_CORE_REUSE_EXISTING=1` to attach to an externally-started `openhuman-core` process for debugging.
+- **No OpenHuman product backend.** Every code path that used to proxy through `api.openhuman.ai` now either runs locally (Ollama / LM Studio / Kokoro on mlx-audio) or against the user's own cloud API key configured under Settings → AI. The legacy `make_openhuman_backend` constructor still exists for type-checking but hard-errors with a Settings → AI pointer when reached.
+- **Auto-updater is off.** `tauri-plugin-updater` is in deps but `tauri.conf.json` has `updater.active: false`; the `<AppUpdatePrompt />` mount is removed from `App.tsx`. The closedhuman fork doesn't consume upstream release feeds. Re-enable path documented in commit `7ebfc39a`.
 
 **Where logic lives**
 
 - **Rust (`openhuman` / repo root `src/`)**: **Business logic and execution**—domains, RPC, persistence, CLI behavior. Authoritative.
 - **Tauri + React (`app/`)**: **Interaction and UX**—screens, navigation, input, accessibility, windowing, and bridging to the in-process core. The shell presents and orchestrates; it does not duplicate core business rules.
+
+---
+
+## Auth + identity model
+
+The fork is single-user local. There is **no app session**, **no JWT to OpenHuman**, **no `/login` route**.
+
+- **Native OAuth** via PKCE (RFC 7636) + a one-shot loopback redirect server (RFC 8252 §7.3). Currently wired for **Google** (Gmail / Calendar / Drive) and **GitHub**. Code under `src/openhuman/oauth/`. Build-time `client_id` constants for now; an unverified Google OAuth client ships with the fork (test users only on the OAuth consent screen).
+- **Token storage** stays on the existing on-disk-encrypted `AuthService` (`src/openhuman/credentials/`). Auth keys: `provider:<slug>` (canonical) with bare `<slug>` legacy fallback. **Never log tokens** — they're treated as secrets throughout.
+- **Auto-refresh-on-401** in `AuthedClient` keeps long-lived sessions alive across token expiry. Standalone `refresh-provider-token` primitive available for clients that don't go through `AuthedClient`.
+- **Direct provider clients** in `src/openhuman/providers_native/`: `gmail/`, `gcal/`, `gdrive/`, `github/`. Shared bearer helper across providers; slug → native dispatch table lives in `src/openhuman/oauth/native_dispatch.rs` and is wired into `composio_execute` so action calls with native coverage bypass Composio entirely.
+- **Composio direct mode** routes Composio v3 calls against the user's personal tenant (their own Composio API key) instead of the deleted backend proxy. See the "Composio" section below.
+
+**End-to-end validation outside the GUI:**
+
+```bash
+cargo run --bin oauth-connect -- google     # full Google PKCE flow + token persist
+cargo run --bin oauth-connect -- github     # GitHub equivalent
+```
+
+---
+
+## LLM inference model
+
+The fork has no hosted LLM backend. Three valid configurations:
+
+1. **BYO cloud API key** (default). Configure via Settings → AI: add a `cloud_providers` row for OpenAI / Anthropic / OpenRouter / a custom OpenAI-compatible endpoint with your own key. Default route: OpenAI `gpt-5.4` + medium reasoning effort.
+2. **Local Ollama** at `local_ai.base_url` (default `http://localhost:11434`). The factory's `ollama:<model>` provider string targets it.
+3. **Local OpenAI-compatible runtime** (LM Studio, vLLM, llama.cpp's server, etc.). Add a `cloud_providers` row with `auth_style = None` pointing at the loopback URL.
+
+**Workload routing** (`src/openhuman/inference/provider/factory.rs::provider_for_role`):
+
+- `chat_provider`, `reasoning_provider`, `agentic_provider`, `coding_provider`, `memory_provider`, `embeddings_provider`, `heartbeat_provider`, `learning_provider`, `subconscious_provider` — each can set a `<slug>:<model>` string or fall back to `primary_cloud`.
+- The legacy `"openhuman"` sentinel is dead. Any `cloud_providers` row with `auth_style = OpenhumanJwt` is migrated to `Bearer` (empty key) at config load via `migrate_openhuman_jwt_entries` — the user re-adds an API key under Settings → AI for each converted slug.
+
+**Memory-tree chat** (`src/openhuman/memory/tree/chat/`): two production providers — `local::OllamaChatProvider` and `workload::WorkloadChatProvider` (delegates to the workload factory). The legacy `cloud::CloudChatProvider` was removed when the backend was deleted.
+
+**TTS providers** (`src/openhuman/voice/factory.rs`):
+
+| Provider | Module | Notes |
+| --- | --- | --- |
+| `cloud` | backend ElevenLabs proxy | requires backend session — effectively dead in this fork |
+| `piper` | local Piper subprocess | broken on macOS upstream (dylib chain); kept as Linux/Windows option |
+| `system` | macOS `say` + `afconvert` | macOS-only fallback while Piper is broken |
+| `kokoro` | local OpenAI-compatible HTTP server | preferred path on Apple Silicon — mlx-audio with Kokoro, kokoro-fastapi, LM Studio audio mode |
+
+Kokoro provider config: `kokoro_endpoint_url`, `kokoro_model`, `kokoro_voice` on `LocalAiConfig`. Voice-id validator in the factory (`is_kokoro_voice_id`) positive-matches Kokoro's published naming convention (`^[abefjz][mf]_…`) and rejects foreign ids (ElevenLabs CamelCase, Piper `en_US-lessac-medium`, macOS-say names) — those fall back to the configured default. Setup recipe: [`kokoro-tts-provider-installation.md`](kokoro-tts-provider-installation.md).
+
+---
+
+## Composio
+
+Composio is now the canonical integration broker for everything the deleted backend proxy used to cover (Gmail / GitHub trigger events, action execution against connected accounts on the long-tail toolkits). Two modes:
+
+- **`composio.mode = "direct"`** (default in the fork): hits Composio v3 against the user's personal tenant (`backend.composio.dev/api/v3/*`) with their own API key. `composio_authorize`, `composio_execute`, `composio_sync`, `get_user_profile`, `delete_connection`, `refresh_all_identities`, trigger CRUD, and trigger reads (`list_triggers`, `list_available_triggers`) all route through this.
+- **`composio.mode = "backend"`** (legacy): the upstream tinyhumansai backend proxy. **Not usable** in the closedhuman fork — kept as a config string only for compatibility with legacy `config.toml` files.
+
+**Trigger delivery in direct mode** uses an embedded ngrok tunnel for the webhook URL (free static `<id>.ngrok-free.dev` domain). The receiver lives in `src/openhuman/composio/webhook_receiver/` and does Svix-style HMAC verification (`webhook-id` + `webhook-timestamp` + `webhook-signature` headers; HMAC-SHA256 over `{id}.{timestamp}.{body}`; signature prefixed with `v1,` and base64-encoded), parses the Composio v3 envelope, and publishes `DomainEvent::ComposioTriggerReceived` to the global event bus. Downstream pipeline (`trigger_triage` → `trigger_reactor` sub-agent) is unchanged.
+
+**Trigger config schema parsing**: Composio v3 returns trigger `config` as JSON Schema (`{properties: {…}, required: ["owner", "repo"]}`). `composio::client::extract_required_keys` reads `required: string[]` first; the legacy per-field flat-map shape is kept as a fallback. `extract_default_values` walks `properties.<key>.default` so the renderer's `defaultConfig` payload is a flat `{key: value}` map, not the raw schema.
+
+**Per-toolkit catalogue refresh**: `subagent_runner::ops` and `agent::debug` refresh the per-toolkit action list in direct mode via `composio::ops::fetch_direct_toolkit_actions` instead of using the (sometimes zero-action) cached snapshot. This fixes "Gmail isn't connected" appearing for users with an active Composio Gmail connection.
 
 ---
 
@@ -54,7 +131,7 @@ pnpm lint
 pnpm format             # Prettier + cargo fmt
 pnpm format:check
 
-# `pnpm core:stage` is a no-op — sidecar removed in PR #1061; core is in-process.
+# `pnpm core:stage` is a no-op — sidecar removed in upstream PR #1061; core is in-process.
 
 # Skills — author / build in the registry repo (tinyhumansai/openhuman-skills).
 # There are no `skills:build` / `skills:watch` scripts in this repo's app workspace.
@@ -67,6 +144,10 @@ cargo build --manifest-path Cargo.toml --bin openhuman-core
 cargo check --manifest-path app/src-tauri/Cargo.toml
 pnpm rust:check         # same as above
 
+# Native-OAuth end-to-end validation
+cargo run --bin oauth-connect -- google
+cargo run --bin oauth-connect -- github
+
 # whisper-rs / llama.cpp on macOS Tahoe (Apple Silicon) fail with `-mcpu=native`.
 # Workaround for `cargo check`/`cargo test`:
 GGML_NATIVE=OFF cargo check --manifest-path Cargo.toml
@@ -76,11 +157,13 @@ GGML_NATIVE=OFF cargo check --manifest-path Cargo.toml
 
 **Quality**: ESLint + Prettier + Husky in the `app` workspace. Pre-push hook runs `pnpm rust:check`. Use `--no-verify` only for unrelated pre-existing breakage and call it out in the PR body.
 
+**Pre-existing fmt drift** in `src/openhuman/memory/store/client.rs`, `src/openhuman/vault/{jobs,schemas,sync}.rs`, `src/openhuman/voice/factory.rs` keeps showing up after `cargo fmt`. Convention in the fork: drop those files from each commit (`git checkout --`) so commits stay scoped to the actual change.
+
 ### Codex web / Linear-launched PR checklist
 
 Before opening AI-authored PRs from Codex web sessions or Linear-launched implementation agents, follow [`docs/agent-workflows/codex-pr-checklist.md`](docs/agent-workflows/codex-pr-checklist.md).
 
-This checklist is required for remote agents because OpenHuman has several merge gates that are easy to miss in partial environments: Prettier, Rust formatting, TypeScript typecheck, focused Vitest coverage, controller dispatch parity, and Tauri vendored dependency availability. If a command cannot run in the remote environment, the PR body must report the exact blocked command and error instead of claiming validation passed.
+This checklist is required for remote agents because the fork has several merge gates that are easy to miss in partial environments: Prettier, Rust formatting, TypeScript typecheck, focused Vitest coverage, controller dispatch parity, and Tauri vendored dependency availability. If a command cannot run in the remote environment, the PR body must report the exact blocked command and error instead of claiming validation passed.
 
 ### Agent debug runners (`scripts/debug/`)
 
@@ -120,12 +203,20 @@ PRs must meet **≥ 80% coverage on changed lines**. Enforced by [`.github/workf
 
 Environment variables are documented in two `.env.example` files:
 
-- **[`.env.example`](.env.example)** (repo root) — Rust core, Tauri shell, backend URL, logging, proxy, storage, web search, local AI binary overrides. Loaded via `source scripts/load-dotenv.sh`.
-- **[`app/.env.example`](app/.env.example)** — Frontend `VITE_*` vars (core RPC URL, backend URL, Sentry DSN, skills repo, dev helpers). Copy to `app/.env.local` for local overrides.
+- **[`.env.example`](.env.example)** (repo root) — Rust core, Tauri shell, backend URL (largely unused in this fork), logging, proxy, storage, web search, local AI binary overrides. Loaded via `source scripts/load-dotenv.sh`.
+- **[`app/.env.example`](app/.env.example)** — Frontend `VITE_*` vars (core RPC URL, Sentry DSN, skills repo, dev helpers). Copy to `app/.env.local` for local overrides.
 
 **Frontend config** is centralized in [`app/src/utils/config.ts`](app/src/utils/config.ts). All `VITE_*` env vars should be read there and re-exported — do not read `import.meta.env` directly in other files.
 
-**Rust config** uses a TOML-based `Config` struct (`src/openhuman/config/schema/types.rs`) with env var overrides applied in `src/openhuman/config/schema/load.rs`. Env vars override config file values at runtime (e.g. `OPENHUMAN_API_URL` overrides `config.api_url`).
+**Rust config** uses a TOML-based `Config` struct (`src/openhuman/config/schema/types.rs`) with env var overrides applied in `src/openhuman/config/schema/load.rs`. Env vars override config file values at runtime (e.g. `OPENHUMAN_API_URL` overrides `config.api_url`). The `load.rs` migration sweeps `OpenhumanJwt` rows on every startup — see `migrate_openhuman_jwt_entries`.
+
+Key TOML sections in `~/.openhuman/config.toml`:
+
+- `[local_ai]` — local-Ollama + Kokoro + per-workload provider routing (`chat_provider`, `reasoning_provider`, etc.).
+- `[[cloud_providers]]` — BYO API-key rows. `slug`, `endpoint`, `auth_style` (Bearer / Anthropic / None). API keys are NOT stored here; they live in `auth-profiles.json` via `AuthService` under `provider:<slug>`.
+- `[composio]` — `mode = "direct"` + `api_key_provider = "composio-direct"`.
+- `[composio.webhook]` — `local_receiver_enabled`, `local_receiver_port`, `ngrok_domain`, `composio_webhook_subscription_id`. ngrok authtoken + Composio webhook secret are in `AuthService`, not in `config.toml`.
+- `[memory_tree]` — extractor/summariser endpoints, embedder model.
 
 ---
 
@@ -148,6 +239,8 @@ pnpm test:coverage
   - Keep tests deterministic: avoid real network calls, time-sensitive flakes, or hidden global state.
 
 ### Shared mock backend (app + Rust tests)
+
+The mock backend is still useful for testing the proxy-layer code that's been kept around — it's not exercised at runtime in the fork.
 
 - **Core implementation**: `scripts/mock-api-core.mjs`
 - **Standalone server entrypoint**: `scripts/mock-api-server.mjs`
@@ -188,7 +281,7 @@ Two automation backends:
 - **Build + run**:
 
 ```bash
-# Build app + stage core sidecar (detects macOS vs Linux automatically)
+# Build app (detects macOS vs Linux automatically). The legacy core-sidecar stage step is a no-op.
 pnpm test:e2e:build
 
 # Run one spec
@@ -208,10 +301,9 @@ docker compose -f e2e/docker-compose.yml run --rm e2e
   - Assert both UI outcomes and backend/mock effects when relevant.
   - Add failure diagnostics (request logs, `dumpAccessibilityTree()`) for faster debugging by agents.
 
-### Deterministic core-sidecar reset
+### Deterministic core reset
 
-By default, `app/scripts/e2e-run-spec.sh` creates and cleans a temp `OPENHUMAN_WORKSPACE`
-automatically when the variable is not provided.
+By default, `app/scripts/e2e-run-spec.sh` creates and cleans a temp `OPENHUMAN_WORKSPACE` automatically when the variable is not provided.
 
 If you need a fixed workspace for debugging, provide one explicitly:
 
@@ -224,7 +316,7 @@ rm -rf "$OPENHUMAN_WORKSPACE"
 
 - `OPENHUMAN_WORKSPACE` redirects core config + workspace storage away from `~/.openhuman`.
 - Default reset strategy:
-  - Rebuild/stage sidecar once per E2E run (`pnpm test:e2e:build`).
+  - Build the Tauri bundle once per E2E run (`pnpm test:e2e:build`).
   - Isolate state per test case with a fresh temp workspace (default behavior in `e2e-run-spec.sh`).
 
 ### Rust tests with mock backend
@@ -254,7 +346,7 @@ run_case() {
 - Add/update unit tests for logic changes before stacking additional features.
 - Add/update E2E coverage for user-visible flows and cross-process integration behavior.
 - Keep new tests independent, deterministic, and debuggable from logs alone.
-- When touching core/sidecar behavior, validate both:
+- When touching core behavior, validate both:
   - `pnpm test:unit`
   - targeted E2E spec(s) via `app/scripts/e2e-run-spec.sh`
 
@@ -268,7 +360,9 @@ Order matters for auth and realtime:
 
 `Sentry.ErrorBoundary` → `Redux Provider` → `PersistGate` (with `PersistRehydrationScreen`) → `BootCheckGate` → **`CoreStateProvider`** → **`SocketProvider`** → **`ChatRuntimeProvider`** → `HashRouter` → `CommandProvider` → `ServiceBlockingGate` → `AppShell` (`AppRoutes` + `BottomTabBar` + `AppWalkthrough` + `MascotFrameProducer`).
 
-`CoreStateProvider` owns auth: session tokens are NOT in redux-persist; they live in the in-process core and are fetched via `fetchCoreAppSnapshot()` RPC. There is no `UserProvider`, `AIProvider`, `SkillProvider`, or `TelegramProvider`.
+`<AppUpdatePrompt />` is intentionally **not mounted** in the fork — the Tauri updater plugin is inactive. Re-mount when the fork has its own signed release feed.
+
+`CoreStateProvider` owns auth: there are no app-session tokens in this fork; provider OAuth tokens live in the in-process core's `AuthService` and are surfaced via `fetchCoreAppSnapshot()` RPC. There is no `UserProvider`, `AIProvider`, `SkillProvider`, or `TelegramProvider`.
 
 ### State (`app/src/store/`)
 
@@ -284,7 +378,7 @@ Transport, validation, and types for JSON-RPC-style messaging over Socket.io. To
 
 ### Routing (`app/src/AppRoutes.tsx`, HashRouter)
 
-`/` (Welcome, public), `/onboarding/*`, `/home`, `/human`, `/intelligence`, `/skills`, `/chat` (unified agent + connected web apps — replaces the old `/conversations` and `/accounts` routes), `/channels`, `/invites`, `/notifications`, `/rewards`, `/webhooks` → redirect to `/settings/webhooks-triggers`, `/settings/*`. Default `*` → `DefaultRedirect`. There is **no** `/login`, **no** `/mnemonic` (Recovery Phrase moved to Settings panel), **no** `/agents`, **no** `/conversations`.
+`/` (Welcome / `DefaultRedirect`), `/onboarding/*`, `/home`, `/human`, `/intelligence`, `/skills`, `/chat`, `/channels`, `/invites`, `/notifications`, `/rewards`, `/webhooks` → redirect to `/settings/webhooks-triggers`, `/settings/*` (including `/settings/triggers` for Composio direct trigger delivery, `/settings/voice` with the Kokoro provider config, `/settings/ai` for BYO cloud providers + workload routing). Default `*` → `DefaultRedirect`. There is **no** `/login`, **no** `/mnemonic` (Recovery Phrase moved to Settings panel), **no** `/agents`, **no** `/conversations`, **no** `/billing`.
 
 ### AI configuration
 
@@ -300,13 +394,30 @@ Thin desktop host. Top-level modules: `core_process`, `core_rpc`, `cdp`, `cef_pr
 
 Registered IPC commands (see [`gitbooks/developing/architecture/tauri-shell.md`](gitbooks/developing/architecture/tauri-shell.md)) include `greet`, `write_ai_config_file`, `ai_get_config`, `ai_refresh_config`, `core_rpc_relay`, `core_rpc_token`, `start_core_process`, `restart_core_process`, window commands, and `openhuman_*` daemon helpers.
 
+The updater Tauri commands (`check_app_update`, `download_app_update`, `install_app_update`, `apply_app_update`) are still registered but error with "updater plugin not initialized" because `tauri.conf.json` has `updater.active: false`. They stay in the tree so the future re-enable is a config flip rather than a code restore.
+
 Deep link plugin is registered where supported; behavior is platform-specific (see platform notes below).
+
+### CEF child webviews — no new JS injection
+
+Embedded provider webviews (`acct_*`, loading third-party origins like `web.telegram.org`, `linkedin.com`, `slack.com`, …) **must not** grow any new JavaScript injection. Do not add new `.js` files under `app/src-tauri/src/webview_accounts/`, do not append new blocks to `build_init_script` / `RUNTIME_JS`, and do not dispatch scripts via CDP `Page.addScriptToEvaluateOnNewDocument` / `Runtime.evaluate` for these webviews. The migrated providers (whatsapp, telegram, slack, discord, browserscan) load with **zero** injected JS under CEF by design — all scraping and observability runs natively via CDP in the per-provider scanner modules.
+
+New behavior for these webviews lives in **CEF handlers** (`on_navigation`, `on_new_window`, `LoadHandler::OnLoadStart`, `CefRequestHandler::*` wired in `webview_accounts/mod.rs`), **CDP from the scanner side** (`Network.*`, `Emulation.*`, `Input.*`, `Page.*` driven by the per-provider `*_scanner/` modules), or **Rust-side notification/IPC hooks** — never cross into the renderer.
+
+Watch out for Tauri plugins that inject JS by default. `tauri-plugin-opener` ships `init-iife.js` unless you build it with `.open_js_links_on_click(false)`. Any new plugin added to `app/src-tauri/src/lib.rs` must be audited for a `js_init_script` call — if found, opt out or configure around it.
 
 ---
 
 ## Rust core (repo root `src/`)
 
-- **`src/openhuman/`** — Domain logic. Current domains: `about_app`, `accessibility`, `agent`, `app_state`, `approval`, `autocomplete`, `billing`, `channels`, `composio`, `config`, `context`, `cost`, `credentials`, `cron`, `doctor`, `embeddings`, `encryption`, `health`, `heartbeat`, `integrations`, `learning`, `local_ai`, `meet`, `meet_agent`, `memory`, `migration`, `node_runtime`, `notifications`, `overlay`, `people`, `prompt_injection`, `provider_surfaces`, `providers`, `redirect_links`, `referral`, `routing`, `scheduler_gate`, `screen_intelligence`, `security`, `service`, `skills`, `socket`, `subconscious`, `team`, `text_input`, `threads`, `tokenjuice`, `tool_timeout`, `tools`, `tree_summarizer`, `update`, `voice`, `wallet`, `webhooks`, `webview_accounts`, `webview_apis`, `webview_notifications`. RPC controllers in per-domain `rpc.rs`; use **`RpcOutcome<T>`** pattern (see "RPC Controller Pattern" below).
+- **`src/openhuman/`** — Domain logic. List of current domains changes frequently — discover with `ls src/openhuman/` rather than treating this README as authoritative. Fork-specific newcomers worth knowing about:
+  - **`openhuman/oauth/`** — PKCE primitives, loopback redirect server, Google + GitHub URL builders + token exchange + refresh, slug→native dispatch table. Entry point for the `oauth-connect` CLI.
+  - **`openhuman/providers_native/`** — direct native API clients (Gmail / Calendar / Drive / GitHub) sharing a bearer helper + auto-refresh-on-401 wrapper.
+  - **`openhuman/composio/webhook_receiver/`** — ngrok + Axum receiver, Svix-style HMAC verifier, Composio v3 envelope parser, subscription CRUD.
+  - **`openhuman/inference/provider/factory.rs`** — workload-routed provider factory. `provider_for_role` resolves `<role>_provider` config → `<slug>:<model>`. `make_openhuman_backend` hard-errors with a Settings → AI pointer.
+  - **`openhuman/vault/`** — async vault sync with progress callbacks + `sync_status` + `sync_all` RPCs.
+  - **`openhuman/audio_toolkit/`** — TTS/STT helpers exposed via the controller registry.
+  - RPC controllers in per-domain `rpc.rs`; use **`RpcOutcome<T>`** pattern (see "RPC Controller Pattern" below).
 - **`src/openhuman/` module layout**: **New** functionality must live in a **dedicated subdirectory** (e.g. `openhuman/my_domain/mod.rs` plus related files, or a new subfolder under an existing domain). Do **not** add new standalone `*.rs` files directly at `src/openhuman/` root (`dev_paths.rs` and `util.rs` are grandfathered).
 - **Controller schema contract**: Shared controller metadata types live in `src/core/types.rs` / `src/core/mod.rs` (`ControllerSchema`, `FieldSchema`, `TypeSchema`) and are consumed by adapters (RPC/CLI).
 - **Domain schema files**: For each domain, define controller schema metadata in a dedicated module inside the domain folder (example: `src/openhuman/cron/schemas.rs`) and export from the domain `mod.rs`.
@@ -315,7 +426,17 @@ Deep link plugin is registered where supported; behavior is platform-specific (s
 - **`src/core/`** — Transport only: Axum/HTTP, JSON-RPC envelope, CLI parsing, **dispatch** (`src/core/dispatch.rs`), auth, observability, event bus. **No** heavy business logic here. (Older docs that say `core_server` mean this directory; there is no `src/core_server/`.)
 - **Layering**: Implementation in `openhuman::<domain>/`, controllers in `openhuman::<domain>/rpc.rs`, routes/dispatch in `src/core/`.
 
-The previous QuickJS / `rquickjs` skills runtime has been removed. `src/openhuman/skills/` now contains metadata helpers only (`ops_create`, `ops_discover`, `ops_install`, `ops_parse`, `inject`, `schemas`, `types`) — its `mod.rs` and `types.rs` carry the marker comment "Legacy … retained after QuickJS runtime removal." Do not assume the runtime can execute a `.skill` package end-to-end; check what `ops_install` and the current agent tool path actually do before planning a feature that needs it.
+The previous QuickJS / `rquickjs` skills runtime has been removed. `src/openhuman/skills/` now contains metadata helpers only (`ops_create`, `ops_discover`, `ops_install`, `ops_parse`, `inject`, `schemas`, `types`) — its `mod.rs` and `types.rs` carry the marker comment "Legacy … retained after QuickJS runtime removal." New execution paths are being rebuilt under `src/openhuman/javascript/`, `src/openhuman/runtime_node/`, and `src/openhuman/runtime_python/` — check the current state of those modules before assuming a skill can run end-to-end.
+
+### Modules deleted in the fork
+
+These existed upstream and are explicitly **gone** in the closedhuman fork. Don't re-introduce them without alignment with the fork maintainer:
+
+- `src/openhuman/billing/`, `src/openhuman/referral/`, `src/openhuman/team/` — all backend-proxy modules.
+- `src/api/oauth_handoff*` — OAuth-via-backend machinery.
+- `src/openhuman/memory/tree/chat/cloud.rs` — `CloudChatProvider` (replaced by `WorkloadChatProvider`).
+- `BackendOAuthClient::validate_session_token` — unused.
+- Login UI + login deep-link surfaces in `app/src/`.
 
 ### Controller migration checklist
 
@@ -331,6 +452,24 @@ The previous QuickJS / `rquickjs` skills runtime has been removed. `src/openhuma
 - Wire domain exports into `src/core/all.rs` for both declared schemas and registered handlers.
 - Keep adapters generic: do not add domain-specific logic to `src/core/cli.rs` or `src/core/jsonrpc.rs`.
 - Remove migrated method branches from `src/rpc/dispatch.rs` once registry coverage is in place.
+
+### RPC controller pattern (`RpcOutcome<T>`)
+
+Every domain RPC handler returns `RpcOutcome<T>` (or `Result<RpcOutcome<T>, String>` for fallible ops). The outcome carries both the deserialised result and an ordered list of human-readable log lines surfaced to the UI / CLI.
+
+```rust
+use crate::rpc::RpcOutcome;
+
+pub async fn do_thing(config: &Config, input: &str) -> Result<RpcOutcome<MyResult>, String> {
+    // …work…
+    Ok(RpcOutcome::single_log(
+        MyResult { /* … */ },
+        "do_thing completed with input.len()=42",
+    ))
+}
+```
+
+`RpcOutcome::into_cli_compatible_json()` wraps as `{result: T, logs: [...]}` when logs are non-empty. The frontend's `coreRpcClient` unwraps this transparently for callers. Always emit at least one log line on success — empty logs are valid but mute the UI's per-operation feedback.
 
 ### Event bus (`src/core/event_bus/`)
 
@@ -363,19 +502,20 @@ A typed pub/sub event bus for **decoupled cross-module communication** plus a **
 | `event_bus::request_native_global(method, req)` | Dispatch a typed native request to the registered handler — zero serialization |
 | `event_bus::global()` / `event_bus::native_registry()` | Get the underlying singleton for advanced use |
 
-**Domains:** `agent`, `memory`, `channel`, `cron`, `skill`, `tool`, `webhook`, `system`. See `events.rs` for the full variant list — events carry rich payloads so subscribers have everything they need.
+**Domains:** `agent`, `memory`, `channel`, `cron`, `skill`, `tool`, `webhook`, `system`, `composio`. See `events.rs` for the full variant list — events carry rich payloads so subscribers have everything they need.
 
 **Domain subscriber files** — each domain owns its `bus.rs` with `EventHandler` impls:
 - `cron/bus.rs` — `CronDeliverySubscriber` (delivers job output to channels)
 - `webhooks/bus.rs` — `WebhookRequestSubscriber` (routes incoming requests to skills, emits responses via socket)
 - `channels/bus.rs` — `ChannelInboundSubscriber` (runs agent loop for inbound socket messages)
+- `composio/bus.rs` — `ComposioTriggerSubscriber` (delivers Composio trigger events to triage)
 - `skills/bus.rs` — stub for future subscribers
 
 **Adding events for a new domain:**
 
 1. Add variants to `DomainEvent` in `events.rs` (prefix with domain name, e.g. `BillingInvoiceCreated { ... }`).
 2. Add the domain string to the `domain()` match arm.
-3. Create a `bus.rs` file **inside your domain module** (e.g. `src/openhuman/billing/bus.rs`) for subscriber implementations — each domain owns its handlers.
+3. Create a `bus.rs` file **inside your domain module** for subscriber implementations — each domain owns its handlers.
 4. Register subscribers in startup (e.g. `channels/runtime/startup.rs`) via the singleton.
 5. Publish events with `event_bus::publish_global(DomainEvent::YourEvent { ... })`.
 
@@ -414,46 +554,10 @@ impl EventHandler for MyDomainSubscriber {
 
 **Adding a native request handler for a new domain:**
 
-1. Define the **request and response types** in the domain (e.g. `src/openhuman/billing/bus.rs`). Use owned fields, `Arc`s, and channels — not borrows. Types only need `Send + 'static`, not `Serialize`.
-2. Register the handler at startup from the same `bus.rs`, keyed by a stable method name prefixed with the domain (e.g. `"billing.charge_invoice"`).
+1. Define the **request and response types** in the domain. Use owned fields, `Arc`s, and channels — not borrows. Types only need `Send + 'static`, not `Serialize`.
+2. Register the handler at startup from the domain's `bus.rs`, keyed by a stable method name prefixed with the domain (e.g. `"composio.execute_native"`).
 3. Callers import the request/response types from the domain's public surface and dispatch via `request_native_global`.
 4. Method name convention: `"<domain>.<verb>"` — same naming scheme as JSON-RPC method roots for consistency, but these are **not** exposed over JSON-RPC.
-
-**Example — native request (typed request/response, in `<domain>/bus.rs`):**
-```rust
-use crate::core::event_bus::{register_native_global, request_native_global};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-
-// Request carries non-serializable state directly — trait objects and
-// streaming channels all pass through unchanged.
-pub struct BillingChargeRequest {
-    pub provider: Arc<dyn BillingProvider>,
-    pub amount_cents: u64,
-    pub progress_tx: Option<mpsc::Sender<String>>,
-}
-pub struct BillingChargeResponse {
-    pub charge_id: String,
-}
-
-// At startup:
-pub async fn register_billing_handlers() {
-    register_native_global::<BillingChargeRequest, BillingChargeResponse, _, _>(
-        "billing.charge",
-        |req| async move {
-            let id = req.provider.charge(req.amount_cents).await
-                .map_err(|e| e.to_string())?;
-            Ok(BillingChargeResponse { charge_id: id })
-        },
-    ).await;
-}
-
-// From another module:
-let resp: BillingChargeResponse = request_native_global(
-    "billing.charge",
-    BillingChargeRequest { provider, amount_cents: 500, progress_tx: None },
-).await?;
-```
 
 **Tests:** override production handlers by calling `register_native_global` again for the same method before exercising the code under test — the most recent registration wins. For full isolation, construct a fresh `NativeRegistry` directly via `NativeRegistry::new()` and use its `register` / `request` methods.
 
@@ -461,21 +565,24 @@ let resp: BillingChargeResponse = request_native_global(
 
 ## App theme & design system
 
-**Design intent**: Premium, calm visual language — ocean primary (`#4A83DD`), sage / amber / coral semantic colors, Inter + Cabinet Grotesk + JetBrains Mono, Tailwind with custom radii/spacing/shadows. Implementation tokens live in [`app/tailwind.config.js`](app/tailwind.config.js).
+**Design intent**: Premium, calm visual language — `primary-*` palette (ocean blue `#4A83DD` base), sage / amber / coral semantic colors, Inter + Cabinet Grotesk + JetBrains Mono, Tailwind with custom radii/spacing/shadows. Implementation tokens live in [`app/tailwind.config.js`](app/tailwind.config.js). **Always use the `primary-*` palette names**, not legacy `ocean-*` — the latter were renamed and don't compile.
 
 ## Desktop shell (Tauri) vs application code
 
-In the parent **OpenHuman** desktop app, **Tauri / Rust is a delivery vehicle**: windowing, process lifecycle, IPC to the core sidecar, and other host concerns. **Keep as much UI behavior and product logic as practical in TypeScript/React** (`app/`). Avoid growing Rust in the shell for flows that belong in the web layer unless there is a hard platform or security reason.
+In the parent **closedhuman** desktop app, **Tauri / Rust is a delivery vehicle**: windowing, process lifecycle, IPC to the in-process core, and other host concerns. **Keep as much UI behavior and product logic as practical in TypeScript/React** (`app/`). Avoid growing Rust in the shell for flows that belong in the web layer unless there is a hard platform or security reason.
 
 ## Git workflow
 
-- **Never write code on `main`.** Before making any code changes, fork a new branch off the latest `main` (`git fetch upstream && git checkout -b <branch> upstream/main`). All work happens on that feature branch; `main` stays clean and only advances via merged PRs.
-- **GitHub issues on upstream** — File and track issues on **[tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman/)** ([Issues](https://github.com/tinyhumansai/openhuman/issues)), not only a fork’s tracker, unless the workflow explicitly says otherwise.
+The closedhuman fork is its own thing — no PRs back to `tinyhumansai/openhuman`.
+
+- **Never write code on `main`.** Branch off the latest `main` (`git fetch && git checkout -b <branch> origin/main`). All work happens on a feature branch; `main` stays clean and only advances via merged PRs against the fork's own `main`.
+- **Check `git remote -v` first.** This checkout may have `origin` only, or `origin` + `upstream` (the original `tinyhumansai/openhuman`, fetch-only). The fork's `origin` is what we push to.
+- **Don't push to upstream.** If an `upstream` remote is present, treat it as fetch-only.
+- **PRs target `main` on the fork.**
 - **GitHub issue templates** — Use **[`.github/ISSUE_TEMPLATE/feature.md`](.github/ISSUE_TEMPLATE/feature.md)** for new features and **[`.github/ISSUE_TEMPLATE/bug.md`](.github/ISSUE_TEMPLATE/bug.md)** for bugs; keep the same section structure and fill every required part. AI-authored issues should follow those templates verbatim.
-- **Open pull requests on upstream** — Always create PRs against **[tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman)** ([pull requests](https://github.com/tinyhumansai/openhuman/pulls)), not only a fork’s default remote, unless the workflow explicitly says otherwise.
-- **Public repo**; push to your working branch; PRs target **`main`**.
 - **Agent branch rule** — If an agent starts work while checked out on `main`, it should create its own descriptive working branch before committing or pushing. Do not leave agent-authored commits on local `main`; move the pending work onto the new branch and ship from there.
 - Use [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md); AI-generated PR text should follow its sections and checklist.
+- **When the user asks you to push or open a PR, resolve blockers and push — don't prompt for permission.** If a pre-push hook fails on something unrelated to your changes (e.g. pre-existing fmt drift in code you didn't touch), push with `--no-verify` and call it out in the PR body. If the hook fails on your own changes, fix them and push again.
 
 ---
 
@@ -483,7 +590,7 @@ In the parent **OpenHuman** desktop app, **Tauri / Rust is a delivery vehicle**:
 
 - **Unix-style modules**: Prefer **individual modules** with a **single, sharp responsibility**—each should do one thing really well. Compose behavior through small, well-named units and clear boundaries instead of monolithic code.
 - **Tests before the next layer**: Ship **enough unit tests and coverage** for the behavior you are adding or changing **before** building additional features on top of it. Treat untested code as incomplete; do not accumulate depth on a shaky base.
-- **Documentation with code**: New or changed behavior must ship with matching documentation. At minimum, add concise rustdoc / code comments where the flow is not obvious, and update `AGENTS.md`, architecture docs, or feature docs when repository rules or user-visible behavior change.
+- **Documentation with code**: New or changed behavior must ship with matching documentation. At minimum, add concise rustdoc / code comments where the flow is not obvious, update [`CHANGELOG.md`](CHANGELOG.md) when user-visible behavior changes, and refresh `AGENTS.md` / `CLAUDE.md` / architecture docs when repository rules or controller patterns change.
 
 ---
 
@@ -491,7 +598,7 @@ In the parent **OpenHuman** desktop app, **Tauri / Rust is a delivery vehicle**:
 
 - **Default to verbose diagnostics on new/changed flows**: Add substantial, development-oriented logs while implementing features or fixes so issues are easy to trace end-to-end.
 - **Log critical checkpoints**: Include logs at entry/exit points, branch decisions, external calls, retries/timeouts, state transitions, and error handling paths.
-- **Use structured, grep-friendly context**: Prefer stable prefixes (for example `[domain]`, `[rpc]`, `[ui-flow]`) and include correlation fields such as request IDs, method names, and entity IDs when available.
+- **Use structured, grep-friendly context**: Prefer stable prefixes (for example `[domain]`, `[rpc]`, `[ui-flow]`) and include correlation fields such as request IDs, method names, and entity IDs when available. Fork-specific prefixes worth knowing: `[providers]`, `[chat-factory]`, `[composio-direct]`, `[voice-tts]`, `[voice-factory]`, `[oauth]`, `[config][cloud_providers]`.
 - **Platform conventions**: In Rust, use `log` / `tracing` at `debug` or `trace`; in `app/`, use namespaced `debug` logs and dev-only detail as needed.
 - **Keep logs safe**: Never log secrets or sensitive payloads (API keys, JWTs, credentials, full PII). Redact or omit sensitive fields.
 - **Treat debuggability as a deliverable**: Changes lacking sufficient logging for diagnosis are incomplete and should be updated before handoff.
@@ -507,11 +614,11 @@ Follow this order so behavior is **specified**, **proven in Rust**, **proven ove
 3. **JSON-RPC E2E** — Add or extend **integration-style tests** that call the real HTTP JSON-RPC surface (e.g. [`tests/json_rpc_e2e.rs`](tests/json_rpc_e2e.rs), mock backend / [`scripts/test-rust-with-mock.sh`](scripts/test-rust-with-mock.sh) as appropriate) so methods, params, and outcomes match what the UI will call.
 4. **UI in the Tauri app** — Build **React** screens, state, and **`core_rpc_relay` / `coreRpcClient`** usage in `app/`; keep **business rules** in the core, not duplicated in the shell.
 5. **App unit tests** — Cover components, hooks, and clients with **Vitest** (`pnpm test` / `pnpm test:unit` in `app/`).
-6. **App E2E** — Add **desktop E2E** specs where the feature is user-visible (`pnpm test:e2e*`, isolated workspace — see [Testing Guide (Unit + E2E)](#testing-guide-unit--e2e)) so the full stack (UI → Tauri → sidecar) behaves as intended.
+6. **App E2E** — Add **desktop E2E** specs where the feature is user-visible (`pnpm test:e2e*`, isolated workspace — see [Testing Guide (Unit + E2E)](#testing-guide-unit--e2e)) so the full stack (UI → Tauri → core) behaves as intended.
 
 **Capability catalog** — When a change adds, removes, renames, relocates, or materially changes a user-facing feature, update **`src/openhuman/about_app/`** in the same work so the runtime capability catalog remains the source of truth for what the app can do.
 
-**Debug logging (throughout)** — Add **lots of development-oriented logging** as you build, not as an afterthought. In **Rust**, use `log` / `tracing` at **`debug`** or **`trace`** on RPC entry and exit, error paths, state transitions, and any branch that is hard to infer from tests alone. In **`app/`**, follow existing patterns (e.g. the **`debug`** npm package with a **namespace** per area) plus **dev-only** detail where useful. Prefer **grep-friendly prefixes** (`[feature]`, domain name, or JSON-RPC method) so terminal output from **sidecar**, **Tauri**, and **WebView** can be correlated during `pnpm dev` / `tauri dev`. **Never** log secrets, raw JWTs, API keys, or full PII—redact or omit.
+**Debug logging (throughout)** — Add **lots of development-oriented logging** as you build, not as an afterthought. Prefer **grep-friendly prefixes** (`[feature]`, domain name, or JSON-RPC method) so terminal output from **core**, **Tauri**, and **WebView** can be correlated during `pnpm dev` / `tauri dev`. **Never** log secrets, raw JWTs, API keys, or full PII—redact or omit.
 
 **Planning rule:** When scoping a feature, define the **E2E scenarios (core RPC + app)** up front. Those scenarios should **cover the full intended scope**—happy paths, failure modes, auth or policy gates, and regressions you care about. If a scenario is not testable end-to-end, the spec is incomplete or the cut is too large; split or add harness support first.
 
@@ -519,24 +626,29 @@ Follow this order so behavior is **specified**, **proven in Rust**, **proven ove
 
 ## Key patterns (concise)
 
-- **Debug logging**: Ship **heavy `debug`/`trace` (Rust)** and **namespaced `debug` / dev logs (`app/`)** on new flows so sidecar + WebView output is easy to grep; see [Feature design workflow](#feature-design-workflow-new-capabilities). Never log secrets or raw tokens.
+- **Debug logging**: Ship **heavy `debug`/`trace` (Rust)** and **namespaced `debug` / dev logs (`app/`)** on new flows so core + WebView output is easy to grep; see [Feature design workflow](#feature-design-workflow-new-capabilities). Never log secrets or raw tokens.
 - **`src/openhuman/`**: New features go in a **folder/module**, not new root-level `src/openhuman/*.rs` files (see Rust core section).
 - **File size**: Prefer ≤ ~500 lines per source file; split modules when growing.
 - **Pre-merge checks** (when touching code): Prettier, ESLint, `tsc --noEmit` in `app/`; `cargo fmt` + `cargo check` for changed Rust (`Cargo.toml` at root and/or `app/src-tauri/Cargo.toml` as appropriate).
-- **No dynamic imports** in production **`app/src`** code — use **static** `import` / `import type` at the top of the module. Do **not** use `import()` (async dynamic import), `React.lazy(() => import(...))`, or `await import('…')` to load app modules, Tauri APIs, or RPC clients. **Why:** predictable chunk graph, simpler static analysis, fewer surprises in Tauri + Vite, and easier code review. **If a module must not run at load time** (e.g. heavy optional path), use a static import and **guard the call site** with `try/catch` or an explicit runtime check instead of deferring module load via dynamic import. **Exceptions:** Vitest harness patterns (`vi.importActual`, dynamic imports **only** inside `*.test.ts` / `__tests__` / `test/setup.ts` when required by the runner); ambient `typeof import('…')` in `.d.ts`; config files (e.g. `tailwind.config.js` JSDoc).- **Type-only imports**: `import type` where appropriate.
+- **No dynamic imports** in production **`app/src`** code — use **static** `import` / `import type` at the top of the module. Do **not** use `import()` (async dynamic import), `React.lazy(() => import(...))`, or `await import('…')` to load app modules, Tauri APIs, or RPC clients. **Why:** predictable chunk graph, simpler static analysis, fewer surprises in Tauri + Vite, and easier code review. **If a module must not run at load time** (e.g. heavy optional path), use a static import and **guard the call site** with `try/catch` or an explicit runtime check instead of deferring module load via dynamic import. **Exceptions:** Vitest harness patterns (`vi.importActual`, dynamic imports **only** inside `*.test.ts` / `__tests__` / `test/setup.ts` when required by the runner); ambient `typeof import('…')` in `.d.ts`; config files (e.g. `tailwind.config.js` JSDoc).
+- **Type-only imports**: `import type` where appropriate.
 - **Dual socket / tool sync**: If you change realtime protocol, keep **frontend** (`socketService` / MCP transport) and **core** socket behavior aligned (see [`gitbooks/developing/architecture.md`](gitbooks/developing/architecture.md) dual-socket section).
+- **OpenAI-compatible everywhere**: the fork standardises on the OpenAI API shape for LLM (`/v1/chat/completions`) and audio (`/v1/audio/speech`) — any new provider should speak it, then plug into the existing factory rather than introducing a parallel transport.
 
 ---
 
 ## Platform notes
 
+- **Vendored CEF-aware `tauri-cli`**: runtime is CEF; only the vendored CLI at `app/src-tauri/vendor/tauri-cef/crates/tauri-cli` bundles Chromium into `Contents/Frameworks/`. Stock `@tauri-apps/cli` produces a broken bundle (panic in `cef::library_loader::LibraryLoader::new`). `pnpm dev:app` and all `cargo tauri` scripts call `pnpm tauri:ensure` which runs [`scripts/ensure-tauri-cli.sh`](scripts/ensure-tauri-cli.sh). If overwritten, reinstall with `cargo install --locked --path app/src-tauri/vendor/tauri-cef/crates/tauri-cli`.
 - **macOS deep links**: Often require a built **`.app`** bundle; not only `tauri dev`.
 - **`window.__TAURI__`**: Not assumed at module load; use `isTauri()` (from `app/src/services/webviewAccountService.ts`) or wrap `invoke(...)` in `try/catch`.
 - **Core is in-process**: `core_rpc` reaches `http://127.0.0.1:<port>/rpc` (default port `7788`) authenticated with `OPENHUMAN_CORE_TOKEN`. `scripts/stage-core-sidecar.mjs` no longer exists; `pnpm core:stage` is a no-op echo (sidecar removed in PR #1061). For standalone debugging: `./target/debug/openhuman-core serve` writes its token to `{workspace}/core.token` (default `~/.openhuman-staging/core.token` under `OPENHUMAN_APP_ENV=staging`); public endpoints `GET /health`, `GET /schema`, `GET /events` need no auth.
+- **macOS code signing**: hardcoded Apple Signing Identity is no longer set in `pnpm dev:app`. Dev builds run unsigned; set `APPLE_SIGNING_IDENTITY` in your environment if you need a signed dev build.
+- **ngrok for Composio trigger delivery**: the embedded webhook receiver needs an ngrok account + static `<id>.ngrok-free.dev` domain on the free plan. Paste authtoken + domain in Settings → Triggers; the receiver auto-starts at boot when both are present.
 
 ---
 
-_Last aligned with monorepo layout (`app/` + root `src/`), in-process core (no sidecar), QuickJS removed, skills catalog on GitHub (`tinyhumansai/openhuman-skills`), and Tauri shell IPC as of `openhuman-app` v0.53.45 / repo `main`._
+_Last aligned with the closedhuman fork state (in-process core, no OpenHuman backend, native OAuth via PKCE for Google + GitHub, Composio direct mode with ngrok webhook receiver, BYO-key LLM via workload-routed providers, Kokoro TTS via mlx-audio) as of `openhuman-app` v0.53.50 / branch `feat/local-oauth-no-backend`._
 
 ---
 
@@ -551,7 +663,7 @@ Two services run independently for development:
 | **Vite dev server** | `pnpm dev` (from repo root) | 1420 | React frontend with HMR |
 | **Core JSON-RPC server** | `./target/debug/openhuman-core serve` | 7788 | Rust core, writes bearer token to `~/.openhuman-staging/core.token` |
 
-The app connects to a **remote staging backend** at `https://staging-api.tinyhumans.ai` — there is no local backend to run.
+**The fork has no remote backend.** Upstream connected to `https://staging-api.tinyhumans.ai`; the closedhuman fork removed that dependency. All LLM / audio / OAuth traffic goes either to the user's own configured providers (OpenAI, Anthropic, etc.) or to local services (Ollama, mlx-audio, Composio's API via direct mode).
 
 ### Running the core server standalone
 
@@ -610,40 +722,5 @@ Key requirements:
 - Git submodules (`app/src-tauri/vendor/tauri-cef`, `app/src-tauri/vendor/tauri-plugin-notification`) must be initialized for Tauri shell compilation. Run `git submodule update --init --recursive` if not already done.
 - `pnpm test:unit` does not exist at the root level; use `pnpm test` instead (which delegates to `vitest run` in the `app` workspace).
 - The Tauri shell `cargo check` requires GTK/desktop system libraries; without them, the pre-push hook's `pnpm rust:check` will fail. Use `--no-verify` on push if GTK libs are missing and the change is unrelated to the Tauri shell.
-
-
-<claude-mem-context>
-# Memory Context
-
-# [openhuman] recent context, 2026-04-22 9:52am PDT
-
-Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
-Format: ID TIME TYPE TITLE
-Fetch details: get_observations([IDs]) | Search: mem-search skill
-
-Stats: 20 obs (8,333t read) | 593,112t work | 99% savings
-
-### Apr 22, 2026
-2848 9:07a ✅ openhuman: All Three Review Branches Pushed to Fork Successfully
-2849 " 🔵 openhuman review-daemon-lifecycle: Two Post-Push Issues — Unstaged Prettier Changes + Missing tauri-cef Vendor
-2851 9:08a ✅ openhuman daemon lifecycle: Prettier Format Committed as Follow-Up
-2855 9:09a ✅ openhuman: All Three Review Branches Fully Pushed — PRs Ready to Open
-2857 9:10a 🔵 openhuman: GitHub Connector Cannot Create PRs to tinyhumansai/openhuman — 403 Forbidden
-2858 9:11a 🔵 openhuman webhooks-ingress: Session Stalled — Instruction Not Processed After 10+ Minutes
-2860 " 🔵 openhuman webhooks: WebhooksDebugPanel Architecture for E2E Smoke Spec
-2861 9:13a 🔵 openhuman webhooks-ingress: Full Spec Surface Mapped — RPC Log Strings + UI Navigation Path
-2866 9:15a 🟣 openhuman webhooks-ingress: webhooks-ingress-flow.spec.ts Written
-2869 9:18a ⚖️ openhuman Memory Refactor Plan: Trait Shape, L1 Pointer, and Missing Pieces
-2871 " 🔵 openhuman Memory Architecture: Auto-Inject Pattern Has 3 Separate Implementations
-2873 9:31a 🟣 openhuman: Draft PR Opened — Config Runtime Dir Refactor for Testability
-2874 9:32a 🟣 openhuman: 3 More Draft PRs Opened — Threads Schema, Daemon Lifecycle, Webhooks E2E
-2875 9:33a 🔵 openhuman Memory Namespace: 3 Auto-Inject Sites, Not 1
-2876 " ⚖️ openhuman Memory Refactor: Breaking Trait Change + Flag-Off + ToolDiscovery Hybrid
-2877 " ✅ Memory Namespace Refactor Plan Written to docs/plans/memory-namespace-refactor.md
-2879 9:34a 🔵 openhuman Memory Trait: 15 Impls, Not 14; MemoryRecalled Has No Live Emit Site
-2880 " 🔵 openhuman SQLite Schema: memory_docs Already Has namespace Column; Migration Scope Minimal
-2881 " 🔵 openhuman Memory Trait Current Signatures: No Namespace Param on Any Method
-2882 " 🔵 openhuman Eval Infra: Does Not Exist; Phase D Requires Bootstrap from Scratch
-
-Access 593k tokens of past work via get_observations([IDs]) or mem-search skill.
-</claude-mem-context>
+- **Pre-existing fmt drift** in vault / memory / voice modules keeps reappearing after `cargo fmt`. Convention: `git checkout --` those files from each commit so the diff stays scoped to your actual change.
+- **OpenhumanJwt migration runs on every config load.** If a test fixture seeds a `cloud_providers` row with `auth_style = "openhumanjwt"`, the migration will rewrite it to `Bearer` with empty key before any provider lookup. Set rows directly to `Bearer` in fixtures unless you're specifically testing the migration.

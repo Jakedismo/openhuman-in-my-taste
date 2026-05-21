@@ -28,8 +28,7 @@ async function dispatchKey(
 }
 
 describe('Command palette', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     await waitForApp();
     await waitForWebView();
   });

@@ -29,25 +29,59 @@ export interface CoreVaultFile {
   status: CoreVaultFileStatus;
 }
 
-export type CoreVaultSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
-
-/** Live progress returned by `openhuman.vault_sync_status`. */
-export interface CoreVaultSyncState {
+export interface CoreVaultSyncReport {
   vault_id: string;
-  status: CoreVaultSyncStatus;
   scanned: number;
   ingested: number;
   unchanged: number;
   removed: number;
   failed: number;
   skipped_unsupported: number;
-  /** Total files queued for ingestion; 0 while the discovery walk is still running. */
-  total: number;
-  started_at_ms: number;
-  finished_at_ms: number | null;
-  /** Wall-clock ms; 0 while running; set on completion. */
   duration_ms: number;
   errors: string[];
+}
+
+/** Lifecycle of an async vault sync job. Matches the Rust enum. */
+export type CoreVaultSyncJobStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+/**
+ * Lightweight handle returned by `openhuman.vault_sync` and
+ * `openhuman.vault_sync_all`. Callers poll
+ * `openhuman.vault_sync_status(job_id)` for the live snapshot.
+ */
+export interface CoreVaultSyncJobHandle {
+  job_id: string;
+  vault_id: string;
+  /**
+   * `queued` for a fresh enqueue, `running` when the call coalesced
+   * onto an in-flight job for the same vault.
+   */
+  status: CoreVaultSyncJobStatus;
+}
+
+/**
+ * Live snapshot of a vault sync job — what the status RPC returns.
+ * `report` is `null` while the job is queued/running and carries the
+ * final `CoreVaultSyncReport` once status is `completed`/`failed`.
+ */
+export interface CoreVaultSyncJobSnapshot {
+  job_id: string;
+  vault_id: string;
+  status: CoreVaultSyncJobStatus;
+  processed: number;
+  /**
+   * Total file count from the directory walk's pre-pass, when
+   * available. `null` while the walk is in progress (the current
+   * worker doesn't run a pre-pass to avoid double-traversal).
+   */
+  total: number | null;
+  /** Relative path of the file currently being ingested, if any. */
+  current_file: string | null;
+  errors: string[];
+  report: CoreVaultSyncReport | null;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 function ensureTauri() {
@@ -107,23 +141,52 @@ export async function openhumanVaultRemove(
   >({ method: 'openhuman.vault_remove', params: { vault_id: vaultId, purge_memory: purgeMemory } });
 }
 
+/**
+ * Enqueue an async vault sync. Returns immediately with a job
+ * handle the caller polls via `openhumanVaultSyncStatus`. Previously
+ * this RPC blocked through the full directory walk (20-30 min for a
+ * vault of moderate size); the new contract surfaces per-file
+ * progress instead. Safe to spam-click — the worker coalesces
+ * duplicate enqueues for the same vault.
+ */
 export async function openhumanVaultSync(
   vaultId: string
-): Promise<CommandResponse<{ status: string; vault_id: string }>> {
+): Promise<CommandResponse<CoreVaultSyncJobHandle>> {
   ensureTauri();
-  return await callCoreRpc<CommandResponse<{ status: string; vault_id: string }>>({
+  return await callCoreRpc<CommandResponse<CoreVaultSyncJobHandle>>({
     method: 'openhuman.vault_sync',
     params: { vault_id: vaultId },
   });
 }
 
-/** Poll live sync progress for a vault. */
+/**
+ * Read the live snapshot for a vault sync job. UI polls this at
+ * ~2s intervals while the status is `queued`/`running`, stops
+ * polling on `completed`/`failed` and renders the final report.
+ * Returns `null` (wrapped in the envelope) when the job id is
+ * unknown — typo, or process restart cleared the in-memory
+ * registry.
+ */
 export async function openhumanVaultSyncStatus(
-  vaultId: string
-): Promise<CommandResponse<CoreVaultSyncState>> {
+  jobId: string
+): Promise<CommandResponse<CoreVaultSyncJobSnapshot | null>> {
   ensureTauri();
-  return await callCoreRpc<CommandResponse<CoreVaultSyncState>>({
+  return await callCoreRpc<CommandResponse<CoreVaultSyncJobSnapshot | null>>({
     method: 'openhuman.vault_sync_status',
-    params: { vault_id: vaultId },
+    params: { job_id: jobId },
+  });
+}
+
+/**
+ * Enqueue an async sync for every registered vault. Returns one
+ * handle per vault; per-vault coalesce still applies, so calling
+ * twice returns the same handles for any already-active jobs.
+ */
+export async function openhumanVaultSyncAll(): Promise<
+  CommandResponse<CoreVaultSyncJobHandle[]>
+> {
+  ensureTauri();
+  return await callCoreRpc<CommandResponse<CoreVaultSyncJobHandle[]>>({
+    method: 'openhuman.vault_sync_all',
   });
 }

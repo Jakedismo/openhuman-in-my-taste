@@ -11,12 +11,15 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::openhuman::embeddings::{self, EmbeddingProvider};
+use crate::openhuman::config::{Config, GraphExtractionMode};
+use crate::openhuman::embeddings::{self, EmbeddingProvider, NoopEmbedding};
 use crate::openhuman::memory::ingestion::queue as ingestion_queue;
 use crate::openhuman::memory::ingestion::{
-    IngestionJob, IngestionQueue, IngestionState, MemoryIngestionConfig, MemoryIngestionRequest,
-    MemoryIngestionResult,
+    ChatBackedLlmGraphExtractor, IngestionJob, IngestionQueue, IngestionState, LlmGraphExtractor,
+    MemoryIngestionConfig, MemoryIngestionRequest, MemoryIngestionResult,
 };
+use crate::openhuman::memory::tree::chat::{build_chat_provider_for_role, ChatProvider};
+use crate::openhuman::memory::store::factories::effective_embedding_settings;
 use crate::openhuman::memory::store::types::{
     NamespaceDocumentInput, NamespaceMemoryHit, NamespaceRetrievalContext,
 };
@@ -52,6 +55,18 @@ pub struct MemoryClient {
     inner: Arc<UnifiedMemory>,
     /// Queue for background ingestion tasks (e.g., entity extraction).
     ingestion_queue: IngestionQueue,
+    /// LLM-driven entity / relation extractor for the namespace graph.
+    /// Built lazily from `Config::memory.graph_extraction` +
+    /// `memory_provider` at construction time. `None` when the user has
+    /// disabled it (`graph_extraction = "heuristic"`), when no chat
+    /// provider is wired, or when the chat-provider build fails. The
+    /// ingestion pipeline soft-falls back to heuristic on any LLM-side
+    /// failure, so `None` simply means we don't even try.
+    graph_extractor: Option<Arc<dyn LlmGraphExtractor>>,
+    /// Strategy from `Config::memory.graph_extraction`. Stored so the
+    /// per-job `MemoryIngestionConfig` can carry the resolved mode
+    /// downstream into `parse_document` (the parser respects this knob).
+    graph_extraction_mode: GraphExtractionMode,
 }
 
 impl MemoryClient {
@@ -104,14 +119,21 @@ impl MemoryClient {
         std::fs::create_dir_all(&workspace_dir)
             .map_err(|e| format!("Create workspace dir {}: {e}", workspace_dir.display()))?;
 
-        // Default to cloud embeddings (OpenHuman backend, Voyage-backed). The
-        // cloud embedder is lazy: JWT + API URL are resolved per call, so an
-        // unauthenticated session produces a clear error on first embed rather
-        // than blocking client construction. Callers that need the local
-        // Ollama path should build their memory store via
-        // `create_memory_with_storage_and_routes` with the appropriate
-        // `MemoryConfig.embedding_provider`.
-        let embedder: Arc<dyn EmbeddingProvider> = embeddings::default_embedding_provider();
+        // Local-OAuth fork: the previous behaviour was to hard-code
+        // `embeddings::default_embedding_provider()` here — the dead
+        // OpenHuman cloud embedder. Every vault ingest, document
+        // upsert, and memory write would call `embedder.embed_one()`,
+        // fail (no backend), get silently swallowed by `.ok()` in
+        // `upsert_document` and `vector_chunks` rows were inserted
+        // with NULL embeddings. Symptom: the user reports "chunks are
+        // present but no vectors", semantic search returns nothing.
+        //
+        // Read the workspace's `config.toml` synchronously, derive the
+        // embedder from the unified `embeddings_provider` workload
+        // field (or the legacy `memory.embedding_provider`), and fall
+        // back to `NoopEmbedding` with a LOUD warning when
+        // construction fails — never to the dead cloud embedder.
+        let (embedder, loaded_config) = build_workspace_embedder_and_config(&workspace_dir);
 
         // Create the underlying UnifiedMemory instance.
         let memory =
@@ -124,9 +146,19 @@ impl MemoryClient {
         let ingestion_queue =
             ingestion_queue::start_worker_with_state(Arc::clone(&inner), IngestionState::new());
 
+        // Build the LLM-driven namespace-graph extractor when the user
+        // has configured `memory_provider` and not disabled the mode.
+        // Failure to construct (no provider configured, bad endpoint,
+        // etc.) is non-fatal — the ingestion pipeline soft-falls back
+        // to heuristic-only.
+        let graph_extraction_mode = loaded_config.memory.graph_extraction;
+        let graph_extractor = build_graph_extractor(&loaded_config, graph_extraction_mode);
+
         Ok(Self {
             inner,
             ingestion_queue,
+            graph_extractor,
+            graph_extraction_mode,
         })
     }
 
@@ -152,7 +184,8 @@ impl MemoryClient {
         self.ingestion_queue.submit(IngestionJob {
             document_id: document_id.clone(),
             document: input,
-            config: MemoryIngestionConfig::default(),
+            config: self.default_ingestion_config(),
+            extractor: self.graph_extractor.clone(),
         });
 
         Ok(document_id)
@@ -174,7 +207,7 @@ impl MemoryClient {
     /// [`IngestionState`] singleton lock — only one ingestion runs at a time.
     pub async fn ingest_doc(
         &self,
-        request: MemoryIngestionRequest,
+        mut request: MemoryIngestionRequest,
     ) -> Result<MemoryIngestionResult, String> {
         let state = self.ingestion_queue.state();
         let _guard = state.acquire().await;
@@ -195,8 +228,24 @@ impl MemoryClient {
             },
         );
 
+        // Inherit the client's configured graph_extraction mode unless
+        // the caller explicitly overrode it on the request. The default
+        // for a fresh `MemoryIngestionConfig` is `Auto`, which is also
+        // the safe default — only override when the caller's config
+        // matches `MemoryIngestionConfig::default()` (signal: model_name
+        // is still the literal heuristic-only and graph_extraction is
+        // `Auto`).
+        if request.config.graph_extraction == GraphExtractionMode::default()
+            && self.graph_extraction_mode != GraphExtractionMode::default()
+        {
+            request.config.graph_extraction = self.graph_extraction_mode;
+        }
+
         let started = std::time::Instant::now();
-        let outcome = self.inner.ingest_document(request).await;
+        let outcome = self
+            .inner
+            .ingest_document_with_extractor(request, self.graph_extractor.clone())
+            .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let success = outcome.is_ok();
 
@@ -266,10 +315,22 @@ impl MemoryClient {
         self.ingestion_queue.submit(IngestionJob {
             document_id: doc_id,
             document: input,
-            config: MemoryIngestionConfig::default(),
+            config: self.default_ingestion_config(),
+            extractor: self.graph_extractor.clone(),
         });
 
         Ok(())
+    }
+
+    /// Build a `MemoryIngestionConfig` honouring the client's resolved
+    /// `graph_extraction` mode. Used by enqueue-style call sites
+    /// (`put_doc`, `store_skill_sync`) where the caller doesn't supply
+    /// its own config.
+    fn default_ingestion_config(&self) -> MemoryIngestionConfig {
+        MemoryIngestionConfig {
+            graph_extraction: self.graph_extraction_mode,
+            ..MemoryIngestionConfig::default()
+        }
     }
 
     /// List documents in a namespace (or all namespaces if `None`).
@@ -460,6 +521,177 @@ impl MemoryClient {
             None => self.inner.graph_query_all(subject, predicate).await,
         }
     }
+}
+
+/// Build the embedder for `MemoryClient::from_workspace_dir` by reading
+/// the workspace's `config.toml` synchronously and resolving the
+/// embedding provider via the same `effective_embedding_settings`
+/// logic the agent harness uses.
+///
+/// Failure modes (each falls back to `NoopEmbedding` with a LOUD
+/// warning — never to the dead OpenHuman cloud embedder):
+/// - config.toml missing → Config::default() is used.
+/// - config.toml parse error → Config::default() with a warning.
+/// - embedder construction fails (e.g. unknown provider string,
+///   bad endpoint) → NoopEmbedding with a warning.
+///
+/// The fallback to `NoopEmbedding` keeps memory writes succeeding
+/// (chunks land in the namespace store, FTS / metadata search still
+/// works) while semantic search degrades to no-op rather than
+/// silently inserting NULL embeddings into `vector_chunks`. That
+/// silent-NULL behaviour was the original symptom: chunks present
+/// but no vectors.
+fn build_workspace_embedder_and_config(
+    workspace_dir: &std::path::Path,
+) -> (Arc<dyn EmbeddingProvider>, Config) {
+    let config = load_workspace_config(workspace_dir);
+    let embedder = build_workspace_embedder_from_config(&config);
+    (embedder, config)
+}
+
+/// Synchronously load `config.toml` for the workspace, falling back to
+/// `Config::default()` on missing / parse-failure / unknown-field rows.
+/// Used by [`build_workspace_embedder_and_config`] and the LLM graph
+/// extractor builder; both want the same resolved `Config` so the
+/// `memory_provider` routing the chat-provider factory does aligns with
+/// the embedder choice.
+fn load_workspace_config(workspace_dir: &std::path::Path) -> Config {
+    let candidates: Vec<std::path::PathBuf> = std::iter::empty()
+        .chain(
+            workspace_dir
+                .parent()
+                .map(|p| p.join("config.toml"))
+                .into_iter(),
+        )
+        .chain(std::iter::once(workspace_dir.join("config.toml")))
+        .collect();
+    let mut config = Config::default();
+    let mut loaded_from: Option<std::path::PathBuf> = None;
+    for candidate in &candidates {
+        match std::fs::read_to_string(candidate) {
+            Ok(text) => match toml::from_str::<Config>(&text) {
+                Ok(cfg) => {
+                    config = cfg;
+                    loaded_from = Some(candidate.clone());
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[memory:embedder] failed to parse {} ({e}); trying next candidate",
+                        candidate.display()
+                    );
+                }
+            },
+            Err(_) => {
+                // Not present — try the next candidate.
+            }
+        }
+    }
+    if loaded_from.is_none() {
+        log::debug!(
+            "[memory:embedder] no config.toml found near workspace_dir={} \
+             (tried {:?}); using Config::default()",
+            workspace_dir.display(),
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+        );
+    } else {
+        log::debug!(
+            "[memory:embedder] loaded config from {}",
+            loaded_from.as_ref().unwrap().display()
+        );
+    }
+    config
+}
+
+fn build_workspace_embedder_from_config(config: &Config) -> Arc<dyn EmbeddingProvider> {
+    let local_embedding_model = config.workload_local_model("embeddings");
+    let (provider, model, dims) =
+        effective_embedding_settings(&config.memory, local_embedding_model.as_deref());
+
+    log::info!(
+        "[memory:embedder] resolved provider={provider} model={model} dims={dims} \
+         (embeddings_provider={:?} memory.embedding_provider={:?})",
+        config.embeddings_provider,
+        config.memory.embedding_provider,
+    );
+
+    match embeddings::create_embedding_provider(&provider, &model, dims) {
+        Ok(boxed) => Arc::from(boxed),
+        Err(e) => {
+            log::warn!(
+                "[memory:embedder] failed to construct embedder provider={provider} \
+                 model={model} dims={dims} err={e}; falling back to NoopEmbedding. \
+                 Configure a valid embeddings provider in Settings → AI."
+            );
+            Arc::new(NoopEmbedding)
+        }
+    }
+}
+
+/// Build the LLM-driven namespace graph extractor for this workspace's
+/// configuration. Returns `None` when:
+/// - `mode = GraphExtractionMode::Heuristic` (user explicitly opted out)
+/// - the chat-provider factory fails (no `memory_provider` configured,
+///   bad endpoint, unknown slug) — the pipeline soft-falls back so this
+///   isn't fatal, just diagnostic.
+///
+/// When `mode = Auto`, the absence of a `memory_provider` is silent —
+/// we simply don't wire an extractor and the heuristic path runs.
+/// When `mode = Llm`, the absence is logged at warn level because the
+/// user explicitly asked for LLM extraction.
+fn build_graph_extractor(
+    config: &Config,
+    mode: GraphExtractionMode,
+) -> Option<Arc<dyn LlmGraphExtractor>> {
+    if !mode.wants_llm() {
+        log::info!(
+            "[memory:llm_extract] graph_extraction={} — heuristic-only path active",
+            mode.as_str()
+        );
+        return None;
+    }
+    // Reuse the memory-tree chat factory: it already knows how to route
+    // a `memory_provider = "ollama:<m>"` to a local OllamaChatProvider
+    // and a `memory_provider = "openai:<m>"` (or unset → first non-dead
+    // cloud_providers row) to the WorkloadChatProvider.
+    let chat_provider: Arc<dyn ChatProvider> =
+        match build_chat_provider_for_role(config, "memory", 30_000) {
+            Ok(provider) => provider,
+            Err(e) => {
+                if mode == GraphExtractionMode::Llm {
+                    log::warn!(
+                        "[memory:llm_extract] graph_extraction=llm requested but chat \
+                         provider build failed: {e:#}. Heuristic-only path will be used."
+                    );
+                } else {
+                    log::info!(
+                        "[memory:llm_extract] graph_extraction=auto but no chat provider \
+                         could be built ({e:#}); heuristic-only path active."
+                    );
+                }
+                return None;
+            }
+        };
+    let provider_name = chat_provider.name().to_string();
+    log::info!(
+        "[memory:llm_extract] graph_extraction={} — LLM extractor wired via {}",
+        mode.as_str(),
+        provider_name,
+    );
+    Some(Arc::new(ChatBackedLlmGraphExtractor::new(
+        chat_provider,
+        provider_name,
+    )))
+}
+
+// Legacy single-return helper kept for any external callers that don't
+// want the resolved `Config` back. Forwards to the new split helpers.
+#[allow(dead_code)]
+fn build_workspace_embedder(workspace_dir: &std::path::Path) -> Arc<dyn EmbeddingProvider> {
+    build_workspace_embedder_and_config(workspace_dir).0
 }
 
 #[cfg(test)]

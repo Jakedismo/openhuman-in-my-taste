@@ -37,8 +37,6 @@ Env:
                                  scripts/shortcuts/review.
   WORK_BRANCH_PREFIX=issue       Branch name is <prefix>/<num>-<slug> (default:
                                  issue).
-  WORK_AUTO_ASSIGN=1             Auto-assign the issue to `@me` when work
-                                 starts. Set to `0` to disable.
 EOF
 }
 

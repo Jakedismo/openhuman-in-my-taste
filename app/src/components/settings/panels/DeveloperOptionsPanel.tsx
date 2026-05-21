@@ -19,8 +19,8 @@ const developerItems = [
   // top-level menu space.
   {
     id: 'ai',
-    titleKey: 'settings.developerMenu.ai.title',
-    descriptionKey: 'settings.developerMenu.ai.desc',
+    title: 'AI Configuration',
+    description: 'Cloud providers, local Ollama models, and per-workload routing',
     route: 'ai',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -35,8 +35,8 @@ const developerItems = [
   },
   {
     id: 'screen-intelligence',
-    titleKey: 'settings.developerMenu.screenAwareness.title',
-    descriptionKey: 'settings.developerMenu.screenAwareness.desc',
+    title: 'Screen Awareness',
+    description: 'Screen capture permissions, monitoring policy, and session controls',
     route: 'screen-intelligence',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -51,8 +51,8 @@ const developerItems = [
   },
   {
     id: 'messaging',
-    titleKey: 'settings.developerMenu.messagingChannels.title',
-    descriptionKey: 'settings.developerMenu.messagingChannels.desc',
+    title: 'Messaging Channels',
+    description: 'Configure Telegram/Discord auth modes and default channel routing',
     route: 'messaging',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -67,8 +67,8 @@ const developerItems = [
   },
   {
     id: 'tools',
-    titleKey: 'settings.developerMenu.tools.title',
-    descriptionKey: 'settings.developerMenu.tools.desc',
+    title: 'Tools',
+    description: 'Enable or disable capabilities OpenHuman can use on your behalf',
     route: 'tools',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -89,8 +89,8 @@ const developerItems = [
   },
   {
     id: 'agent-chat',
-    titleKey: 'settings.developerMenu.agentChat.title',
-    descriptionKey: 'settings.developerMenu.agentChat.desc',
+    title: 'Agent Chat',
+    description: 'Test agent conversation with model and temperature overrides',
     route: 'agent-chat',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -105,8 +105,8 @@ const developerItems = [
   },
   {
     id: 'cron-jobs',
-    titleKey: 'settings.developerMenu.cronJobs.title',
-    descriptionKey: 'settings.developerMenu.cronJobs.desc',
+    title: 'Cron Jobs',
+    description: 'View and configure scheduled jobs for runtime skills',
     route: 'cron-jobs',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -121,8 +121,8 @@ const developerItems = [
   },
   {
     id: 'local-model-debug',
-    titleKey: 'settings.developerMenu.localModelDebug.title',
-    descriptionKey: 'settings.developerMenu.localModelDebug.desc',
+    title: 'Local Model Debug',
+    description: 'Ollama config, asset downloads, model tests, and diagnostics',
     route: 'local-model-debug',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -137,8 +137,8 @@ const developerItems = [
   },
   {
     id: 'webhooks-debug',
-    titleKey: 'settings.developerMenu.webhooks.title',
-    descriptionKey: 'settings.developerMenu.webhooks.desc',
+    title: 'Webhooks',
+    description: 'Inspect runtime webhook registrations and captured request logs',
     route: 'webhooks-debug',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -153,8 +153,8 @@ const developerItems = [
   },
   {
     id: 'intelligence',
-    titleKey: 'settings.developerMenu.intelligence.title',
-    descriptionKey: 'settings.developerMenu.intelligence.desc',
+    title: 'Intelligence',
+    description: 'Memory workspace, subconscious engine, dreams, and settings',
     route: 'intelligence',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -169,8 +169,8 @@ const developerItems = [
   },
   {
     id: 'notification-routing',
-    titleKey: 'settings.developerMenu.notificationRouting.title',
-    descriptionKey: 'settings.developerMenu.notificationRouting.desc',
+    title: 'Notification Routing',
+    description: 'AI importance scoring and orchestrator escalation for integration alerts',
     route: 'notification-routing',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -185,8 +185,8 @@ const developerItems = [
   },
   {
     id: 'webhooks-triggers',
-    titleKey: 'settings.developerMenu.composeioTriggers.title',
-    descriptionKey: 'settings.developerMenu.composeioTriggers.desc',
+    title: 'ComposeIO Triggers',
+    description: 'View ComposeIO trigger history and archive',
     route: 'webhooks-triggers',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -201,8 +201,8 @@ const developerItems = [
   },
   {
     id: 'composio-routing',
-    titleKey: 'settings.developerMenu.composioRouting.title',
-    descriptionKey: 'settings.developerMenu.composioRouting.desc',
+    title: 'Composio Routing (Direct Mode)',
+    description: 'Bring your own Composio API key and route calls directly to backend.composio.dev',
     route: 'composio-routing',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -216,9 +216,26 @@ const developerItems = [
     ),
   },
   {
+    id: 'triggers',
+    title: 'Composio Triggers (Direct Mode)',
+    description:
+      'Set up the ngrok tunnel + local webhook receiver that lets direct-mode Composio triggers deliver events without the OpenHuman backend.',
+    route: 'triggers',
+    icon: (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={2}
+          d="M13 10V3L4 14h7v7l9-11h-7z"
+        />
+      </svg>
+    ),
+  },
+  {
     id: 'composio-triggers',
-    titleKey: 'settings.developerMenu.integrationTriggers.title',
-    descriptionKey: 'settings.developerMenu.integrationTriggers.desc',
+    title: 'Integration Triggers',
+    description: 'Configure AI triage settings for Composio integration triggers',
     route: 'composio-triggers',
     icon: (
       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -233,22 +250,6 @@ const developerItems = [
           strokeLinejoin="round"
           strokeWidth={2}
           d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-        />
-      </svg>
-    ),
-  },
-  {
-    id: 'mcp-server',
-    titleKey: 'settings.developerMenu.mcpServer.title',
-    descriptionKey: 'settings.developerMenu.mcpServer.desc',
-    route: 'mcp-server',
-    icon: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
         />
       </svg>
     ),
@@ -499,8 +500,8 @@ const DeveloperOptionsPanel = () => {
           <SettingsMenuItem
             key={item.id}
             icon={item.icon}
-            title={t(item.titleKey)}
-            description={t(item.descriptionKey)}
+            title={item.title}
+            description={item.description}
             onClick={() => navigateToSettings(item.route)}
             isFirst={index === 0}
             isLast={false}

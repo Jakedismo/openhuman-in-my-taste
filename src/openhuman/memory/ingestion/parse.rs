@@ -5,15 +5,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{json, Map, Value};
 
+use super::llm_extract::{LlmGraphExtraction, LlmGraphExtractor};
 use super::regex::{
     action_item_regex, classify_entity, email_header_regex, explicit_owner_regex,
     explicit_preference_regex, graph_fact_regex, named_email_regex, recipient_regex,
     sanitize_entity_name, sanitize_fact_text, spatial_regex, will_review_regex,
 };
 use super::types::{
-    ExtractedEntity, ExtractedRelation, ExtractionAccumulator, ExtractionMode, ExtractionUnit,
-    MemoryIngestionConfig, ParsedIngestion, RawEntity, RawRelation, DEFAULT_CHUNK_TOKENS,
+    extraction_backend, ExtractedEntity, ExtractedRelation, ExtractionAccumulator, ExtractionMode,
+    ExtractionUnit, MemoryIngestionConfig, ParsedIngestion, RawEntity, RawRelation,
+    DEFAULT_CHUNK_TOKENS, DEFAULT_MEMORY_EXTRACTION_MODEL,
 };
+use crate::openhuman::config::GraphExtractionMode;
 use crate::openhuman::memory::store::types::NamespaceDocumentInput;
 use crate::openhuman::memory::UnifiedMemory;
 
@@ -215,12 +218,17 @@ pub(super) fn enrich_document_metadata(
     for (key, value) in parsed.metadata.as_object().cloned().unwrap_or_default() {
         metadata.insert(key, value);
     }
+    let model_name = parsed
+        .model_label
+        .clone()
+        .unwrap_or_else(|| config.model_name.clone());
     metadata.insert(
         "ingestion".to_string(),
         json!({
-            "backend": "openhuman_rust_heuristic",
-            "model_name": config.model_name,
+            "backend": parsed.extraction_backend.clone(),
+            "model_name": model_name,
             "extraction_mode": config.extraction_mode.as_str(),
+            "graph_extraction": config.graph_extraction.as_str(),
             "entity_count": parsed.entities.len(),
             "relation_count": parsed.relations.len(),
             "preference_count": parsed.preference_count,
@@ -260,14 +268,18 @@ pub(super) async fn parse_document(
     content: &str,
     title: &str,
     config: &MemoryIngestionConfig,
+    extractor: Option<&dyn LlmGraphExtractor>,
 ) -> ParsedIngestion {
     let chunks = UnifiedMemory::chunk_document_content(content, DEFAULT_CHUNK_TOKENS);
+    let llm_requested = config.graph_extraction.wants_llm() && extractor.is_some();
     log::info!(
         "[memory:ingestion] parse_document title={title:?} model={} \
-         content_len={} chunk_count={} — heuristic extraction active",
+         content_len={} chunk_count={} graph_extraction={} llm_extractor_available={}",
         config.model_name,
         content.len(),
         chunks.len(),
+        config.graph_extraction.as_str(),
+        extractor.is_some(),
     );
     let mut accumulator = ExtractionAccumulator {
         document_title: Some(sanitize_entity_name(title)),
@@ -817,6 +829,80 @@ pub(super) async fn parse_document(
         }
     }
 
+    // Run the LLM extractor (when wired + requested). This happens AFTER
+    // the heuristic loop has populated the accumulator with structural
+    // signals (decisions, preferences, doc_kind, headers) but BEFORE
+    // alias resolution + threshold filtering — so the LLM's output flows
+    // through the same `add_entity` / `add_relation` codepath as the
+    // heuristic, which means alias resolution, predicate-rule validation,
+    // and dedup all apply uniformly.
+    //
+    // Soft-fallback: any failure (provider unreachable, malformed JSON,
+    // unknown predicates causing the rule check to drop everything) logs a
+    // warn and leaves the heuristic results untouched.
+    let heuristic_entity_count = accumulator.entities.len();
+    let heuristic_relation_count = accumulator.relations.len();
+    let mut llm_contributed_entities = 0usize;
+    let mut llm_contributed_relations = 0usize;
+    let mut extraction_backend_label = extraction_backend::HEURISTIC.to_string();
+    let mut model_label_for_report: Option<String> = None;
+    if llm_requested {
+        if let Some(ext) = extractor {
+            // chunk_index/order_index are global heuristics — the LLM
+            // doesn't track per-chunk provenance, so we credit its
+            // contributions to chunk 0. The accumulator's
+            // dedup-by-(s,p,o) means a chunk-0-tagged triple that also
+            // appears in the heuristic output collapses into the same
+            // entry without losing the heuristic's per-chunk index.
+            match ext.extract_graph(content, title).await {
+                Ok(out) => {
+                    let (entities_added, relations_added) =
+                        merge_llm_extraction(&mut accumulator, &out, config);
+                    llm_contributed_entities = entities_added;
+                    llm_contributed_relations = relations_added;
+                    model_label_for_report = Some(ext.model_label().to_string());
+                    extraction_backend_label = if entities_added > 0 || relations_added > 0 {
+                        if heuristic_entity_count > 0 || heuristic_relation_count > 0 {
+                            extraction_backend::LLM_PLUS_HEURISTIC.to_string()
+                        } else {
+                            extraction_backend::LLM.to_string()
+                        }
+                    } else {
+                        // LLM ran but added nothing on top of heuristic.
+                        // Report as heuristic — the model label still
+                        // surfaces in `model_name` so operators can see
+                        // it was attempted.
+                        extraction_backend::HEURISTIC.to_string()
+                    };
+                    log::info!(
+                        "[memory:ingestion] llm_extract title={title:?} model={} \
+                         entities_added={} relations_added={} \
+                         heuristic_entities={} heuristic_relations={}",
+                        ext.model_label(),
+                        entities_added,
+                        relations_added,
+                        heuristic_entity_count,
+                        heuristic_relation_count,
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[memory:ingestion] LLM extraction failed; falling back to heuristic. \
+                         title={title:?} provider={} model={} err={e:#}",
+                        ext.name(),
+                        ext.model_label(),
+                    );
+                    extraction_backend_label = extraction_backend::HEURISTIC_FALLBACK.to_string();
+                    model_label_for_report = Some(ext.model_label().to_string());
+                }
+            }
+        }
+    }
+    // Suppress "unused" lints when neither branch fires — these counters
+    // are intentionally inspected in tests via the result's metadata.
+    let _ = llm_contributed_entities;
+    let _ = llm_contributed_relations;
+
     let aliases = build_alias_map(&accumulator.entities);
     let reverse_alias = reverse_aliases(&aliases);
     let mut canonical_entities = BTreeMap::<String, RawEntity>::new();
@@ -931,5 +1017,60 @@ pub(super) async fn parse_document(
         chunk_count: chunks.len(),
         preference_count: accumulator.preferences.len(),
         decision_count: accumulator.decisions.len(),
+        extraction_backend: extraction_backend_label,
+        model_label: model_label_for_report,
     }
 }
+
+/// Merge an [`LlmGraphExtraction`] into the accumulator. Returns the count
+/// of `(entities_added, relations_added)` that the accumulator actually
+/// accepted — both numbers can be zero when the model's output failed the
+/// predicate-rule check or got deduplicated against existing heuristic
+/// extractions.
+///
+/// Both standalone entities and the subject/object of each relation flow
+/// through [`super::types::ExtractionAccumulator::add_entity`] / `add_relation`,
+/// so:
+/// - PERSON aliases get resolved (`Alice` → `Alice Smith` when both appear).
+/// - Unknown predicates ([`super::rules::relation_rule`] returns `None`) are
+///   silently dropped — same fate as a regex-extracted bad triple.
+/// - Confidence below the per-type threshold in the final filter is
+///   dropped; the model's `confidence` is preserved into the accumulator.
+fn merge_llm_extraction(
+    accumulator: &mut ExtractionAccumulator,
+    extraction: &LlmGraphExtraction,
+    _config: &MemoryIngestionConfig,
+) -> (usize, usize) {
+    let entities_before = accumulator.entities.len();
+    let relations_before = accumulator.relations.len();
+    for entity in &extraction.entities {
+        accumulator.add_entity(&entity.name, &entity.entity_type, entity.confidence);
+    }
+    // Use chunk_index 0 / order_index 0 for LLM-contributed relations —
+    // the LLM doesn't have per-chunk provenance, but the accumulator's
+    // (subject, predicate, object) dedup means heuristic triples retain
+    // their real chunk indexes if the LLM emits the same triple.
+    for relation in &extraction.relations {
+        accumulator.add_relation(
+            &relation.subject,
+            &relation.subject_type,
+            &relation.predicate,
+            &relation.object,
+            &relation.object_type,
+            relation.confidence,
+            0,
+            0,
+            Map::new(),
+        );
+    }
+    (
+        accumulator.entities.len().saturating_sub(entities_before),
+        accumulator.relations.len().saturating_sub(relations_before),
+    )
+}
+
+// Silence the unused-imports warning for `DEFAULT_MEMORY_EXTRACTION_MODEL`
+// — re-exported above for downstream callers that still rely on the
+// legacy literal "heuristic-only" string.
+#[allow(dead_code)]
+const _MARKER_USE_DEFAULT_MODEL: &str = DEFAULT_MEMORY_EXTRACTION_MODEL;

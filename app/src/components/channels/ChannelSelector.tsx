@@ -3,7 +3,7 @@ import { useMemo } from 'react';
 import { resolvePreferredAuthModeForChannel } from '../../lib/channels/routing';
 import { useT } from '../../lib/i18n/I18nContext';
 import { useAppSelector } from '../../store/hooks';
-import type { ChannelConnectionStatus, ChannelDefinition, ChannelType } from '../../types/channels';
+import type { ChannelDefinition, ChannelType } from '../../types/channels';
 import ChannelStatusBadge from './ChannelStatusBadge';
 
 interface ChannelSelectorProps {
@@ -13,12 +13,6 @@ interface ChannelSelectorProps {
 }
 
 const CHANNEL_ICONS: Record<string, string> = { telegram: '✈️', discord: '🎮', web: '🌐' };
-const CHANNEL_STATUS_PRIORITY: ChannelConnectionStatus[] = [
-  'connected',
-  'connecting',
-  'error',
-  'disconnected',
-];
 
 const ChannelSelector = ({
   definitions,
@@ -55,13 +49,11 @@ const ChannelSelector = ({
 
           // Determine best connection status for this channel.
           const channelModes = channelConnections.connections[channelId];
-          const modeStatuses = channelModes
-            ? Object.values(channelModes)
-                .map(connection => connection?.status)
-                .filter((status): status is ChannelConnectionStatus => Boolean(status))
-            : [];
-          const bestStatus =
-            CHANNEL_STATUS_PRIORITY.find(status => modeStatuses.includes(status)) ?? 'disconnected';
+          const bestStatus = channelModes
+            ? (Object.values(channelModes).find(c => c?.status === 'connected')?.status ??
+              Object.values(channelModes).find(c => c?.status === 'connecting')?.status ??
+              'disconnected')
+            : 'disconnected';
 
           return (
             <button

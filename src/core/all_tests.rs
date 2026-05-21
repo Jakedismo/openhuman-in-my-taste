@@ -93,12 +93,12 @@ fn rpc_method_name_formats_correctly() {
 
 #[test]
 fn registered_controller_rpc_method_name() {
-    let s = schema("billing", "get_balance", vec![]);
+    let s = schema("memory", "doc_put", vec![]);
     let rc = RegisteredController {
         schema: s,
         handler: noop_handler,
     };
-    assert_eq!(rc.rpc_method_name(), "openhuman.billing_get_balance");
+    assert_eq!(rc.rpc_method_name(), "openhuman.memory_doc_put");
 }
 
 #[test]
@@ -106,7 +106,6 @@ fn namespace_description_known_namespaces() {
     assert!(namespace_description("memory").is_some());
     assert!(namespace_description("memory_tree").is_some());
     assert!(namespace_description("redirect_links").is_some());
-    assert!(namespace_description("billing").is_some());
     assert!(namespace_description("config").is_some());
     assert!(namespace_description("health").is_some());
     assert!(namespace_description("security").is_some());

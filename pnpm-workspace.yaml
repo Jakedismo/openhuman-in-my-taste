@@ -1,2 +1,11 @@
 packages:
   - "app"
+# Approved or skipped postinstall scripts. pnpm 11 fails `install`
+# unless every package with a build script appears here with a boolean.
+#   true  → run the postinstall (downloads binaries, signs sourcemaps, …)
+#   false → skip it (we don't need this in the local-OAuth desktop build)
+allowBuilds:
+  '@sentry/cli': false       # only needed for signed release sourcemap uploads
+  edgedriver: false          # browser WebDriver; desktop E2E uses tauri-driver
+  esbuild: true              # required for Vite
+  geckodriver: false         # browser WebDriver; same story as edgedriver

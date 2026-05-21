@@ -1,4 +1,3 @@
-import createDebug from 'debug';
 import { useCallback, useEffect, useState } from 'react';
 
 import PillTabBar from '../components/PillTabBar';
@@ -10,8 +9,6 @@ import { rewardsApi } from '../services/api/rewardsApi';
 import type { RewardsSnapshot } from '../types/rewards';
 
 type RewardsTab = 'referrals' | 'redeem' | 'rewards';
-
-const log = createDebug('rewards');
 
 function errorMessage(err: unknown): string {
   if (err && typeof err === 'object' && 'error' in err && typeof err.error === 'string') {
@@ -31,21 +28,20 @@ const Rewards = () => {
   const [error, setError] = useState<string | null>(null);
 
   const loadRewards = useCallback(async (signal?: { cancelled: boolean }) => {
-    log('fetching snapshot');
+    console.debug('[rewards] fetching snapshot');
     setIsLoading(true);
     setError(null);
     try {
       const result = await rewardsApi.getMyRewards();
       if (signal?.cancelled) return;
       setSnapshot(result);
-      log(
-        'snapshot applied unlockedCount=%d totalCount=%d',
-        result.summary.unlockedCount,
-        result.summary.totalCount
-      );
+      console.debug('[rewards] snapshot applied', {
+        unlockedCount: result.summary.unlockedCount,
+        totalCount: result.summary.totalCount,
+      });
     } catch (err) {
       const message = errorMessage(err);
-      log('snapshot load failed error=%s', message);
+      console.debug('[rewards] snapshot load failed', message);
       if (signal?.cancelled) return;
       setSnapshot(null);
       setError(message);
@@ -65,12 +61,12 @@ const Rewards = () => {
   }, [loadRewards]);
 
   const handleTabChange = useCallback((next: RewardsTab) => {
-    log('tab changed next=%s', next);
+    console.debug('[rewards] tab changed', { next });
     setSelectedTab(next);
   }, []);
 
   const handleRetry = useCallback(() => {
-    log('retry requested');
+    console.debug('[rewards] retry requested');
     void loadRewards();
   }, [loadRewards]);
 

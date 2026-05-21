@@ -23,9 +23,11 @@
 //!   which also returns Oculus-15 visemes for the mascot lip-sync.
 //! - `"piper"` → local Piper subprocess via `PIPER_BIN`. Lower latency than
 //!   ElevenLabs and runs offline; default voice `en_US-lessac-medium`.
-//!   **Note**: Kokoro (higher quality, 82M params) is intentionally out of
-//!   scope for this ship — `PIPER_BIN` is already reserved in `.env.example`
-//!   and Piper is the simpler integration. Kokoro is tracked as future work.
+//! - `"kokoro"` → local OpenAI-compatible TTS server (Kokoro on
+//!   kokoro-fastapi / mlx-audio / LM Studio audio mode). Higher quality
+//!   than Piper, runs offline, and on Apple Silicon the MLX backend is
+//!   markedly faster than Piper's CPU ONNX path. Endpoint, model, and
+//!   default voice come from `config.local_ai.kokoro_*`.
 //!
 //! ## Logging prefixes
 //!
@@ -43,7 +45,9 @@ use super::cloud_transcribe::{transcribe_cloud, CloudTranscribeOptions, CloudTra
 use super::local_speech::{synthesize_piper, PiperOptions};
 use super::local_transcribe::{transcribe_whisper, WhisperTranscribeOptions};
 use super::reply_speech::{synthesize_reply, ReplySpeechOptions, ReplySpeechResult};
+use super::system_speech::{synthesize_system_say, SystemSpeechOptions};
 use crate::openhuman::config::Config;
+use crate::openhuman::inference::voice::kokoro_speech::{synthesize_kokoro, KokoroOptions};
 use crate::rpc::RpcOutcome;
 
 const LOG_PREFIX: &str = "[voice-factory]";
@@ -301,6 +305,122 @@ impl TtsProvider for PiperTtsProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Kokoro (local OpenAI-compatible HTTP server) TTS
+// ---------------------------------------------------------------------------
+
+/// Local-server TTS via an OpenAI-compatible `/v1/audio/speech` endpoint.
+/// Reference deployments: `kokoro-fastapi`, `mlx-audio` (Apple Silicon /
+/// MLX-accelerated). The provider is protocol-only — anything that speaks
+/// OpenAI Audio API works. See [`super::super::inference::voice::kokoro_speech`].
+pub struct KokoroTtsProvider {
+    endpoint_url: String,
+    model: String,
+    voice: Option<String>,
+}
+
+impl KokoroTtsProvider {
+    pub fn new(endpoint_url: String, model: String, voice: Option<String>) -> Self {
+        Self {
+            endpoint_url,
+            model,
+            voice,
+        }
+    }
+}
+
+#[async_trait]
+impl TtsProvider for KokoroTtsProvider {
+    fn name(&self) -> &'static str {
+        "kokoro"
+    }
+
+    async fn synthesize(
+        &self,
+        config: &Config,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<RpcOutcome<ReplySpeechResult>, String> {
+        // Per-call voice override wins; otherwise fall back to the configured
+        // default. Empty strings on either side trigger the server's own
+        // default by omitting `voice` from the request body.
+        let resolved_voice = voice
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.voice.clone());
+        debug!(
+            "{LOG_PREFIX} kokoro TTS dispatch endpoint={} model={} voice={} chars={}",
+            self.endpoint_url,
+            self.model,
+            resolved_voice.as_deref().unwrap_or("<server-default>"),
+            text.len()
+        );
+        let opts = KokoroOptions {
+            endpoint_url: self.endpoint_url.clone(),
+            model: self.model.clone(),
+            voice: resolved_voice,
+        };
+        synthesize_kokoro(config, text, &opts).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System (host-native) TTS
+// ---------------------------------------------------------------------------
+
+/// System-native TTS. Currently macOS-only — wraps `/usr/bin/say` plus
+/// `/usr/bin/afconvert` (see [`super::system_speech`]). Exists primarily
+/// because the upstream Rhasspy Piper macOS release ships a broken
+/// dylib chain, so `"piper"` is unusable out-of-the-box on macOS until
+/// the user manually sources the missing `libespeak-ng.1.dylib` /
+/// `libonnxruntime.1.14.1.dylib` / `libpiper_phonemize.1.dylib`. The
+/// non-macOS `synthesize` call returns an explicit "macOS-only" error.
+pub struct SystemTtsProvider {
+    voice: Option<String>,
+}
+
+impl SystemTtsProvider {
+    pub fn new(voice: Option<String>) -> Self {
+        let voice = voice.and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        Self { voice }
+    }
+}
+
+#[async_trait]
+impl TtsProvider for SystemTtsProvider {
+    fn name(&self) -> &'static str {
+        "system"
+    }
+
+    async fn synthesize(
+        &self,
+        config: &Config,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<RpcOutcome<ReplySpeechResult>, String> {
+        let resolved_voice = voice
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.voice.clone());
+        debug!(
+            "{LOG_PREFIX} system TTS dispatch voice={} chars={}",
+            resolved_voice.as_deref().unwrap_or("<default>"),
+            text.len()
+        );
+        let opts = SystemSpeechOptions {
+            voice: resolved_voice,
+        };
+        synthesize_system_say(config, text, &opts).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Factory entry points (mirrors embeddings/factory.rs)
 // ---------------------------------------------------------------------------
 
@@ -346,34 +466,114 @@ pub fn create_stt_provider(
 /// Supported provider names:
 /// - `"cloud"` → backend ElevenLabs proxy with viseme alignment
 /// - `"piper"` → local Piper subprocess via `PIPER_BIN`
-///
-/// Kokoro is **not** implemented in this cut — the integration shipped with
-/// Piper because `PIPER_BIN` is already reserved in `.env.example` and the
-/// runtime contract (subprocess + `.onnx` model) is simpler. Adding Kokoro
-/// later is straightforward: add a new branch here and a `local_speech_kokoro`
-/// sibling module.
+/// - `"kokoro"` → local OpenAI-compatible TTS server (Kokoro on
+///   kokoro-fastapi / mlx-audio / LM Studio audio mode). Endpoint URL,
+///   model, and default voice come from `config.local_ai.kokoro_*`.
+/// - `"system"` → host-native TTS (macOS only — wraps `/usr/bin/say`).
+///   Falls back here when the broken upstream Piper macOS release would
+///   otherwise leave the user with no working local-TTS option.
 pub fn create_tts_provider(
     provider: &str,
     voice: &str,
-    _config: &Config,
+    config: &Config,
 ) -> anyhow::Result<Box<dyn TtsProvider>> {
     debug!("{LOG_PREFIX} create_tts_provider provider={provider} voice={voice}");
-    let voice = if voice.trim().is_empty() {
+    let trimmed_voice = voice.trim();
+    let piper_voice = if trimmed_voice.is_empty() {
         DEFAULT_PIPER_VOICE
     } else {
-        voice
+        trimmed_voice
     };
     match provider.trim() {
-        "cloud" => Ok(Box::new(CloudTtsProvider::new(if voice.is_empty() {
+        "cloud" => Ok(Box::new(CloudTtsProvider::new(if trimmed_voice.is_empty() {
             None
         } else {
-            Some(voice.to_string())
+            Some(trimmed_voice.to_string())
         }))),
-        "piper" => Ok(Box::new(PiperTtsProvider::new(voice))),
+        "piper" => Ok(Box::new(PiperTtsProvider::new(piper_voice))),
+        "kokoro" => {
+            // Kokoro uses its own voice-id namespace: a lowercase
+            // language-gender prefix followed by `_<name>` — e.g.
+            // `af_bella` (American Female), `am_michael` (American Male),
+            // `bf_emma` (British Female), `jf_alpha` (Japanese Female),
+            // `zf_xiaoxiao` (Chinese Female), `ef_dora` (Spanish Female),
+            // `ff_siwis` (French Female).
+            //
+            // The factory's per-call `voice` argument comes from a wide
+            // mix of call sites — the mascot stores an ElevenLabs voice
+            // id (e.g. `Rachel`), Piper stores `en_US-lessac-medium`,
+            // and ad-hoc `voice_tts_dispatch` invocations forward
+            // whatever the user typed. Only forward `voice` when it
+            // actually matches Kokoro's pattern; anything else falls
+            // back to the configured `kokoro_voice` so we never POST a
+            // foreign id to mlx-audio and trigger an unknown-voice 4xx
+            // (or worse, a default that doesn't sound like what the
+            // user picked in Settings).
+            let configured_default = if config.local_ai.kokoro_voice.trim().is_empty() {
+                None
+            } else {
+                Some(config.local_ai.kokoro_voice.trim().to_string())
+            };
+            let voice_override = if is_kokoro_voice_id(trimmed_voice) {
+                Some(trimmed_voice.to_string())
+            } else {
+                None
+            };
+            Ok(Box::new(KokoroTtsProvider::new(
+                config.local_ai.kokoro_endpoint_url.clone(),
+                config.local_ai.kokoro_model.clone(),
+                voice_override.or(configured_default),
+            )))
+        }
+        // System TTS uses host-native voice IDs (e.g. macOS `say -v
+        // Samantha`), which don't share a namespace with Piper voice
+        // IDs. Only forward the voice argument when it looks non-Piper
+        // (no underscore, no dash-quality suffix) — otherwise let the
+        // OS pick its default voice rather than choke on an unknown
+        // `en_US-lessac-medium`.
+        "system" => Ok(Box::new(SystemTtsProvider::new(
+            if trimmed_voice.is_empty() || trimmed_voice.contains('_') {
+                None
+            } else {
+                Some(trimmed_voice.to_string())
+            },
+        ))),
         unknown => Err(anyhow::anyhow!(
-            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\""
+            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\", \"kokoro\", \"system\""
         )),
     }
+}
+
+/// Recognise a Kokoro voice id. Kokoro voices share a strict naming
+/// convention: a two-character language+gender prefix (`af` / `am` /
+/// `bf` / `bm` / `ef` / `ff` / `jf` / `jm` / `zf` / `zm`), an underscore,
+/// then a lowercase name. Anything that doesn't match isn't a Kokoro
+/// voice — typically it's an ElevenLabs name (`Rachel`), a Piper id
+/// (`en_US-lessac-medium`), or a macOS `say` voice (`Samantha`).
+///
+/// The match is intentionally narrow (gate at the second character,
+/// then explicit prefix check) rather than `[a-z]{2}_…` because the
+/// false-positive cost is high: a foreign id slipping through routes
+/// to mlx-audio's unknown-voice error path.
+fn is_kokoro_voice_id(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 || bytes[2] != b'_' {
+        return false;
+    }
+    let lang = bytes[0];
+    let gender = bytes[1];
+    if !matches!(lang, b'a' | b'b' | b'e' | b'f' | b'j' | b'z') {
+        return false;
+    }
+    if !matches!(gender, b'f' | b'm') {
+        return false;
+    }
+    // Tail must be ASCII lowercase letters / digits / underscores. No
+    // dashes (rules out Piper ids like `en_US-lessac-medium`), no
+    // uppercase (rules out CamelCase ElevenLabs ids).
+    s[3..]
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// Default Whisper model. `whisper-large-v3-turbo` is the recommended ship
@@ -480,12 +680,123 @@ mod tests {
 
     #[test]
     fn tts_factory_unknown_provider_errors() {
-        let err = create_tts_provider("kokoro", "af_bella", &cfg())
+        let err = create_tts_provider("deepgram", "luna", &cfg())
             .err()
-            .expect("kokoro is not implemented in this cut");
+            .expect("deepgram TTS is not implemented");
         let msg = err.to_string();
-        assert!(msg.contains("kokoro"), "should name the provider: {msg}");
+        assert!(msg.contains("deepgram"), "should name the provider: {msg}");
         assert!(msg.contains("unknown"), "should say unknown: {msg}");
+        // The error surfaces the supported list — make sure each id is in
+        // it so a user typo'd as "say" or "macos" gets pointed at the right
+        // provider id.
+        for expected in ["cloud", "piper", "kokoro", "system"] {
+            assert!(
+                msg.contains(expected),
+                "supported-provider list should advertise '{expected}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tts_factory_kokoro_branch() {
+        let p = create_tts_provider("kokoro", "af_bella", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_piper_style_voice_id() {
+        // Piper ids contain a dash + quality suffix and would 404 on
+        // mlx-audio. The factory falls back to the configured default.
+        let p = create_tts_provider("kokoro", "en_US-lessac-medium", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_elevenlabs_style_voice_id() {
+        // ElevenLabs voices use CamelCase names (`Rachel`, `Adam`,
+        // `Bella`). They have no underscore so the previous heuristic
+        // let them through and the kokoro server returned "unknown
+        // voice". The new validator rejects them.
+        let p = create_tts_provider("kokoro", "Rachel", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_macos_say_voice_id() {
+        // macOS `say` voice ids look like `Samantha` / `Daniel`.
+        let p = create_tts_provider("kokoro", "Samantha", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_empty_voice_uses_configured_default() {
+        let p = create_tts_provider("kokoro", "", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn is_kokoro_voice_id_accepts_canonical_ids() {
+        // Spot-check the published Kokoro v1 naming convention.
+        for id in [
+            "af_bella",
+            "af_heart",
+            "am_michael",
+            "bf_emma",
+            "bm_lewis",
+            "jf_alpha",
+            "zf_xiaoxiao",
+            "ef_dora",
+            "ff_siwis",
+        ] {
+            assert!(is_kokoro_voice_id(id), "{id} should be accepted");
+        }
+    }
+
+    #[test]
+    fn is_kokoro_voice_id_rejects_foreign_ids() {
+        for id in [
+            "",                    // empty
+            "a",                   // too short
+            "Rachel",              // ElevenLabs CamelCase
+            "rachel",              // lowercase ElevenLabs — no `_`
+            "en_US-lessac-medium", // Piper
+            "en_US",               // Piper locale only
+            "Samantha",            // macOS say
+            "AF_BELLA",            // uppercase prefix
+            "xf_bella",            // unknown language prefix
+            "an_bella",            // unknown gender
+            "a_bella",             // missing gender char
+        ] {
+            assert!(
+                !is_kokoro_voice_id(id),
+                "{id} should NOT be accepted as a kokoro id"
+            );
+        }
+    }
+
+    #[test]
+    fn tts_factory_system_branch() {
+        let p = create_tts_provider("system", "Samantha", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
+    }
+
+    #[test]
+    fn tts_factory_system_drops_piper_style_voice_id() {
+        // System TTS uses host-native voice ids (`"Samantha"`, `"Daniel"`)
+        // — not Piper ids. If the user previously had `tts_voice_id =
+        // "en_US-lessac-medium"` set for Piper and switches to system,
+        // we must drop the Piper id rather than feed it to `say -v
+        // en_US-lessac-medium` (which would fail with "Voice not
+        // available"). Construction succeeds either way — only the
+        // forwarded voice argument changes.
+        let p = create_tts_provider("system", "en_US-lessac-medium", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
+    }
+
+    #[test]
+    fn tts_factory_system_empty_voice_falls_back_to_default() {
+        let p = create_tts_provider("system", "", &cfg()).unwrap();
+        assert_eq!(p.name(), "system");
     }
 
     #[test]

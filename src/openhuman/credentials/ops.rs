@@ -519,100 +519,6 @@ pub async fn list_provider_credentials_by_prefix(
     Ok(items)
 }
 
-pub async fn oauth_connect(
-    config: &Config,
-    provider: &str,
-    skill_id: Option<&str>,
-    response_type: Option<&str>,
-    encryption_mode: Option<&str>,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| {
-        "session JWT required; complete login and store_session first".to_string()
-    })?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    let r = client
-        .connect(provider, &token, skill_id, response_type, encryption_mode)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(RpcOutcome::single_log(
-        serde_json::json!({ "oauthUrl": r.oauth_url, "state": r.state }),
-        "oauth connect URL ready",
-    ))
-}
-
-pub async fn oauth_list_integrations(
-    config: &Config,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| "session JWT required".to_string())?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    let list = client
-        .list_integrations(&token)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(RpcOutcome::single_log(
-        serde_json::to_value(&list).map_err(|e| e.to_string())?,
-        "integrations listed",
-    ))
-}
-
-pub async fn oauth_fetch_integration_tokens(
-    config: &Config,
-    integration_id: &str,
-    encryption_key: &str,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| "session JWT required".to_string())?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    let tokens = client
-        .fetch_integration_tokens_handoff(integration_id, &token, encryption_key)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(RpcOutcome::single_log(
-        serde_json::to_value(&tokens).map_err(|e| e.to_string())?,
-        "integration tokens retrieved",
-    ))
-}
-
-pub async fn oauth_fetch_client_key(
-    config: &Config,
-    integration_id: &str,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| "session JWT required".to_string())?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    let client_key = client
-        .fetch_client_key(integration_id, &token)
-        .await
-        .map_err(|e| e.to_string())?;
-    log::debug!(
-        "[credentials] client key retrieved for integration {}",
-        integration_id
-    );
-    Ok(RpcOutcome::single_log(
-        json!({ "clientKey": client_key, "integrationId": integration_id }),
-        "client key retrieved (one-time handoff)",
-    ))
-}
-
-pub async fn oauth_revoke_integration(
-    config: &Config,
-    integration_id: &str,
-) -> Result<RpcOutcome<serde_json::Value>, String> {
-    let api_url = effective_backend_api_url(&config.api_url);
-    let token = get_session_token(config)?.ok_or_else(|| "session JWT required".to_string())?;
-    let client = BackendOAuthClient::new(&api_url).map_err(|e| e.to_string())?;
-    client
-        .revoke_integration(integration_id, &token)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(RpcOutcome::single_log(
-        serde_json::json!({ "revoked": true, "integrationId": integration_id }),
-        "integration revoked",
-    ))
-}
-
 /// Provider slot for the user-provided Composio API key when running in
 /// direct mode (BYO key).
 ///
@@ -695,6 +601,147 @@ pub async fn clear_composio_api_key(
         json!({ "removed": removed }),
         "composio direct api key cleared",
     ))
+}
+
+// ── ngrok authtoken (Composio webhook receiver tunnel) ────────────────
+
+/// Provider key the ngrok tunnel authtoken is stored under in the
+/// encrypted credential store. Used by
+/// [`crate::openhuman::composio::webhook_receiver::tunnel`] to bring up
+/// the ngrok session at app boot when direct-mode triggers are wanted.
+///
+/// Independent from [`COMPOSIO_DIRECT_PROVIDER`] because users may run
+/// in either mode but still want ngrok set up: backend-mode users do
+/// not use the tunnel at all; direct-mode users use it to receive
+/// Composio webhook deliveries.
+pub const NGROK_AUTHTOKEN_PROVIDER: &str = "ngrok-tunnel";
+
+/// Persist the user-provided ngrok authtoken to the encrypted
+/// credential store under [`NGROK_AUTHTOKEN_PROVIDER`].
+///
+/// **Never log the authtoken itself** — the debug line below records
+/// only length, never the token. Same redaction discipline as
+/// [`store_composio_api_key`].
+pub async fn store_ngrok_authtoken(
+    config: &Config,
+    authtoken: &str,
+) -> Result<RpcOutcome<serde_json::Value>, String> {
+    let trimmed = authtoken.trim();
+    if trimmed.is_empty() {
+        return Err("ngrok authtoken must not be empty".to_string());
+    }
+    tracing::debug!(
+        len = trimmed.len(),
+        "[ngrok-tunnel] storing authtoken (redacted)"
+    );
+    let auth = AuthService::from_config(config);
+    auth.store_provider_token(
+        NGROK_AUTHTOKEN_PROVIDER,
+        DEFAULT_AUTH_PROFILE_NAME,
+        trimmed,
+        std::collections::HashMap::new(),
+        true,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(RpcOutcome::single_log(
+        json!({ "stored": true, "provider": NGROK_AUTHTOKEN_PROVIDER }),
+        "ngrok authtoken stored",
+    ))
+}
+
+/// Read the user-provided ngrok authtoken from the encrypted credential
+/// store. Returns `Ok(None)` when no token has been stored.
+///
+/// Used by
+/// [`crate::openhuman::composio::webhook_receiver::tunnel::connect`]
+/// to gate tunnel startup — no token → receiver stays idle (trigger
+/// writes surface the existing gate error).
+pub fn get_ngrok_authtoken(config: &Config) -> Result<Option<String>, String> {
+    let auth = AuthService::from_config(config);
+    let token = auth
+        .get_provider_bearer_token(NGROK_AUTHTOKEN_PROVIDER, None)
+        .map_err(|e| e.to_string())?;
+    Ok(token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty()))
+}
+
+/// Remove the stored ngrok authtoken. Used when the user wants to
+/// disable the tunnel without uninstalling the app.
+pub async fn clear_ngrok_authtoken(
+    config: &Config,
+) -> Result<RpcOutcome<serde_json::Value>, String> {
+    tracing::debug!("[ngrok-tunnel] clearing stored authtoken");
+    let auth = AuthService::from_config(config);
+    let removed = auth
+        .remove_profile(NGROK_AUTHTOKEN_PROVIDER, DEFAULT_AUTH_PROFILE_NAME)
+        .map_err(|e| e.to_string())?;
+    Ok(RpcOutcome::single_log(
+        json!({ "removed": removed }),
+        "ngrok authtoken cleared",
+    ))
+}
+
+// ── Composio webhook subscription secret ──────────────────────────────
+
+/// Provider key for the Composio webhook signing secret returned at
+/// subscription creation. Stored once on first
+/// [`crate::openhuman::composio::webhook_receiver::subscription::ensure_subscription`]
+/// call; reused on every subsequent restart to verify inbound deliveries.
+///
+/// The secret is returned by Composio ONLY at subscription creation
+/// time — losing it requires rotating by deleting and recreating the
+/// subscription (so any third party who got hold of an old secret can
+/// no longer forge events).
+pub const COMPOSIO_WEBHOOK_SECRET_PROVIDER: &str = "composio-webhook";
+
+/// Persist the per-subscription HMAC signing secret.
+///
+/// Caller is `ensure_subscription` — never expose a setter to the
+/// frontend, since the secret comes from Composio's response, not from
+/// the user.
+pub fn store_composio_webhook_secret(config: &Config, secret: &str) -> Result<(), String> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return Err("composio webhook secret must not be empty".to_string());
+    }
+    tracing::debug!(
+        len = trimmed.len(),
+        "[composio-webhook] storing subscription secret (redacted)"
+    );
+    let auth = AuthService::from_config(config);
+    auth.store_provider_token(
+        COMPOSIO_WEBHOOK_SECRET_PROVIDER,
+        DEFAULT_AUTH_PROFILE_NAME,
+        trimmed,
+        std::collections::HashMap::new(),
+        true,
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Read the per-subscription HMAC signing secret. Returns `Ok(None)`
+/// when no secret has been stored — receiver should treat this as
+/// "no subscription registered yet" and reject inbound traffic.
+pub fn get_composio_webhook_secret(config: &Config) -> Result<Option<String>, String> {
+    let auth = AuthService::from_config(config);
+    let secret = auth
+        .get_provider_bearer_token(COMPOSIO_WEBHOOK_SECRET_PROVIDER, None)
+        .map_err(|e| e.to_string())?;
+    Ok(secret
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Remove the stored webhook secret. Used by the "reset subscription"
+/// flow — paired with a `delete_webhook_subscription_v3` call upstream.
+pub fn clear_composio_webhook_secret(config: &Config) -> Result<bool, String> {
+    tracing::debug!("[composio-webhook] clearing stored subscription secret");
+    let auth = AuthService::from_config(config);
+    auth.remove_profile(COMPOSIO_WEBHOOK_SECRET_PROVIDER, DEFAULT_AUTH_PROFILE_NAME)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

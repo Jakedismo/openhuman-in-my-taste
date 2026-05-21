@@ -1,6 +1,6 @@
 [package]
 name = "openhuman"
-version = "0.54.4"
+version = "0.53.50"
 edition = "2021"
 description = "OpenHuman core business logic and RPC server"
 autobins = false
@@ -18,12 +18,12 @@ name = "gmail-backfill-3d"
 path = "src/bin/gmail_backfill_3d.rs"
 
 [[bin]]
-name = "memory-tree-init-smoke"
-path = "src/bin/memory_tree_init_smoke.rs"
-
-[[bin]]
 name = "inference-probe"
 path = "src/bin/inference_probe.rs"
+
+[[bin]]
+name = "oauth-connect"
+path = "src/bin/oauth_connect.rs"
 
 [lib]
 name = "openhuman_core"
@@ -57,6 +57,26 @@ rand = "0.10"
 dirs = "5"
 sha2 = "0.10"
 hmac = "0.12"
+# Constant-time byte comparison for HMAC signature verification in
+# `composio::webhook_receiver::hmac`. Already a transitive dep of
+# `hmac`/`sha2`/`aes-gcm`; pulled in as a direct dep so the receiver
+# can reach for `ConstantTimeEq` without leaning on a re-export.
+subtle = "2"
+# Unix-only memory-cap enforcement via `setrlimit(RLIMIT_AS)` in
+# `runtime_node::execute` and `runtime_python::execute`. Transitively
+# present via tokio / reqwest already; declared as a direct dep so
+# the `libc::rlimit` + `libc::setrlimit` reach is explicit. The crate
+# is a no-op pure-bindings dep on platforms we don't use the calls
+# on (Windows compiles the bindings but never calls them).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+# ngrok agent SDK for the local Composio webhook receiver tunnel. Embeds
+# the agent in-process and forwards public HTTPS traffic on the user's
+# free `<id>.ngrok-free.dev` static domain to our loopback Axum server.
+# `axum` feature gives us `listen_and_forward` directly against the
+# router we build in `composio::webhook_receiver::server`. Cross-platform
+# pure Rust — no system dependencies.
+ngrok = { version = "0.18", features = ["axum"] }
 # Archive extraction for the Node.js runtime bootstrap. Unix Node
 # distributions ship as .tar.xz, Windows as .zip. `xz2` with `static`
 # bundles liblzma so we don't need it as a system dependency.
@@ -93,7 +113,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tracing-appender = "0.2"
 prometheus = { version = "0.14", default-features = false }
 urlencoding = "2.1"
-motosan-ai-oauth = { version = "0.2", features = ["codex"] }
 thiserror = "2.0"
 ring = "0.17"
 prost = { version = "0.14", default-features = false }
@@ -115,7 +134,7 @@ webpki-roots = "1.0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
-lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
+lettre = { version = "0.11.19", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 mail-parser = "0.11.2"
 async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"] }

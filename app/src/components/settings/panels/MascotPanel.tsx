@@ -33,17 +33,15 @@ import {
 
 interface ColorOption {
   id: MascotColor;
-  /** i18n key for the swatch label; resolved at render time so the locale can
-   *  change without re-creating the array. */
-  labelKey: string;
+  label: string;
 }
 
 const COLOR_OPTIONS: ColorOption[] = [
-  { id: 'yellow', labelKey: 'settings.mascot.colorYellow' },
-  { id: 'burgundy', labelKey: 'settings.mascot.colorBurgundy' },
-  { id: 'black', labelKey: 'settings.mascot.colorBlack' },
-  { id: 'navy', labelKey: 'settings.mascot.colorNavy' },
-  { id: 'green', labelKey: 'settings.mascot.colorGreen' },
+  { id: 'yellow', label: 'Yellow' },
+  { id: 'burgundy', label: 'Burgundy' },
+  { id: 'black', label: 'Black' },
+  { id: 'navy', label: 'Navy' },
+  { id: 'green', label: 'Green' },
 ];
 
 const MascotPanel = () => {
@@ -248,7 +246,7 @@ const MascotPanel = () => {
   return (
     <div>
       <SettingsHeader
-        title={t('settings.mascot.title')}
+        title="OpenHuman"
         showBackButton={true}
         onBack={navigateBack}
         breadcrumbs={breadcrumbs}
@@ -268,18 +266,17 @@ const MascotPanel = () => {
               <div
                 className="grid grid-cols-5 gap-3 p-4"
                 role="radiogroup"
-                aria-label={t('settings.mascot.colorAria')}>
+                aria-label="OpenHuman color">
                 {available.map(opt => {
                   const palette = getMascotPalette(opt.id);
                   const selected = opt.id === activeColor;
-                  const label = t(opt.labelKey);
                   return (
                     <button
                       key={opt.id}
                       type="button"
                       role="radio"
                       aria-checked={selected}
-                      aria-label={label}
+                      aria-label={opt.label}
                       onClick={() => handleSelect(opt.id)}
                       data-testid={`mascot-color-${opt.id}`}
                       className={`flex flex-col items-center gap-2 rounded-lg p-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
@@ -295,7 +292,9 @@ const MascotPanel = () => {
                         }`}
                         style={{ backgroundColor: palette.bodyFill }}
                       />
-                      <span className="text-xs text-stone-700 dark:text-neutral-200">{label}</span>
+                      <span className="text-xs text-stone-700 dark:text-neutral-200">
+                        {opt.label}
+                      </span>
                     </button>
                   );
                 })}
@@ -458,7 +457,7 @@ const MascotPanel = () => {
           <div className="bg-white dark:bg-neutral-900 rounded-xl border border-stone-200 dark:border-neutral-800 overflow-hidden">
             {backendListError && (
               <p className="p-4 text-sm text-coral-700 dark:text-coral-300">
-                {t('settings.mascot.libraryUnavailable')}: {backendListError}
+                OpenHuman library unavailable: {backendListError}
               </p>
             )}
             {!backendListError && backendList === null && (
@@ -506,11 +505,8 @@ const MascotPanel = () => {
                         <span className="flex flex-col">
                           <span>{summary.name}</span>
                           <span className="text-[10px] text-stone-500 dark:text-neutral-400">
-                            v{summary.version} · {summary.states.length}{' '}
-                            {t('settings.mascot.characterStates')}
-                            {summary.hasVisemes
-                              ? ` · ${t('settings.mascot.characterVisemes')}`
-                              : ''}
+                            v{summary.version} · {summary.states.length} states
+                            {summary.hasVisemes ? ' · visemes' : ''}
                           </span>
                         </span>
                         {active && (
@@ -529,7 +525,7 @@ const MascotPanel = () => {
           {activeDetail && (
             <div className="mt-3 rounded-xl border border-stone-200 dark:border-neutral-800 bg-stone-50 dark:bg-neutral-800/60 p-4">
               <p className="text-[11px] font-medium uppercase tracking-wide text-stone-500 dark:text-neutral-400 mb-2">
-                {t('settings.mascot.characterPreview')} · {activeDetail.name}
+                Preview · {activeDetail.name}
               </p>
               <div className="flex justify-center">
                 <div style={{ width: 160, height: 160 }}>

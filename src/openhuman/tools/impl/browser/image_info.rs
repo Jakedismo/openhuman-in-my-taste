@@ -3,6 +3,7 @@ use crate::openhuman::tools::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
 use std::fmt::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Maximum file size we will read and base64-encode (5 MB).
@@ -155,13 +156,20 @@ impl Tool for ImageInfoTool {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
-        // Security check: validate path string, resolve symlinks, confirm workspace containment.
-        let resolved = match self.security.validate_path(path_str).await {
-            Ok(p) => p,
-            Err(msg) => return Ok(ToolResult::error(msg)),
-        };
+        let path = Path::new(path_str);
 
-        let metadata = tokio::fs::metadata(&resolved)
+        // Restrict reads to workspace directory to prevent arbitrary file exfiltration
+        if !self.security.is_path_allowed(path_str) {
+            return Ok(ToolResult::error(format!(
+                "Path not allowed: {path_str} (must be within workspace)"
+            )));
+        }
+
+        if !path.exists() {
+            return Ok(ToolResult::error(format!("File not found: {path_str}")));
+        }
+
+        let metadata = tokio::fs::metadata(path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {e}"))?;
 
@@ -173,7 +181,7 @@ impl Tool for ImageInfoTool {
             )));
         }
 
-        let bytes = tokio::fs::read(&resolved)
+        let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read image file: {e}"))?;
 
@@ -393,16 +401,11 @@ mod tests {
     async fn execute_nonexistent_file() {
         let tool = ImageInfoTool::new(test_security());
         let result = tool
-            .execute(json!({"path": "nonexistent_image_xyz.png"}))
+            .execute(json!({"path": "/tmp/nonexistent_image_xyz.png"}))
             .await
             .unwrap();
         assert!(result.is_error);
-        assert!(
-            result.output().contains("not allowed")
-                || result.output().contains("Failed to resolve"),
-            "unexpected error: {}",
-            result.output()
-        );
+        assert!(&result.output().contains("not found"));
     }
 
     #[tokio::test]

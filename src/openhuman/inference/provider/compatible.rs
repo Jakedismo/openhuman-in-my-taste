@@ -38,8 +38,8 @@ use compatible_parse::{
 use compatible_stream::sse_bytes_to_chunks;
 use compatible_types::{
     ApiChatRequest, ApiChatResponse, ApiUsage, Choice, Function, Message, NativeChatRequest,
-    NativeMessage, OpenAiStreamOptions, OpenHumanMeta, ResponseMessage, ResponsesRequest,
-    StreamChunkResponse, StreamingToolCall, ToolCall,
+    NativeMessage, OpenAiStreamOptions, OpenHumanMeta, ResponseMessage, ResponsesReasoning,
+    ResponsesRequest, StreamChunkResponse, StreamingToolCall, ToolCall,
 };
 
 /// A provider that speaks the OpenAI-compatible chat completions API.
@@ -71,12 +71,6 @@ pub struct OpenAiCompatibleProvider {
     /// `temperature::glob_match`. Defaults to empty (all models support
     /// temperature); populated by the factory when the config has entries.
     pub(crate) temperature_unsupported_models: Vec<String>,
-    /// Per-workload temperature override. When `Some`, replaces the
-    /// caller-supplied `temperature` for every chat call on this provider
-    /// instance — set by the factory when the workload's provider string
-    /// carries an `@<temp>` suffix (e.g. `"openai:gpt-4o@0.2"`). The
-    /// `temperature_unsupported_models` glob filter still applies after.
-    pub(crate) temperature_override: Option<f64>,
 }
 
 /// How the provider expects the API key to be sent.
@@ -113,17 +107,6 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(name, base_url, credential, auth_style, false, None, false)
-    }
-
-    fn enrich_404_message(&self, base: String, status: reqwest::StatusCode) -> String {
-        if status == reqwest::StatusCode::NOT_FOUND && !self.supports_responses_fallback {
-            format!(
-                "{base}; check that your endpoint URL is correct \
-                 and the model name exists on your provider"
-            )
-        } else {
-            base
-        }
     }
 
     /// Create a provider with a custom User-Agent header.
@@ -188,7 +171,6 @@ impl OpenAiCompatibleProvider {
             merge_system_into_user,
             emit_openhuman_thread_id: false,
             temperature_unsupported_models: Vec::new(),
-            temperature_override: None,
         }
     }
 
@@ -200,17 +182,9 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    /// Pin a per-workload temperature, overriding whatever the caller passes.
-    /// Set by the factory when the provider string carries an `@<temp>` suffix.
-    pub fn with_temperature_override(mut self, temperature: Option<f64>) -> Self {
-        self.temperature_override = temperature;
-        self
-    }
-
     /// Resolve the effective temperature for `model`. Returns `None` when the
     /// model matches a pattern in `temperature_unsupported_models` (causing the
-    /// field to be omitted from the serialised request). Otherwise yields the
-    /// per-workload override if one was configured, else the caller's value.
+    /// field to be omitted from the serialised request).
     fn effective_temperature(&self, model: &str, temperature: f64) -> Option<f64> {
         if self
             .temperature_unsupported_models
@@ -224,7 +198,7 @@ impl OpenAiCompatibleProvider {
             );
             None
         } else {
-            Some(self.temperature_override.unwrap_or(temperature))
+            Some(temperature)
         }
     }
 
@@ -450,6 +424,7 @@ impl OpenAiCompatibleProvider {
             input,
             instructions,
             stream: Some(false),
+            reasoning: ResponsesReasoning::default_for(model),
         };
 
         let url = self.responses_url();
@@ -467,24 +442,6 @@ impl OpenAiCompatibleProvider {
             let message = format!("{} Responses API error: {sanitized}", self.name);
             if super::is_budget_exhausted_http_400(status, &error) {
                 super::log_budget_exhausted_http_400(
-                    "responses_api",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_custom_openai_upstream_bad_request_http_400(
-                self.name.as_str(),
-                status,
-                &error,
-            ) {
-                super::log_custom_openai_upstream_bad_request_http_400(
-                    "responses_api",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
-                super::log_provider_access_policy_denied_http_403(
                     "responses_api",
                     self.name.as_str(),
                     Some(model),
@@ -779,10 +736,6 @@ impl OpenAiCompatibleProvider {
         .any(|hint| lower.contains(hint))
     }
 
-    fn err_supports_no_tools_retry(error: &str) -> bool {
-        Self::is_native_tool_schema_unsupported(reqwest::StatusCode::BAD_REQUEST, error)
-    }
-
     /// Streaming variant of the native-tools chat path.
     ///
     /// Sends the request with `stream: true`, consumes the upstream SSE
@@ -801,7 +754,7 @@ impl OpenAiCompatibleProvider {
         use futures_util::StreamExt;
 
         let url = self.chat_completions_url();
-        log::info!(
+        log::debug!(
             "[stream] {} POST {} (stream=true, tools={})",
             self.name,
             url,
@@ -838,24 +791,6 @@ impl OpenAiCompatibleProvider {
                     Some(native_request.model.as_str()),
                     status,
                 );
-            } else if super::is_custom_openai_upstream_bad_request_http_400(
-                self.name.as_str(),
-                status,
-                &body,
-            ) {
-                super::log_custom_openai_upstream_bad_request_http_400(
-                    "streaming_chat",
-                    self.name.as_str(),
-                    Some(native_request.model.as_str()),
-                    status,
-                );
-            } else if super::is_provider_access_policy_denied_http_403(status, &body) {
-                super::log_provider_access_policy_denied_http_403(
-                    "streaming_chat",
-                    self.name.as_str(),
-                    Some(native_request.model.as_str()),
-                    status,
-                );
             } else if super::should_report_provider_http_failure(status) {
                 crate::core::observability::report_error(
                     message.as_str(),
@@ -885,9 +820,8 @@ impl OpenAiCompatibleProvider {
             .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
             .unwrap_or(false);
         if !is_sse {
-            log::warn!(
-                "[stream] {} upstream replied with non-SSE content-type; falling back to JSON parse \
-                 (no token deltas reach the UI)",
+            log::debug!(
+                "[stream] {} upstream replied with non-SSE content-type; falling back to JSON parse",
                 self.name,
             );
             let response_bytes = response.bytes().await?;
@@ -1101,15 +1035,6 @@ impl OpenAiCompatibleProvider {
             }
         }
 
-        let tool_call_count = tool_accum.len();
-        log::info!(
-            "[stream] {} aggregated text_chars={} thinking_chars={} tool_calls={}",
-            self.name,
-            text_accum.chars().count(),
-            thinking_accum.chars().count(),
-            tool_call_count,
-        );
-
         // Aggregate the collected tool calls into the unified response
         // shape. We reuse `parse_native_response` by building an
         // `ApiChatResponse` from the accumulators so downstream code
@@ -1319,30 +1244,9 @@ impl Provider for OpenAiCompatibleProvider {
             }
 
             let status_str = status.as_u16().to_string();
-            let message = self.enrich_404_message(
-                format!("{} API error ({status}): {sanitized}", self.name),
-                status,
-            );
+            let message = format!("{} API error ({status}): {sanitized}", self.name);
             if super::is_budget_exhausted_http_400(status, &error) {
                 super::log_budget_exhausted_http_400(
-                    "chat_completions",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_custom_openai_upstream_bad_request_http_400(
-                self.name.as_str(),
-                status,
-                &error,
-            ) {
-                super::log_custom_openai_upstream_bad_request_http_400(
-                    "chat_completions",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
-                super::log_provider_access_policy_denied_http_403(
                     "chat_completions",
                     self.name.as_str(),
                     Some(model),
@@ -1460,9 +1364,7 @@ impl Provider for OpenAiCompatibleProvider {
                     });
             }
 
-            let err = super::api_error(&self.name, response).await;
-            let enriched = self.enrich_404_message(format!("{err:#}"), status);
-            return Err(anyhow::anyhow!("{enriched}"));
+            return Err(super::api_error(&self.name, response).await);
         }
 
         let body = response.text().await?;
@@ -1632,46 +1534,11 @@ impl Provider for OpenAiCompatibleProvider {
             {
                 Ok(resp) => return Ok(resp),
                 Err(err) => {
-                    let err_str = err.to_string();
-                    // Some local-runtime models (e.g. Ollama serving
-                    // gemma3, llama3.2:1b, …) reject the request with
-                    // "<model> does not support tools" when the
-                    // ChatRequest carries a `tools` array. Retry the
-                    // streaming call once with tools stripped so the
-                    // user still gets a live token stream — without
-                    // this we'd silently fall through to the buffered
-                    // non-streaming path and the UI would render the
-                    // reply all at once.
-                    if tools.is_some() && Self::err_supports_no_tools_retry(&err_str) {
-                        log::info!(
-                            "[stream] {} model does not support tools — retrying streaming without tools",
-                            self.name,
-                        );
-                        let retry_request = NativeChatRequest {
-                            tools: None,
-                            tool_choice: None,
-                            ..native_request.clone()
-                        };
-                        match self
-                            .stream_native_chat(credential, &retry_request, tx, stream_dump_seq)
-                            .await
-                        {
-                            Ok(resp) => return Ok(resp),
-                            Err(retry_err) => {
-                                log::warn!(
-                                    "[stream] {} retry without tools also failed, falling back to non-streaming: {}",
-                                    self.name,
-                                    retry_err
-                                );
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "[stream] {} streaming chat failed, falling back to non-streaming: {}",
-                            self.name,
-                            err
-                        );
-                    }
+                    log::warn!(
+                        "[stream] {} streaming chat failed, falling back to non-streaming: {}",
+                        self.name,
+                        err
+                    );
                     // Fall through to the non-streaming path below.
                 }
             }
@@ -1768,30 +1635,9 @@ impl Provider for OpenAiCompatibleProvider {
             }
 
             let status_str = status.as_u16().to_string();
-            let message = self.enrich_404_message(
-                format!("{} API error ({status}): {sanitized}", self.name),
-                status,
-            );
+            let message = format!("{} API error ({status}): {sanitized}", self.name);
             if super::is_budget_exhausted_http_400(status, &error) {
                 super::log_budget_exhausted_http_400(
-                    "native_chat",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_custom_openai_upstream_bad_request_http_400(
-                self.name.as_str(),
-                status,
-                &error,
-            ) {
-                super::log_custom_openai_upstream_bad_request_http_400(
-                    "native_chat",
-                    self.name.as_str(),
-                    Some(model),
-                    status,
-                );
-            } else if super::is_provider_access_policy_denied_http_403(status, &error) {
-                super::log_provider_access_policy_denied_http_403(
                     "native_chat",
                     self.name.as_str(),
                     Some(model),
@@ -1929,24 +1775,6 @@ impl Provider for OpenAiCompatibleProvider {
                 let message = format!("{}: {}", status, sanitized_error);
                 if super::is_budget_exhausted_http_400(status, &raw_error) {
                     super::log_budget_exhausted_http_400(
-                        "stream_chat",
-                        provider_name.as_str(),
-                        Some(model_owned.as_str()),
-                        status,
-                    );
-                } else if super::is_custom_openai_upstream_bad_request_http_400(
-                    provider_name.as_str(),
-                    status,
-                    &raw_error,
-                ) {
-                    super::log_custom_openai_upstream_bad_request_http_400(
-                        "stream_chat",
-                        provider_name.as_str(),
-                        Some(model_owned.as_str()),
-                        status,
-                    );
-                } else if super::is_provider_access_policy_denied_http_403(status, &raw_error) {
-                    super::log_provider_access_policy_denied_http_403(
                         "stream_chat",
                         provider_name.as_str(),
                         Some(model_owned.as_str()),

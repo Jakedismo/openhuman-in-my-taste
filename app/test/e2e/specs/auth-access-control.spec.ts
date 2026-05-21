@@ -143,8 +143,7 @@ async function performFullLogin(token = 'e2e-test-token') {
 // ===========================================================================
 
 describe('Auth & Access Control', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     await startMockServer();
     resetMockBehavior();
     setMockBehavior('composioConnections', '[]');
@@ -165,8 +164,7 @@ describe('Auth & Access Control', () => {
   // 1. Authentication
   // -------------------------------------------------------------------------
 
-  it('new user registers via deep link and reaches home', async function () {
-    this.timeout(120_000);
+  it('new user registers via deep link and reaches home', async () => {
     await performFullLogin('e2e-auth-token');
   });
 
@@ -220,7 +218,7 @@ describe('Auth & Access Control', () => {
     }
     expect(hasHandoff).toBe(true);
 
-    await expectBillingMarkers(['Open billing dashboard']);
+    await expectBillingMarkers(['Open dashboard']);
 
     console.log('[AuthAccess] 3.1.1 — Billing web handoff verified');
     await navigateToHome();
@@ -234,7 +232,7 @@ describe('Auth & Access Control', () => {
     await navigateToBilling();
     clearRequestLog();
 
-    await expectBillingMarkers(['Open billing dashboard', 'TinyHumans on the web']);
+    await expectBillingMarkers(['Open dashboard', 'TinyHumans on the web']);
 
     console.log('[AuthAccess] 3.2.1 — Billing dashboard entry point verified');
     await navigateToHome();
@@ -256,7 +254,7 @@ describe('Auth & Access Control', () => {
     await expectBillingMarkers([
       'Billing moved to the web',
       'Subscription changes',
-      'Open billing dashboard',
+      'Open dashboard',
     ]);
 
     console.log('[AuthAccess] 3.3.1 — Subscription management handoff verified');
@@ -272,7 +270,7 @@ describe('Auth & Access Control', () => {
     await navigateToBilling();
     await browser.pause(3_000);
 
-    await expectBillingMarkers(['Open billing dashboard']);
+    await expectBillingMarkers(['Open dashboard']);
 
     console.log('[AuthAccess] 3.3.3 — Dashboard handoff verified');
     resetMockBehavior();
@@ -390,8 +388,7 @@ describe('Auth & Access Control', () => {
     console.log(`[AuthAccess] Logout verified: welcomeUI=${onWelcome}, tokenCleared=${!hasToken}`);
   });
 
-  it('revoked session auto-logs out the user', async function () {
-    this.timeout(120_000);
+  it('revoked session auto-logs out the user', async () => {
     // Login fresh
     clearRequestLog();
     resetMockBehavior();

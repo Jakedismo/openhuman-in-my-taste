@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { isMac } from '../../../lib/commands/shortcut';
 import { useT } from '../../../lib/i18n/I18nContext';
 import {
   installPiper,
@@ -59,9 +60,22 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
   // Local provider selectors — initialised from voice_status, persisted via
   // openhumanVoiceSetProviders on change. Empty string until first load.
   const [sttProvider, setSttProvider] = useState<'cloud' | 'whisper' | ''>('');
-  const [ttsProvider, setTtsProvider] = useState<'cloud' | 'piper' | ''>('');
+  // `'system'` is macOS-only — wraps /usr/bin/say + /usr/bin/afconvert
+  // (see src/openhuman/inference/voice/system_speech.rs). Linux / Windows
+  // users only see "cloud", "piper", and "kokoro" in the dropdown; the
+  // option is gated on isMac() below.
+  // `'kokoro'` calls a user-configured OpenAI-compatible TTS server
+  // (kokoro-fastapi, mlx-audio, LM Studio audio mode). The three fields
+  // below capture the endpoint, model, and default voice.
+  const [ttsProvider, setTtsProvider] = useState<
+    'cloud' | 'piper' | 'kokoro' | 'system' | ''
+  >('');
+  const macOs = isMac();
   const [sttModel, setSttModel] = useState<string>('');
   const [ttsVoice, setTtsVoice] = useState<string>('');
+  const [kokoroEndpoint, setKokoroEndpoint] = useState<string>('');
+  const [kokoroModel, setKokoroModel] = useState<string>('');
+  const [kokoroVoice, setKokoroVoice] = useState<string>('');
   const [isSavingProviders, setIsSavingProviders] = useState(false);
   const [whisperInstall, setWhisperInstall] = useState<VoiceInstallStatus | null>(null);
   const [piperInstall, setPiperInstall] = useState<VoiceInstallStatus | null>(null);
@@ -144,7 +158,15 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
         setSttProvider(prev => prev || seeded);
       }
       if (voiceResponse.tts_provider) {
-        const seeded = voiceResponse.tts_provider === 'piper' ? 'piper' : 'cloud';
+        const raw = voiceResponse.tts_provider;
+        const seeded: 'cloud' | 'piper' | 'kokoro' | 'system' =
+          raw === 'piper'
+            ? 'piper'
+            : raw === 'kokoro'
+              ? 'kokoro'
+              : raw === 'system'
+                ? 'system'
+                : 'cloud';
         setTtsProvider(prev => prev || seeded);
       }
       if (voiceResponse.stt_model_id) {
@@ -152,6 +174,15 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
       }
       if (voiceResponse.tts_voice_id) {
         setTtsVoice(prev => prev || voiceResponse.tts_voice_id);
+      }
+      if (voiceResponse.kokoro_endpoint_url) {
+        setKokoroEndpoint(prev => prev || voiceResponse.kokoro_endpoint_url);
+      }
+      if (voiceResponse.kokoro_model) {
+        setKokoroModel(prev => prev || voiceResponse.kokoro_model);
+      }
+      if (voiceResponse.kokoro_voice) {
+        setKokoroVoice(prev => prev || voiceResponse.kokoro_voice);
       }
       const sttAssetState = assetsResponse.result.stt?.state;
       const sttAssetOk = sttAssetState === 'ready' || sttAssetState === 'ondemand';
@@ -278,9 +309,12 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
   const persistProviders = async (
     update: Partial<VoiceProvidersSnapshot> & {
       stt_provider?: 'cloud' | 'whisper';
-      tts_provider?: 'cloud' | 'piper';
+      tts_provider?: 'cloud' | 'piper' | 'kokoro' | 'system';
       stt_model?: string;
       tts_voice?: string;
+      kokoro_endpoint_url?: string;
+      kokoro_model?: string;
+      kokoro_voice?: string;
     }
   ) => {
     setIsSavingProviders(true);
@@ -291,6 +325,9 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
         tts_provider: update.tts_provider,
         stt_model: update.stt_model,
         tts_voice: update.tts_voice,
+        kokoro_endpoint_url: update.kokoro_endpoint_url,
+        kokoro_model: update.kokoro_model,
+        kokoro_voice: update.kokoro_voice,
       });
       if (process.env.NODE_ENV !== 'production') {
         console.debug('[VoicePanel:providers] saved', snapshot);
@@ -310,7 +347,7 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
     setSttProvider(next);
     void persistProviders({ stt_provider: next });
   };
-  const onTtsProviderChange = (next: 'cloud' | 'piper') => {
+  const onTtsProviderChange = (next: 'cloud' | 'piper' | 'kokoro' | 'system') => {
     setTtsProvider(next);
     void persistProviders({ tts_provider: next });
   };
@@ -416,9 +453,8 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
               </h3>
               <p className="text-xs text-stone-500 dark:text-neutral-400 mt-1">
                 Choose where transcription and synthesis run. Use the Install locally buttons to
-                download the binaries and models into your workspace. Local providers can be saved
-                before the install finishes — no manual <code>WHISPER_BIN</code> or{' '}
-                <code>PIPER_BIN</code> setup required.
+                download the binaries and models into your workspace — no manual{' '}
+                <code>WHISPER_BIN</code> or <code>PIPER_BIN</code> setup required.
               </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -434,7 +470,7 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
                   onChange={e => onSttProviderChange(e.target.value as 'cloud' | 'whisper')}
                   className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-primary-400">
                   <option value="cloud">Cloud (Whisper proxy)</option>
-                  <option value="whisper">
+                  <option value="whisper" disabled={!whisperReady}>
                     Local Whisper{whisperReady ? '' : ' (install required)'}
                   </option>
                 </select>
@@ -521,12 +557,36 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
                   data-testid="tts-provider-select"
                   value={ttsProvider || 'cloud'}
                   disabled={isSavingProviders}
-                  onChange={e => onTtsProviderChange(e.target.value as 'cloud' | 'piper')}
+                  onChange={e =>
+                    onTtsProviderChange(
+                      e.target.value as 'cloud' | 'piper' | 'kokoro' | 'system'
+                    )
+                  }
                   className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-primary-400">
                   <option value="cloud">Cloud (ElevenLabs proxy)</option>
-                  <option value="piper">
+                  <option value="piper" disabled={!piperReady}>
                     Local Piper{piperReady ? '' : ' (install required)'}
                   </option>
+                  {/* Kokoro: protocol-only — points at any local
+                      OpenAI-compatible /v1/audio/speech server
+                      (kokoro-fastapi, mlx-audio, LM Studio audio mode).
+                      No install needed in this app — the user runs the
+                      server out-of-process. */}
+                  <option value="kokoro" data-testid="tts-provider-kokoro-option">
+                    Kokoro (local OpenAI-compatible server)
+                  </option>
+                  {/* System TTS is a macOS-only path that wraps
+                      /usr/bin/say + /usr/bin/afconvert. The backend
+                      validator accepts the value on any OS, but
+                      synthesize_system_say returns an explicit
+                      "macOS-only" error elsewhere — hiding the option on
+                      non-macOS keeps the dropdown a list of things that
+                      actually work on this machine. */}
+                  {macOs && (
+                    <option value="system" data-testid="tts-provider-system-option">
+                      System (macOS say) — no install needed
+                    </option>
+                  )}
                 </select>
                 <div className="flex items-center gap-2 pt-1">
                   <button
@@ -634,13 +694,90 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
                   </p>
                 </label>
               )}
+              {ttsProvider === 'kokoro' && (
+                <div className="space-y-2" data-testid="kokoro-config">
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-stone-600 dark:text-neutral-300">
+                      Kokoro endpoint
+                    </span>
+                    <input
+                      aria-label="Kokoro endpoint URL"
+                      data-testid="kokoro-endpoint-input"
+                      value={kokoroEndpoint}
+                      placeholder="http://localhost:8880"
+                      disabled={isSavingProviders}
+                      onChange={e => setKokoroEndpoint(e.target.value)}
+                      onBlur={() => {
+                        const trimmed = kokoroEndpoint.trim();
+                        if (trimmed && trimmed !== voiceStatus?.kokoro_endpoint_url) {
+                          void persistProviders({ kokoro_endpoint_url: trimmed });
+                        }
+                      }}
+                      className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 placeholder:text-stone-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-primary-400"
+                    />
+                    <p className="text-[11px] text-stone-500 dark:text-neutral-400 mt-0.5">
+                      Base URL of your local server.{' '}
+                      <code className="font-mono">/v1/audio/speech</code> is appended automatically.
+                    </p>
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-stone-600 dark:text-neutral-300">
+                      Model
+                    </span>
+                    <input
+                      aria-label="Kokoro model name"
+                      data-testid="kokoro-model-input"
+                      value={kokoroModel}
+                      placeholder="mlx-community/Kokoro-82M-bf16"
+                      disabled={isSavingProviders}
+                      onChange={e => setKokoroModel(e.target.value)}
+                      onBlur={() => {
+                        const trimmed = kokoroModel.trim();
+                        if (trimmed && trimmed !== voiceStatus?.kokoro_model) {
+                          void persistProviders({ kokoro_model: trimmed });
+                        }
+                      }}
+                      className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 placeholder:text-stone-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-primary-400"
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="text-xs font-medium text-stone-600 dark:text-neutral-300">
+                      Default voice
+                    </span>
+                    <input
+                      aria-label="Kokoro default voice id"
+                      data-testid="kokoro-voice-input"
+                      value={kokoroVoice}
+                      placeholder="af_bella"
+                      disabled={isSavingProviders}
+                      onChange={e => setKokoroVoice(e.target.value)}
+                      onBlur={() => {
+                        const trimmed = kokoroVoice.trim();
+                        if (trimmed && trimmed !== voiceStatus?.kokoro_voice) {
+                          void persistProviders({ kokoro_voice: trimmed });
+                        }
+                      }}
+                      className="w-full rounded-md border border-stone-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-3 py-2 text-sm text-stone-900 dark:text-neutral-100 placeholder:text-stone-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-primary-400"
+                    />
+                    <p className="text-[11px] text-stone-500 dark:text-neutral-400 mt-0.5">
+                      Kokoro voice ids: <code className="font-mono">af_bella</code>,{' '}
+                      <code className="font-mono">af_heart</code>,{' '}
+                      <code className="font-mono">am_michael</code>, etc.
+                    </p>
+                  </label>
+                </div>
+              )}
             </div>
           </div>
         </section>
 
         {/* Mascot voice picker now lives in Mascot settings. Link
-            kept here so users hunting in Voice settings can find it. */}
-        {ttsProvider !== 'piper' && (
+            kept here so users hunting in Voice settings can find it.
+            Only shown when the mascot will actually use ElevenLabs —
+            i.e. when the TTS provider is the cloud proxy. Piper picks its
+            own voice above; Kokoro reads its default from the inputs
+            above; System TTS uses the OS voice. */}
+        {(ttsProvider === '' || ttsProvider === 'cloud') && (
           <section className="space-y-3" data-testid="mascot-voice-link">
             <div className="bg-stone-50 dark:bg-neutral-800/60 rounded-lg border border-stone-200 dark:border-neutral-800 p-4">
               <h3 className="text-sm font-semibold text-stone-900 dark:text-neutral-100">

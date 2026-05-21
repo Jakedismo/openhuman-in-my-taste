@@ -22,7 +22,6 @@ pub use execution::{
     PrepareContractCallParams, PrepareSwapParams, PrepareTransferParams, PreparedKind,
     PreparedStatus, PreparedTransaction, ProviderStatus, SupportedAsset,
 };
-pub(crate) use ops::secret_material;
 pub use ops::{
     setup, status, WalletAccount, WalletChain, WalletSetupParams, WalletSetupSource, WalletStatus,
 };

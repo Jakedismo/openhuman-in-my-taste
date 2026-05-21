@@ -44,17 +44,6 @@ function scoreBadgeClass(score: number): string {
   return 'bg-sage-500/20 text-green-700 border-green-200';
 }
 
-const OPENHUMAN_LINK_TAG =
-  /<openhuman-link\s+path=(?:"[^"]*"|'[^']*')\s*>([\s\S]*?)<\/openhuman-link>/gi;
-
-export function formatNotificationBodyPreview(body: string): string {
-  return body
-    .replace(OPENHUMAN_LINK_TAG, '$1')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,7 +58,6 @@ interface Props {
 const NotificationCard = ({ notification: n, onMarkRead, onNavigate, onDismiss }: Props) => {
   const { t } = useT();
   const isUnread = n.status === 'unread';
-  const bodyPreview = n.body ? formatNotificationBodyPreview(n.body) : '';
 
   const handleBodyClick = () => {
     if (onNavigate) {
@@ -130,9 +118,9 @@ const NotificationCard = ({ notification: n, onMarkRead, onNavigate, onDismiss }
           </p>
 
           {/* Body preview */}
-          {bodyPreview && (
+          {n.body && (
             <p className="text-xs text-stone-500 dark:text-neutral-400 mt-0.5 line-clamp-2">
-              {bodyPreview}
+              {n.body}
             </p>
           )}
         </button>

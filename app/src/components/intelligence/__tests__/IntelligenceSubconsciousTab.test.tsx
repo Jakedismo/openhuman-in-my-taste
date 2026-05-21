@@ -10,7 +10,6 @@
  * the full Redux/router stack.
  */
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setSelectedThread } from '../../../store/threadSlice';
@@ -49,7 +48,7 @@ function baseProps() {
     removeSubconsciousTask: vi.fn(),
     setExpandedLogIds: vi.fn(),
     setNewTaskTitle: vi.fn(),
-    status: null as ComponentProps<typeof IntelligenceSubconsciousTab>['status'],
+    status: null,
     tasks: [],
     toggleSubconsciousTask: vi.fn(),
     triggerTick: vi.fn(),
@@ -79,37 +78,5 @@ describe('IntelligenceSubconsciousTab', () => {
     // `/conversations` — the latter falls through to a `/home` redirect
     // and the user lands somewhere unexpected.
     expect(mockNavigate).toHaveBeenCalledWith('/chat');
-  });
-
-  it('shows provider unavailable state and blocks manual ticks', () => {
-    const triggerTick = vi.fn();
-    render(
-      <IntelligenceSubconsciousTab
-        {...baseProps()}
-        triggerTick={triggerTick}
-        status={{
-          enabled: true,
-          provider_available: false,
-          provider_unavailable_reason: 'Sign in or configure a local Subconscious provider.',
-          interval_minutes: 5,
-          last_tick_at: null,
-          total_ticks: 0,
-          task_count: 3,
-          pending_escalations: 0,
-          consecutive_failures: 1,
-        }}
-      />
-    );
-
-    expect(screen.getByText('Subconscious is paused')).toBeInTheDocument();
-    expect(screen.getByText(/configure a local Subconscious provider/i)).toBeInTheDocument();
-
-    const runNow = screen.getByRole('button', { name: /Run Now/i });
-    expect(runNow).toBeDisabled();
-    fireEvent.click(runNow);
-    expect(triggerTick).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: /AI settings/i }));
-    expect(mockNavigate).toHaveBeenCalledWith('/settings/llm');
   });
 });

@@ -55,7 +55,6 @@ use crate::core::event_bus::{subscribe_global, DomainEvent, EventHandler, Subscr
 use crate::openhuman::agent::triage::{apply_decision, run_triage, TriageOutcome, TriggerEnvelope};
 use crate::openhuman::composio::trigger_history;
 use crate::openhuman::config::rpc as config_rpc;
-use crate::openhuman::config::schema::COMPOSIO_MODE_DIRECT;
 
 use super::client::ComposioClient;
 use super::providers::{get_provider, ProviderContext};
@@ -182,36 +181,19 @@ impl EventHandler for ComposioTriggerSubscriber {
             "[composio:bus] trigger received"
         );
 
-        // [composio-direct] Direct-mode trigger gate.
-        //
-        // Inbound `composio:trigger` events ride the backend socket
-        // (`wss://api.tinyhumans.ai`) which only fans out events from
-        // the tinyhumans Composio tenant. When the user has switched
-        // to direct mode, that tenant is no longer their active source
-        // of truth — connections live on `backend.composio.dev` under
-        // their own API key, and any backend-tenant triggers that keep
-        // firing are ghosts from the prior mode. Drop them here so the
-        // user doesn't see triage runs or history entries originating
-        // from a tenant they've moved away from. Real-time triggers
-        // for direct-mode users are tracked as a follow-up — see the
-        // `composio.direct_mode_triggers_gap` capability and
-        // `periodic.rs` docstring.
-        //
-        // Fail-open on config load error: if config is unreadable, we
-        // let the event through rather than silently dropping it. The
-        // existing env-var / config triage flags below remain the
-        // backend-mode gates.
-        if let Ok(config) = config_rpc::load_config_with_timeout().await {
-            if config.composio.mode == COMPOSIO_MODE_DIRECT {
-                tracing::info!(
-                    toolkit = %toolkit,
-                    trigger = %trigger,
-                    "[composio:trigger] dropped — direct mode active (backend-tenant event ignored)"
-                );
-                return;
-            }
-        }
-
+        // Note: the previous "drop in direct mode" gate is intentionally
+        // gone. It existed when direct-mode users had no real-time
+        // trigger path at all — the only `composio:trigger` events that
+        // could reach the bus came from the backend socket.io bridge,
+        // which fans out events from the tinyhumans Composio tenant; in
+        // direct mode those were ghosts from a tenant the user had
+        // moved away from. The local webhook receiver
+        // (`composio::webhook_receiver`) closed that gap: in direct
+        // mode the events on this subscriber NOW come from the user's
+        // OWN Composio tenant via their ngrok tunnel, not from a stale
+        // backend. Dropping them silently is wrong. Both backend-mode
+        // and direct-mode dispatches are legitimate end-user events and
+        // share the same downstream pipeline (history archive → triage).
         if let Some(store) = trigger_history::global() {
             let toolkit_owned = toolkit.clone();
             let trigger_owned = trigger.clone();

@@ -3,17 +3,17 @@
  *
  * The default chat agent after onboarding is the **orchestrator**
  * (`src/openhuman/channels/providers/web.rs::pick_target_agent_id`).
- * Its `subagents = [...]` list synthesises one delegated archetype tool
- * per archetype at build time (see
+ * Its `subagents = [...]` list synthesises one `delegate_<id>` tool per
+ * archetype at build time (see
  * `src/openhuman/tools/orchestrator_tools.rs`). When the LLM calls
- * `research` (or any other delegated archetype tool), the tool dispatches
+ * `delegate_researcher` (or any other `delegate_*`), the tool dispatches
  * to a sub-agent which runs the agent harness loop a level deeper —
  * which means the LLM gets hit at least once more for the sub-agent.
  *
  * What this spec scripts and verifies:
  *
  *   1. Configure `llmForcedResponses` with THREE responses in order:
- *        A) orchestrator turn — emits `research` tool_call
+ *        A) orchestrator turn — emits `delegate_researcher` tool_call
  *        B) researcher turn   — answers with a plain text finding
  *        C) orchestrator turn — final synthesis text (canary marker)
  *
@@ -56,13 +56,13 @@ const RESEARCHER_REPLY = 'The researcher answer is 42.';
 
 // Three forced responses, popped in order by the mock LLM streamer.
 const FORCED_RESPONSES = [
-  // 1. Orchestrator: emit a research tool call.
+  // 1. Orchestrator: emit a delegate_researcher tool call.
   {
     content: '',
     toolCalls: [
       {
-        id: 'call_research_1',
-        name: 'research',
+        id: 'call_delegate_researcher_1',
+        name: 'delegate_researcher',
         arguments: JSON.stringify({ prompt: 'Tell me a marker phrase' }),
       },
     ],
@@ -103,8 +103,7 @@ async function snapshotRuntime(threadId: string): Promise<RuntimeSnapshot> {
 }
 
 describe('Chat harness — orchestrator → subagent flow', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     await startMockServer();
     await waitForApp();
     await resetApp(USER_ID);
@@ -121,8 +120,7 @@ describe('Chat harness — orchestrator → subagent flow', () => {
     await stopMockServer();
   });
 
-  it('orchestrator delegates to researcher and produces the final canary', async function () {
-    this.timeout(90_000);
+  it('orchestrator delegates to researcher and produces the final canary', async () => {
     await navigateViaHash('/chat');
     await browser.waitUntil(async () => await textExists('Threads'), {
       timeout: 15_000,

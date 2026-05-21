@@ -92,31 +92,40 @@ async fn composio_list_connections_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_authorize_errors_without_session() {
+async fn composio_authorize_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Without backend session OR direct-mode api key configured,
+    // `composio_authorize` returns the factory's typed error pointing
+    // the user at the right fix. In direct mode (api key set), this
+    // call would succeed and start an OAuth flow against the user's
+    // personal Composio tenant.
     let err = composio_authorize(&config, "gmail", None)
         .await
         .unwrap_err();
-    // Backend mode (default) without a session — the mode-aware factory
-    // surfaces "no backend session token" once `composio_authorize`
-    // routes through `create_composio_client`. Accept either the
-    // legacy `composio unavailable` prefix or the new factory phrasing.
     assert!(
-        err.to_lowercase().contains("composio")
-            && (err.contains("no backend session") || err.contains("unavailable")),
+        err.contains("no backend session token") || err.contains("no api key is configured"),
         "unexpected error: {err}"
     );
 }
 
 #[tokio::test]
-async fn composio_delete_connection_errors_without_session() {
+async fn composio_delete_connection_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // composio_delete_connection now uses the mode-aware factory just
+    // like composio_sync. The toolkit lookup still tolerates "unknown
+    // connection" (best-effort .ok()), but the delete path itself
+    // requires a viable client — backend session OR direct-mode api
+    // key. With neither, the factory surfaces "no backend session
+    // token".
     let err = composio_delete_connection(&config, "c-1")
         .await
         .unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -133,33 +142,56 @@ async fn composio_list_tools_errors_without_session() {
 }
 
 #[tokio::test]
-async fn composio_execute_errors_without_session() {
+async fn composio_execute_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
-    let err = composio_execute(&config, "GMAIL_SEND_EMAIL", None)
+    // Native dispatch has no arm for an arbitrary slug, and the
+    // mode-aware factory rejects when no backend session OR
+    // direct-mode api key is configured. The user-facing fix is in
+    // both error messages.
+    let err = composio_execute(&config, "UNKNOWN_SLUG_FOR_TEST", None)
         .await
         .unwrap_err();
     assert!(
-        err.to_lowercase().contains("composio")
-            && (err.contains("no backend session") || err.contains("unavailable")),
+        err.contains("no backend session token") || err.contains("no api key is configured"),
         "unexpected error: {err}"
     );
 }
 
 #[tokio::test]
-async fn composio_get_user_profile_errors_without_session() {
+async fn composio_get_user_profile_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Same migration as composio_sync — the legacy resolve_client gate
+    // has been replaced with the mode-aware factory.
+    // resolve_toolkit_for_connection_mode_aware surfaces the factory's
+    // typed error when no client is configured ("no backend session
+    // token" / "no api key is configured").
     let err = composio_get_user_profile(&config, "c-1").await.unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
-async fn composio_sync_errors_without_session() {
+async fn composio_sync_errors_without_client() {
     let tmp = tempfile::tempdir().unwrap();
     let config = test_config(&tmp);
+    // Post-#1710 follow-up: composio_sync now goes through the
+    // mode-aware factory instead of the legacy `resolve_client`. With
+    // no backend session AND no direct-mode api key configured, the
+    // factory surfaces "no backend session token" — same tolerance
+    // pattern used by composio_authorize / composio_execute /
+    // composio_list_connections tests. Direct-mode users with an api
+    // key configured no longer hit the "composio unavailable" wall on
+    // sync; they reach the toolkit-lookup step against their personal
+    // Composio v3 tenant.
     let err = composio_sync(&config, "c-1", None).await.unwrap_err();
-    assert!(err.contains("composio unavailable"));
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -349,24 +381,9 @@ async fn composio_list_connections_via_mock_counts_active() {
     assert!(outcome.logs.iter().any(|l| l.contains("2 active")));
 }
 
-#[tokio::test]
-async fn composio_authorize_via_mock_publishes_event_and_returns_url() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/authorize",
-        post(|Json(_b): Json<Value>| async move {
-            Json(json!({
-                "success": true,
-                "data": {"connectUrl": "https://x", "connectionId": "c1"}
-            }))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let outcome = composio_authorize(&config, "gmail", None).await.unwrap();
-    assert_eq!(outcome.value.connect_url, "https://x");
-    assert_eq!(outcome.value.connection_id, "c1");
-}
+// `composio_authorize_via_mock_publishes_event_and_returns_url` was
+// removed alongside the Composio OAuth aggregator path. The disabled-
+// state behavior is covered by `composio_authorize_is_disabled`.
 
 #[tokio::test]
 async fn composio_delete_connection_via_mock() {
@@ -467,57 +484,12 @@ async fn composio_list_tools_via_mock_with_filter() {
     assert_eq!(outcome.value.tools.len(), 2);
 }
 
-#[tokio::test]
-async fn composio_execute_via_mock_succeeds_and_logs_elapsed() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/execute",
-        post(|Json(b): Json<Value>| async move {
-            Json(json!({
-                "success": true,
-                "data": {
-                    "data": {"echo": b["tool"]},
-                    "successful": true,
-                    "error": null,
-                    "costUsd": 0.001
-                }
-            }))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let outcome = composio_execute(&config, "GMAIL_SEND", Some(json!({"to": "a"})))
-        .await
-        .unwrap();
-    assert!(outcome.value.successful);
-    assert!(outcome
-        .logs
-        .iter()
-        .any(|l| l.contains("executed GMAIL_SEND")));
-}
-
-#[tokio::test]
-async fn composio_execute_via_mock_propagates_backend_error() {
-    let app = Router::new().route(
-        "/agent-integrations/composio/execute",
-        post(|| async { Json(json!({"success": false, "error": "rate limited"})) }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    let err = composio_execute(&config, "ANY_TOOL", None)
-        .await
-        .unwrap_err();
-    // The dispatcher (`execute_composio_action`) classifies transport
-    // failures and prefixes them with `[composio:error:<class>] …`; ops.rs
-    // preserves that prefix so the frontend formatter can parse the class.
-    // For an unrecognised tool slug and a 502-shaped envelope the only
-    // signal we get is the backend error text, so assert on its contents.
-    assert!(
-        err.starts_with("[composio:error:") && err.contains("rate limited"),
-        "got: {err}"
-    );
-}
+// `composio_execute_via_mock_succeeds_and_logs_elapsed` and
+// `composio_execute_via_mock_propagates_backend_error` were removed
+// alongside the Composio HTTP execute path. The native-dispatch
+// behavior is covered by the `openhuman::oauth::native_dispatch` suite,
+// and the "no native dispatcher" hard-error is covered by
+// `composio_execute_errors_for_unknown_slug`.
 
 #[tokio::test]
 async fn composio_sync_gmail_via_mock_archives_raw_email_and_updates_outcome() {
@@ -593,54 +565,23 @@ async fn composio_sync_gmail_via_mock_archives_raw_email_and_updates_outcome() {
 
     assert_eq!(outcome.value.toolkit, "gmail");
     assert_eq!(outcome.value.connection_id.as_deref(), Some("c1"));
-    // composio_sync is now spawn-and-return: the immediate envelope is a
-    // "started" sentinel, and the actual ingestion runs on a detached
-    // tokio task. items_ingested == 0 / finished_at_ms == 0 / summary
-    // contains "started" are the contract of that sentinel.
-    assert_eq!(
-        outcome.value.items_ingested, 0,
-        "spawn-and-return: items_ingested on the immediate envelope is a 'started' sentinel, not a final count"
-    );
-    assert_eq!(
-        outcome.value.finished_at_ms, 0,
-        "spawn-and-return: finished_at_ms == 0 means 'task spawned, not yet complete'"
-    );
-    assert!(
-        outcome.value.summary.contains("started"),
-        "expected spawn-and-return summary to mention 'started', got: {}",
-        outcome.value.summary
-    );
+    assert_eq!(outcome.value.items_ingested, 1);
+    assert!(outcome.value.summary.contains("persisted 1 new"));
 
-    // Poll for the spawned ingest task to drain. The mock backend is
-    // local + in-memory, so this normally lands in well under a second.
-    let chunks = {
-        let mut chunks = Vec::new();
-        for _ in 0..50 {
-            chunks = list_chunks_rpc(
-                &config,
-                ListChunksRequest {
-                    source_kind: Some("email".to_string()),
-                    source_id: Some("gmail:pilot-at-example-dot-com".to_string()),
-                    limit: Some(10),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap()
-            .value
-            .chunks;
-            if !chunks.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        chunks
-    };
-    assert_eq!(
-        chunks.len(),
-        1,
-        "expected one ingested Gmail chunk after spawned task drains"
-    );
+    let chunks = list_chunks_rpc(
+        &config,
+        ListChunksRequest {
+            source_kind: Some("email".to_string()),
+            source_id: Some("gmail:pilot-at-example-dot-com".to_string()),
+            limit: Some(10),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .value
+    .chunks;
+    assert_eq!(chunks.len(), 1, "expected one ingested Gmail chunk");
     assert!(
         chunks[0].content.contains("Phoenix launch canary"),
         "chunk content missing mock email subject: {}",
@@ -670,158 +611,14 @@ async fn composio_sync_gmail_via_mock_archives_raw_email_and_updates_outcome() {
     );
 }
 
-#[tokio::test]
-async fn fetch_connected_integrations_via_mock_aggregates_tools() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    // Connections: gmail + notion. Tools: filtered to those toolkits
-    // and prefixed with the uppercased slug. The toolkits route
-    // backs the `list_toolkits()` allowlist gate that
-    // `fetch_connected_integrations_uncached` calls before touching
-    // connections — without it the function bails out at the first
-    // step and returns an empty vec.
-    let app = Router::new()
-        .route(
-            "/agent-integrations/composio/toolkits",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"toolkits": ["gmail", "notion"]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/connections",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"connections": [
-                        {"id":"c1","toolkit":"gmail","status":"ACTIVE"},
-                        {"id":"c2","toolkit":"notion","status":"CONNECTED"}
-                    ]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/tools",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"tools": [
-                        {"type":"function","function":{
-                            "name":"GMAIL_SEND_EMAIL",
-                            "description":"Send"
-                        }},
-                        {"type":"function","function":{
-                            "name":"NOTION_CREATE_PAGE",
-                            "description":"Create"
-                        }}
-                    ]}
-                }))
-            }),
-        );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    // Use a fresh cache key by isolating config_path.
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-    let integrations = fetch_connected_integrations(&config).await;
-    assert_eq!(integrations.len(), 2);
-    // Sorted by toolkit name
-    assert_eq!(integrations[0].toolkit, "gmail");
-    assert_eq!(integrations[1].toolkit, "notion");
-    assert_eq!(integrations[0].tools.len(), 1);
-    assert_eq!(integrations[0].tools[0].name, "GMAIL_SEND_EMAIL");
-}
-
-#[tokio::test]
-async fn fetch_connected_integrations_treats_slack_and_telegram_status_like_ui() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let app = Router::new()
-        .route(
-            "/agent-integrations/composio/toolkits",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"toolkits": [" Slack ", "telegram"]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/connections",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"connections": [
-                        {"id":"c-slack","toolkit":" Slack ","status":"connected"},
-                        {"id":"c-telegram","toolkit":"telegram","status":" active "}
-                    ]}
-                }))
-            }),
-        )
-        .route(
-            "/agent-integrations/composio/tools",
-            get(|| async {
-                Json(json!({
-                    "success": true,
-                    "data": {"tools": [
-                        {"type":"function","function":{
-                            "name":"SLACK_FETCH_CONVERSATION_HISTORY",
-                            "description":"Read Slack channel history"
-                        }},
-                        {"type":"function","function":{
-                            "name":"TELEGRAM_GET_CHAT_HISTORY",
-                            "description":"Read Telegram chat history"
-                        }},
-                        {"type":"function","function":{
-                            "name":"SLACK_DELETE_CHANNEL",
-                            "description":"Delete a channel"
-                        }}
-                    ]}
-                }))
-            }),
-        );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-
-    let integrations = fetch_connected_integrations(&config).await;
-
-    let slack = integrations
-        .iter()
-        .find(|i| i.toolkit == "slack")
-        .expect("slack integration should be present");
-    assert!(slack.connected);
-    assert_eq!(slack.tools.len(), 1);
-    assert_eq!(slack.tools[0].name, "SLACK_FETCH_CONVERSATION_HISTORY");
-
-    let telegram = integrations
-        .iter()
-        .find(|i| i.toolkit == "telegram")
-        .expect("telegram integration should be present");
-    assert!(telegram.connected);
-    assert_eq!(telegram.tools.len(), 1);
-    assert_eq!(telegram.tools[0].name, "TELEGRAM_GET_CHAT_HISTORY");
-}
-
-#[tokio::test]
-async fn fetch_connected_integrations_via_mock_returns_empty_with_no_active() {
-    let _guard = CACHE_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let app = Router::new().route(
-        "/agent-integrations/composio/connections",
-        get(|| async {
-            Json(json!({"success": true, "data": {"connections": [
-                {"id":"c1","toolkit":"gmail","status":"PENDING"}
-            ]}}))
-        }),
-    );
-    let base = start_mock_backend(app).await;
-    let tmp = tempfile::tempdir().unwrap();
-    let config = config_with_backend(&tmp, base);
-    invalidate_connected_integrations_cache();
-    let integrations = fetch_connected_integrations(&config).await;
-    assert!(integrations.is_empty());
-}
+// The `fetch_connected_integrations_via_mock_*` and
+// `fetch_connected_integrations_treats_slack_and_telegram_status_like_ui`
+// tests pinned the old Composio HTTP path. After the local-OAuth
+// refactor `fetch_connected_integrations_uncached` is a stub that
+// returns `None`, so the public function always yields an empty vec.
+// The stub behavior is covered by the cache-seeding tests further
+// down (which feed entries in directly and assert the diff/hash
+// helpers behave correctly).
 
 // ── Windows-observed sync regression coverage (issue #749) ────
 //
@@ -870,7 +667,6 @@ fn integration(toolkit: &str, connected: bool) -> ConnectedIntegration {
         toolkit: toolkit.to_string(),
         description: String::new(),
         tools: Vec::new(),
-        gated_tools: Vec::new(),
         connected,
     }
 }
@@ -1355,6 +1151,113 @@ async fn composio_list_tools_in_direct_mode_does_not_fall_back_to_backend() {
 }
 
 #[tokio::test]
+async fn composio_sync_routes_through_direct_mode() {
+    // Regression: in the local-OAuth fork, `composio_sync` previously
+    // gated on the legacy `resolve_client(config)?` which required a
+    // backend session token. Direct-mode users hit
+    // "composio unavailable: no backend session token" even with a
+    // valid Composio API key + active connection. Sync must now route
+    // through the mode-aware factory (mirrors `composio_authorize` and
+    // `composio_list_connections`).
+    //
+    // We can't mock the live Composio v3 `/connected_accounts` endpoint
+    // at the URL-rewriter level in this unit test, so we assert on the
+    // error-shape contract: (a) no "no backend session" surface, and
+    // (b) the error must still carry a `composio` prefix so it routes
+    // through normal observability. The backend-mode path would have
+    // produced "composio unavailable / no backend session" — its
+    // absence proves the factory routed us to direct mode.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_sync(&config, "c-1", None).await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_get_user_profile_routes_through_direct_mode() {
+    // Sibling of composio_sync_routes_through_direct_mode — same gate
+    // migration, same contract assertion. With composio.mode = "direct"
+    // and a fake api key staged, the error must not carry "no backend
+    // session" (proving the factory routed us to the direct arm) and
+    // must still log under the composio prefix for observability.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_get_user_profile(&config, "c-1").await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_refresh_all_identities_routes_through_direct_mode() {
+    // Last op standing on the legacy resolve_client gate before this
+    // commit. Mirrors the periodic-tick's two-arm match. With direct
+    // mode configured and a fake api key staged, the call must (a)
+    // not surface "no backend session" (proving the factory routed
+    // to the direct branch) and (b) still carry the composio prefix.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_refresh_all_identities(&config).await.unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_refresh_all_identities_errors_without_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = test_config(&tmp);
+    // Default config = backend mode, no session token → factory
+    // surfaces "no backend session token". Direct-mode users with an
+    // api key never see this — they hit the direct arm above instead.
+    let err = composio_refresh_all_identities(&config).await.unwrap_err();
+    assert!(
+        err.contains("no backend session token") || err.contains("no api key is configured"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_delete_connection_routes_through_direct_mode() {
+    // Delete is special among the migrated ops: the data path is
+    // genuinely tenant-specific (DELETE /connected_accounts/{id}), so
+    // unlike composio_sync the actual HTTP call also lives in the
+    // direct branch. We assert the same contract: no backend-session
+    // leak, composio-tagged error so observability still routes
+    // correctly.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_delete_connection(&config, "c-1")
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn composio_authorize_routes_through_direct_mode() {
     // The direct-mode `authorize` path actually calls
     // `backend.composio.dev/api/v3/connected_accounts/link` over HTTPS.
@@ -1380,17 +1283,30 @@ async fn composio_authorize_routes_through_direct_mode() {
     );
 }
 
+// `composio_execute_routes_through_direct_mode` pinned the old
+// direct-mode (BYO Composio key) routing. With native dispatch now the
+// only execution path, the Composio direct branch is unreachable.
+// The native-path coverage lives in src/openhuman/oauth/native_dispatch
+// and src/openhuman/providers_native/*.
+
 #[tokio::test]
-async fn composio_execute_routes_through_direct_mode() {
-    // Same shape of assertion as
-    // `composio_authorize_routes_through_direct_mode` — we can't mock
-    // `backend.composio.dev` from a unit test, so we verify the factory
-    // routed to direct mode (no backend-auth error) and that an error
-    // surfaces because the live HTTP call cannot succeed against a
-    // test key.
+async fn composio_list_triggers_routes_through_direct_mode() {
+    // With composio.mode = "direct" the trigger-read paths now hit
+    // Composio v3's `/trigger_instances/active` directly via the
+    // factory's Direct arm. Previously these were gated on
+    // `resolve_client(config)?` which surfaced the misleading
+    // "no backend session token. Sign in first" error to users with
+    // a perfectly valid Composio API key — making the trigger UI
+    // unusable in local-only mode (the user reported "Couldn't load
+    // triggers: composio unavailable: no backend session token").
+    //
+    // Contract pinned here: (a) no backend-session leak, (b) the
+    // error still carries a composio prefix for observability. The
+    // outbound call against the real Composio host with a fake key
+    // fails on HTTP 401/403 — both shapes are acceptable.
     let tmp = tempfile::tempdir().unwrap();
     let config = direct_mode_config(&tmp);
-    let err = composio_execute(&config, "GMAIL_SEND_EMAIL", None)
+    let err = composio_list_triggers(&config, Some("gmail".into()))
         .await
         .unwrap_err();
     assert!(
@@ -1400,6 +1316,54 @@ async fn composio_execute_routes_through_direct_mode() {
     assert!(
         err.to_lowercase().contains("composio"),
         "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_list_available_triggers_routes_through_direct_mode() {
+    // Sibling of composio_list_triggers_routes_through_direct_mode for
+    // the catalog read path (`/triggers_types?toolkit_slugs=…`). Same
+    // contract: no backend-session leak, composio-tagged error.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_list_available_triggers(&config, "gmail", None)
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("no backend session"),
+        "direct mode must not surface backend-auth errors, got: {err}"
+    );
+    assert!(
+        err.to_lowercase().contains("composio"),
+        "error must carry the composio prefix, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn composio_enable_trigger_points_at_settings_when_receiver_is_idle_in_direct_mode() {
+    // Direct-mode trigger writes now go through the local webhook
+    // receiver instead of the legacy backend-only gate. When the
+    // receiver isn't running (no ngrok authtoken / domain configured
+    // yet), the op surfaces a user-actionable error pointing at
+    // Settings → Triggers — NOT the old "composio unavailable / Sign
+    // in first" message that misled people into thinking auth was
+    // broken.
+    let tmp = tempfile::tempdir().unwrap();
+    let config = direct_mode_config(&tmp);
+    let err = composio_enable_trigger(&config, "c-1", "GMAIL_NEW_GMAIL_MESSAGE", None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("local webhook receiver is not running"),
+        "error must surface the receiver-not-running diagnosis, got: {err}"
+    );
+    assert!(
+        err.contains("Settings → Triggers"),
+        "error must point the user at the Settings panel they need, got: {err}"
+    );
+    assert!(
+        !err.starts_with("composio unavailable:"),
+        "must not regress to the legacy 'Sign in first' message, got: {err}"
     );
 }
 

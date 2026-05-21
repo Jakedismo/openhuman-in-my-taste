@@ -2,16 +2,17 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use chrono::Utc;
-use futures::StreamExt;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::openhuman::config::Config;
 use crate::openhuman::memory::ops::{doc_delete, doc_ingest, DeleteDocParams, IngestDocParams};
+use crate::openhuman::memory::tree::canonicalize::document::DocumentInput as TreeDocumentInput;
+use crate::openhuman::memory::tree::ingest as tree_ingest;
 
-use super::state;
 use super::store;
 use super::types::{Vault, VaultFile, VaultFileStatus, VaultSyncReport};
 
@@ -33,13 +34,6 @@ const BUILTIN_EXCLUDE_DIRS: &[&str] = &[
 
 /// Max single-file size we read into memory for ingestion (5 MiB).
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
-
-/// Number of files to ingest concurrently.
-///
-/// Bounded to avoid overwhelming the embedding API while still parallelising
-/// the dominant network cost.  Matches the codebase's existing `buffer_unordered`
-/// patterns (see `extract_tool.rs` and `cron/scheduler.rs`).
-const SYNC_CONCURRENCY: usize = 4;
 
 /// File extensions we currently extract as plain UTF-8.
 pub fn supported_extension(ext: &str) -> bool {
@@ -82,106 +76,58 @@ pub fn supported_extension(ext: &str) -> bool {
     )
 }
 
-/// A file that survived discovery and needs content read + ingestion.
-struct FileToProcess {
-    rel_path: String,
-    title: String,
-    path: PathBuf,
-    mtime_ms: i64,
-    bytes: u64,
-    ext: String,
-    /// Content hash from the previous successful sync, for secondary dedup.
-    prev_hash: Option<String>,
-    /// Document ID to update on re-ingest (keeps embedding lineage stable).
-    existing_doc_id: Option<String>,
-    /// Memory namespace (`vault:<id>`).
-    namespace: String,
-    /// Vault id for tags and state updates.
-    vault_id: String,
+/// Per-file progress update delivered to a `ProgressCallback`. Used by
+/// the async job worker to surface live state to
+/// `vault_sync_status` callers.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    /// Files processed so far across the whole walk (ingested +
+    /// unchanged + failed + skipped_unsupported).
+    pub processed: u64,
+    /// Total supported file count discovered by the directory walk's
+    /// pre-pass, when one is available. The current implementation
+    /// doesn't run a pre-pass to avoid double-traversal of large
+    /// vaults; left in the type so a future pre-pass can populate
+    /// it without an API break.
+    pub total: Option<u64>,
+    /// Relative path of the file just processed, useful for showing
+    /// "current file" in the UI. `None` only at the post-walk
+    /// deletion-pass step.
+    pub current_file: Option<String>,
+    /// Most recent error message, if the just-processed file failed
+    /// to ingest. The full error list lives on the report.
+    pub last_error: Option<String>,
 }
 
-/// Outcome of attempting to ingest one file.
-enum IngestFileResult {
-    Ingested {
-        rel_path: String,
-        document_id: String,
-        hash: String,
-        mtime_ms: i64,
-        bytes: u64,
-    },
-    /// Content was read but the hash matched the previous ingest — skip ledger write.
-    Unchanged {
-        rel_path: String,
-    },
-    Failed {
-        rel_path: String,
-        error: String,
-    },
-}
+/// Callback invoked by [`sync_vault_with_progress`] after each file
+/// in the walk. Shared via `Arc` so the worker task and the status
+/// RPC can both observe the same updates without coupling lifetimes.
+pub type ProgressCallback = Arc<dyn Fn(ProgressUpdate) + Send + Sync>;
 
-/// Read `file.path`, hash it, and call `doc_ingest` if the content changed.
-///
-/// This runs inside `buffer_unordered` so multiple files are in flight at once.
-async fn process_file(file: FileToProcess) -> IngestFileResult {
-    let content = match tokio::fs::read_to_string(&file.path).await {
-        Ok(c) => c,
-        Err(err) => {
-            return IngestFileResult::Failed {
-                rel_path: file.rel_path,
-                error: format!("read failed: {err}"),
-            };
-        }
-    };
-    let hash = sha256_hex(&content);
-
-    // Secondary dedup: content didn't change even if mtime did (e.g. `touch`).
-    if file.prev_hash.as_deref() == Some(hash.as_str()) {
-        return IngestFileResult::Unchanged {
-            rel_path: file.rel_path,
-        };
-    }
-
-    let ingest_params = IngestDocParams {
-        namespace: file.namespace,
-        key: file.rel_path.clone(),
-        title: file.title,
-        content,
-        source_type: "vault".to_string(),
-        priority: "medium".to_string(),
-        tags: vec![
-            format!("vault:{}", file.vault_id),
-            format!("ext:{}", file.ext),
-        ],
-        metadata: serde_json::json!({
-            "vault_id": file.vault_id,
-            "rel_path": file.rel_path,
-            "mtime_ms": file.mtime_ms,
-            "bytes": file.bytes,
-        }),
-        category: "user".to_string(),
-        session_id: None,
-        document_id: file.existing_doc_id,
-        config: None,
-    };
-
-    match doc_ingest(ingest_params).await {
-        Ok(outcome) => IngestFileResult::Ingested {
-            rel_path: file.rel_path,
-            document_id: outcome.value.document_id,
-            hash,
-            mtime_ms: file.mtime_ms,
-            bytes: file.bytes,
-        },
-        Err(err) => IngestFileResult::Failed {
-            rel_path: file.rel_path,
-            error: err,
-        },
-    }
+/// Construct a no-op [`ProgressCallback`]. Used by the legacy
+/// blocking `sync_vault` entry point that doesn't need per-file
+/// progress.
+pub fn noop_progress() -> ProgressCallback {
+    Arc::new(|_| {})
 }
 
 /// Walk `vault.root_path`, ingest new/changed files into memory, delete docs
 /// whose source files vanished, and record per-file state in the ledger.
+///
+/// Back-compat alias for callers that don't care about progress —
+/// delegates to [`sync_vault_with_progress`] with a noop callback.
 pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
+    sync_vault_with_progress(config, vault, noop_progress()).await
+}
+
+/// Same as [`sync_vault`] but invokes `on_progress` after each file's
+/// ledger upsert + tree-ingest fan-out. The async job worker uses
+/// this entry point to drive `vault_sync_status` snapshots.
+pub async fn sync_vault_with_progress(
+    config: &Config,
+    vault: &Vault,
+    on_progress: ProgressCallback,
+) -> VaultSyncReport {
     let started = Utc::now();
     let mut report = VaultSyncReport {
         vault_id: vault.id.clone(),
@@ -223,7 +169,7 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
         .collect();
 
     log::debug!(
-        "[vault] sync: entry id={} root={:?} ledger_rows={} includes={} excludes={}",
+        "[vault] sync_vault: entry id={} root={:?} ledger_rows={} includes={} excludes={}",
         vault.id,
         vault.root_path,
         existing.len(),
@@ -246,14 +192,11 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
                 .unwrap_or(true)
         });
 
-    // ── Phase 1: Discovery (sequential, no content reads) ───────────────────
-    let mut candidates: Vec<FileToProcess> = Vec::new();
-
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
             Err(err) => {
-                log::debug!("[vault] sync: walk error err={err}");
+                log::debug!("[vault] sync_vault: walk error err={err}");
                 report.errors.push(format!("walk error: {err}"));
                 continue;
             }
@@ -291,7 +234,7 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
             .to_string();
         if !supported_extension(&ext) {
             report.skipped_unsupported += 1;
-            seen.insert(rel_path.clone());
+            seen.insert(rel_path.clone()); // keep ledger entries pruned
             continue;
         }
 
@@ -308,8 +251,9 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
         if metadata.len() > MAX_FILE_BYTES {
             report.skipped_unsupported += 1;
             report.errors.push(format!(
-                "{rel_path}: skipped — {} bytes exceeds {MAX_FILE_BYTES}",
-                metadata.len()
+                "{rel_path}: skipped — {} bytes exceeds {}",
+                metadata.len(),
+                MAX_FILE_BYTES
             ));
             seen.insert(rel_path.clone());
             continue;
@@ -322,108 +266,174 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(err) => {
+                report.failed += 1;
+                report
+                    .errors
+                    .push(format!("{rel_path}: read failed: {err}"));
+                continue;
+            }
+        };
+        let hash = sha256_hex(&content);
+
         seen.insert(rel_path.clone());
 
-        // Fast-path mtime dedup: if both mtime and previous hash matched we can
-        // skip content reads entirely.  The concurrent phase does a secondary
-        // hash-based check for files whose mtime changed but content didn't.
+        // Dedup: if hash and mtime unchanged, skip ingest.
         if let Some(prev) = by_path.get(&rel_path) {
-            if prev.status == VaultFileStatus::Ok && prev.mtime_ms == mtime_ms {
+            if prev.status == VaultFileStatus::Ok
+                && prev.content_hash == hash
+                && prev.mtime_ms == mtime_ms
+            {
                 report.unchanged += 1;
                 continue;
             }
         }
 
+        let key = rel_path.clone();
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(&rel_path)
             .to_string();
-        let prev = by_path.get(&rel_path);
-
-        candidates.push(FileToProcess {
-            rel_path,
-            title,
-            path: path.to_path_buf(),
-            mtime_ms,
-            bytes: metadata.len(),
-            ext,
-            prev_hash: prev.map(|p| p.content_hash.clone()),
-            existing_doc_id: prev.map(|p| p.document_id.clone()),
+        // Memory tree needs its own copy of the body. `doc_ingest` moves
+        // `content` into `IngestDocParams`; we clone here (vault files are
+        // capped at MAX_FILE_BYTES so the clone is bounded).
+        let tree_body = content.clone();
+        let ingest_params = IngestDocParams {
             namespace: vault.namespace.clone(),
-            vault_id: vault.id.clone(),
-        });
-    }
+            key,
+            title: title.clone(),
+            content,
+            source_type: "vault".to_string(),
+            priority: "medium".to_string(),
+            tags: vec![format!("vault:{}", vault.id), format!("ext:{ext}")],
+            metadata: serde_json::json!({
+                "vault_id": vault.id,
+                "rel_path": rel_path,
+                "mtime_ms": mtime_ms,
+                "bytes": metadata.len(),
+            }),
+            category: "user".to_string(),
+            session_id: None,
+            document_id: by_path.get(&rel_path).map(|p| p.document_id.clone()),
+            config: None,
+        };
 
-    log::debug!(
-        "[vault] sync: discovery done id={} scanned={} unchanged={} to_ingest={}",
-        vault.id,
-        report.scanned,
-        report.unchanged,
-        candidates.len(),
-    );
-
-    // Update shared state with total count so the frontend can show progress.
-    state::update_progress(&vault.id, |s| {
-        s.scanned = report.scanned;
-        s.unchanged = report.unchanged;
-        s.total = candidates.len() as u64;
-    });
-
-    // ── Phase 2: Concurrent ingestion ────────────────────────────────────────
-    let results: Vec<IngestFileResult> = futures::stream::iter(candidates)
-        .map(process_file)
-        .buffer_unordered(SYNC_CONCURRENCY)
-        .collect()
-        .await;
-
-    // ── Phase 3: Process results (sequential ledger writes) ──────────────────
-    for result in results {
-        match result {
-            IngestFileResult::Ingested {
-                rel_path,
-                document_id,
-                hash,
-                mtime_ms,
-                bytes,
-            } => {
+        match doc_ingest(ingest_params).await {
+            Ok(outcome) => {
+                let document_id = outcome.value.document_id.clone();
                 let file = VaultFile {
                     vault_id: vault.id.clone(),
                     rel_path: rel_path.clone(),
                     document_id,
-                    content_hash: hash,
+                    content_hash: hash.clone(),
                     mtime_ms,
-                    bytes,
+                    bytes: metadata.len(),
                     ingested_at: Utc::now(),
                     status: VaultFileStatus::Ok,
                 };
                 if let Err(err) = store::upsert_file(config, &file) {
-                    log::debug!("[vault] sync: ledger write failed path={rel_path} err={err}");
+                    log::debug!(
+                        "[vault] sync_vault: ledger write failed path={rel_path} err={err}"
+                    );
                     report
                         .errors
                         .push(format!("{rel_path}: ledger write failed: {err}"));
                 }
-                log::trace!("[vault] sync: ingested path={rel_path}");
+                log::trace!("[vault] sync_vault: ingested path={rel_path}");
                 report.ingested += 1;
-                state::update_progress(&vault.id, |s| s.ingested += 1);
+
+                // Fan out to the memory-tree ingest path so the chunks
+                // become visible to the summariser / extractor workers.
+                // The main `doc_ingest` above writes to the
+                // `UnifiedMemory` namespace store (graph + vector
+                // chunks for `query_namespace` retrieval); the memory
+                // tree maintains its own `mem_tree_chunks` table that
+                // feeds the bucket-seal / summary cascade and the UI's
+                // tree visualisation. Without this fan-out the user
+                // saw "Cleared 0 tree row(s); requeued 0 chunk(s)" on
+                // reset because the tree's chunk table was empty
+                // despite the vault sync reporting hundreds of
+                // ingested files (#bug-report 2026-05-20).
+                //
+                // We use a hash-suffixed source_id so re-syncing a
+                // modified file produces a NEW tree-side ingest
+                // instead of being skipped by
+                // `tree::ingest::already_ingested`. Old chunks for
+                // the previous content stay in the tree (acceptable
+                // for v1; a follow-up could prune them via a
+                // delete-by-prefix sweep keyed on
+                // `vault:{vault_id}:{rel_path}:`).
+                let tree_source_id =
+                    format!("vault:{}:{}:{}", vault.id, rel_path, &hash[..hash.len().min(12)]);
+                let modified_at = DateTime::<Utc>::from_timestamp_millis(mtime_ms)
+                    .unwrap_or_else(Utc::now);
+                let tree_doc = TreeDocumentInput {
+                    provider: "vault".to_string(),
+                    title: title.clone(),
+                    body: tree_body,
+                    modified_at,
+                    source_ref: Some(format!("vault://{}/{}", vault.id, rel_path)),
+                };
+                match tree_ingest::ingest_document(
+                    config,
+                    &tree_source_id,
+                    "self",
+                    vec![format!("vault:{}", vault.id), format!("ext:{ext}")],
+                    tree_doc,
+                )
+                .await
+                {
+                    Ok(ingest_outcome) => {
+                        log::debug!(
+                            "[vault] sync_vault: tree ingest ok path={rel_path} \
+                             chunks_written={} chunks_dropped={} already={}",
+                            ingest_outcome.chunks_written,
+                            ingest_outcome.chunks_dropped,
+                            ingest_outcome.already_ingested,
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "[vault] sync_vault: tree ingest failed (non-fatal) \
+                             path={rel_path} err={err:#}"
+                        );
+                        report
+                            .errors
+                            .push(format!("{rel_path}: tree ingest failed: {err:#}"));
+                    }
+                }
             }
-            IngestFileResult::Unchanged { rel_path } => {
-                // Hash matched even though mtime changed — still a no-op.
-                log::trace!("[vault] sync: hash-unchanged path={rel_path}");
-                report.unchanged += 1;
-            }
-            IngestFileResult::Failed { rel_path, error } => {
-                log::debug!("[vault] sync: ingest failed path={rel_path} err={error}");
+            Err(err) => {
+                log::debug!("[vault] sync_vault: ingest failed path={rel_path} err={err}");
                 report.failed += 1;
                 report
                     .errors
-                    .push(format!("{rel_path}: ingest failed: {error}"));
-                state::update_progress(&vault.id, |s| s.failed += 1);
+                    .push(format!("{rel_path}: ingest failed: {err}"));
             }
         }
+
+        // Emit a per-file progress update so async-job watchers
+        // (`vault_sync_status`) see the running counters move
+        // without waiting for the whole walk to finish. The last
+        // error pushed onto `report.errors` (if any) is forwarded so
+        // the UI can surface "failed: X" inline.
+        let processed = report.ingested
+            + report.unchanged
+            + report.failed
+            + report.skipped_unsupported;
+        let last_error = report.errors.last().cloned();
+        on_progress(ProgressUpdate {
+            processed,
+            total: None,
+            current_file: Some(rel_path.clone()),
+            last_error,
+        });
     }
 
-    // ── Phase 4: Deletions ────────────────────────────────────────────────────
+    // Anything in ledger we didn't see this pass is gone — delete it.
     for (path, prev) in by_path.iter() {
         if seen.contains(path) {
             continue;
@@ -434,29 +444,28 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
         })
         .await
         {
-            log::debug!("[vault] sync: doc delete failed path={path} err={err}");
+            log::debug!("[vault] sync_vault: doc delete failed path={path} err={err}");
             report
                 .errors
                 .push(format!("{path}: doc delete failed: {err}"));
             continue;
         }
         if let Err(err) = store::delete_file(config, &vault.id, path) {
-            log::debug!("[vault] sync: ledger delete failed path={path} err={err}");
+            log::debug!("[vault] sync_vault: ledger delete failed path={path} err={err}");
             report
                 .errors
                 .push(format!("{path}: ledger delete failed: {err}"));
             continue;
         }
         report.removed += 1;
-        state::update_progress(&vault.id, |s| s.removed += 1);
     }
 
     if let Err(err) = store::touch_last_synced(config, &vault.id, Utc::now()) {
-        log::debug!("[vault] sync: touch_last_synced failed err={err}");
+        log::debug!("[vault] sync_vault: touch_last_synced failed err={err}");
     }
     report.duration_ms = (Utc::now() - started).num_milliseconds();
     log::debug!(
-        "[vault] sync: exit id={} scanned={} ingested={} unchanged={} removed={} failed={} skipped={} duration_ms={}",
+        "[vault] sync_vault: exit id={} scanned={} ingested={} unchanged={} removed={} failed={} skipped={} duration_ms={}",
         vault.id,
         report.scanned,
         report.ingested,
@@ -466,6 +475,16 @@ pub async fn sync_vault(config: &Config, vault: &Vault) -> VaultSyncReport {
         report.skipped_unsupported,
         report.duration_ms,
     );
+
+    // Final progress flush so the UI clears the "current file"
+    // affordance even if the walk produced zero per-file callbacks
+    // (empty vault).
+    on_progress(ProgressUpdate {
+        processed: report.scanned,
+        total: Some(report.scanned),
+        current_file: None,
+        last_error: None,
+    });
     report
 }
 

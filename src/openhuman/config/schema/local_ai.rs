@@ -78,13 +78,28 @@ pub struct LocalAiConfig {
     pub tts_voice_id: String,
     /// Voice TTS provider selector. `"cloud"` (default) routes through the
     /// backend ElevenLabs proxy and returns rich visemes; `"piper"` runs
-    /// local Piper via the `PIPER_BIN` env var.
+    /// local Piper via the `PIPER_BIN` env var; `"kokoro"` calls a local
+    /// OpenAI-compatible `/v1/audio/speech` endpoint (kokoro-fastapi,
+    /// mlx-audio, etc.) configured by the three `kokoro_*` fields below.
     #[serde(default = "default_tts_provider")]
     pub tts_provider: String,
     #[serde(default = "default_tts_download_url")]
     pub tts_download_url: Option<String>,
     #[serde(default = "default_tts_config_download_url")]
     pub tts_config_download_url: Option<String>,
+    /// Base URL of a local OpenAI-compatible TTS server (Kokoro). The
+    /// `/v1/audio/speech` path is appended at call time.
+    #[serde(default = "default_kokoro_endpoint_url")]
+    pub kokoro_endpoint_url: String,
+    /// `model` field in the OpenAI-compatible request body. Most servers
+    /// (kokoro-fastapi, mlx-audio) ignore it but the field is required by
+    /// the spec.
+    #[serde(default = "default_kokoro_model")]
+    pub kokoro_model: String,
+    /// Default Kokoro voice id (e.g. `af_bella`, `af_heart`, `am_michael`).
+    /// Per-call `voice` overrides win when supplied.
+    #[serde(default = "default_kokoro_voice")]
+    pub kokoro_voice: String,
     #[serde(default = "default_quantization")]
     pub quantization: String,
     #[serde(default = "default_preload_vision_model")]
@@ -125,7 +140,15 @@ pub struct LocalAiConfig {
 }
 
 fn default_runtime_enabled() -> bool {
-    false
+    // Local-OAuth fork: local AI is the natural default, so the
+    // master switch is ON. Individual `usage.*` flags
+    // (embeddings / heartbeat / learning_reflection / subconscious)
+    // still default to `false`, so flipping this on does NOT
+    // auto-engage any background workload — it only stops the
+    // Local Model Debug screen reporting `State: Disabled` and
+    // lets the workload routing UI offer Ollama models for the
+    // background workloads when the user opts in per-feature.
+    true
 }
 
 fn default_provider() -> String {
@@ -166,6 +189,30 @@ fn default_stt_provider() -> String {
 
 fn default_tts_provider() -> String {
     "cloud".to_string()
+}
+
+fn default_kokoro_endpoint_url() -> String {
+    // Matches kokoro-fastapi's default port; mlx-audio defaults differ but
+    // the user sets this in Settings → Voice anyway. Pick the most popular
+    // server's default as a hint, not a hard contract.
+    "http://localhost:8880".to_string()
+}
+
+fn default_kokoro_model() -> String {
+    // mlx-audio's `/v1/audio/speech` resolves the `model` field against
+    // the exact id the server was launched with (`--realtime-model …`),
+    // so the default has to be the full Hugging Face path rather than
+    // the shorthand `kokoro` alias kokoro-fastapi accepts. Users running
+    // a different Kokoro flavour (e.g. `Kokoro-82M-8bit`) can swap this
+    // in Settings → Voice.
+    "mlx-community/Kokoro-82M-bf16".to_string()
+}
+
+fn default_kokoro_voice() -> String {
+    // af_bella is the canonical "American Female (warm)" voice in Kokoro
+    // v1. Falls back gracefully if the server doesn't know it — most
+    // implementations return a default voice on unknown ids.
+    "af_bella".to_string()
 }
 
 fn default_stt_download_url() -> Option<String> {
@@ -278,6 +325,9 @@ impl Default for LocalAiConfig {
             tts_provider: default_tts_provider(),
             tts_download_url: default_tts_download_url(),
             tts_config_download_url: default_tts_config_download_url(),
+            kokoro_endpoint_url: default_kokoro_endpoint_url(),
+            kokoro_model: default_kokoro_model(),
+            kokoro_voice: default_kokoro_voice(),
             quantization: default_quantization(),
             preload_vision_model: default_preload_vision_model(),
             preload_embedding_model: default_preload_embedding_model(),

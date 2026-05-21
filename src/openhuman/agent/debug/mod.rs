@@ -319,12 +319,37 @@ async fn render_integrations_agent(config: &Config, toolkit: &str) -> Result<Dum
                 }
             }
         }
-        ComposioClientKind::Direct(_) => {
-            log::info!(
-                "[agent::debug][composio-direct] direct mode active — skipping backend list_tools refresh for `{}`; using cached catalogue ({} actions)",
-                integration.toolkit,
-                integration.tools.len()
-            );
+        ComposioClientKind::Direct(direct) => {
+            match crate::openhuman::composio::fetch_direct_toolkit_actions(
+                direct,
+                &integration.toolkit,
+            )
+            .await
+            {
+                Ok(actions) if !actions.is_empty() => {
+                    log::info!(
+                        "[agent::debug][composio-direct] refreshed direct catalogue for `{}` ({} actions; cached was {})",
+                        integration.toolkit,
+                        actions.len(),
+                        integration.tools.len()
+                    );
+                    integration.tools = actions;
+                }
+                Ok(_) => {
+                    log::info!(
+                        "[agent::debug][composio-direct] direct refresh for `{}` returned empty; keeping cached catalogue ({} actions)",
+                        integration.toolkit,
+                        integration.tools.len()
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[agent::debug][composio-direct] direct refresh for `{}` failed ({e}); keeping cached catalogue ({} actions)",
+                        integration.toolkit,
+                        integration.tools.len()
+                    );
+                }
+            }
         }
     }
 

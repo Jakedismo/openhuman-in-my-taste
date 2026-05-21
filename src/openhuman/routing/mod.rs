@@ -28,12 +28,7 @@
 //! use crate::openhuman::inference::provider::compatible::{AuthStyle, OpenAiCompatibleProvider};
 //!
 //! let remote = create_backend_inference_provider(api_url, &opts)?;
-//! let provider = routing::new_provider(
-//!     remote,
-//!     &config.local_ai,
-//!     &config.default_model,
-//!     &config.temperature_unsupported_models,
-//! );
+//! let provider = routing::new_provider(remote, &config.local_ai, &config.default_model);
 //! ```
 
 pub mod factory;

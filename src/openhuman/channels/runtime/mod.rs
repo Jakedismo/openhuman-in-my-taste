@@ -1,6 +1,7 @@
 //! Channel runtime entry points.
 
 mod dispatch;
+pub mod listener_registry;
 mod startup;
 mod supervision;
 

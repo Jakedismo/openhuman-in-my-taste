@@ -5,10 +5,26 @@ use std::collections::{BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::openhuman::config::GraphExtractionMode;
 use crate::openhuman::memory::store::types::NamespaceDocumentInput;
 
 /// Default extraction backend label reported in ingestion metadata.
 pub const DEFAULT_MEMORY_EXTRACTION_MODEL: &str = "heuristic-only";
+/// Backend identifier used in `MemoryIngestionResult.extraction_backend`.
+/// Stable wire strings — surfaced in logs, UI activity rows, and the
+/// `ingestion.backend` field in document metadata.
+pub mod extraction_backend {
+    /// Only the heuristic regex extractor ran (LLM disabled or unavailable).
+    pub const HEURISTIC: &str = "heuristic";
+    /// Only the LLM extractor produced data (heuristic ran for structural
+    /// metadata but contributed no entities/relations on top).
+    pub const LLM: &str = "llm";
+    /// Both extractors contributed entities/relations. The accumulator
+    /// alias-resolution + predicate-rule filter has already merged them.
+    pub const LLM_PLUS_HEURISTIC: &str = "llm+heuristic";
+    /// LLM was attempted but failed; heuristic-only output was used.
+    pub const HEURISTIC_FALLBACK: &str = "heuristic (llm fallback)";
+}
 /// Default number of tokens per text chunk during ingestion.
 pub(super) const DEFAULT_CHUNK_TOKENS: usize = 225;
 
@@ -55,6 +71,13 @@ pub struct MemoryIngestionConfig {
     /// Reserved batch-size knob kept for config compatibility.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Strategy for populating the namespace knowledge graph. Mirrors
+    /// the `memory.graph_extraction` config knob — exposed on
+    /// [`MemoryIngestionConfig`] so callers that build a one-off
+    /// request (e.g. RPC handlers) can override it without touching
+    /// the global config.
+    #[serde(default)]
+    pub graph_extraction: GraphExtractionMode,
 }
 
 fn default_entity_threshold() -> f32 {
@@ -82,6 +105,7 @@ impl Default for MemoryIngestionConfig {
             relation_threshold: default_relation_threshold(),
             adjacency_threshold: default_adjacency_threshold(),
             batch_size: default_batch_size(),
+            graph_extraction: GraphExtractionMode::default(),
         }
     }
 }
@@ -145,8 +169,20 @@ pub struct MemoryIngestionResult {
     /// Namespace containing the document.
     pub namespace: String,
     /// Extraction backend label recorded for the ingestion run.
+    /// This is the model identifier (e.g. `"openai:gpt-5.4-mini"`,
+    /// `"ollama:gemma4:e4b"`) when the LLM extractor ran; falls back
+    /// to [`DEFAULT_MEMORY_EXTRACTION_MODEL`] (`heuristic-only`) when
+    /// only the regex path produced output.
     pub model_name: String,
-    /// Mode used for extraction.
+    /// Which extractor(s) contributed to the final entity / relation
+    /// lists. One of the [`extraction_backend`] constants
+    /// (`heuristic`, `llm`, `llm+heuristic`, `heuristic (llm fallback)`).
+    /// Surfaced to the UI / activity log so users can see whether their
+    /// configured `memory_provider` is actually being hit.
+    #[serde(default)]
+    pub extraction_backend: String,
+    /// Mode used for extraction (sentence|chunk granularity for the
+    /// heuristic path).
     pub extraction_mode: String,
     /// Total number of chunks processed.
     pub chunk_count: usize,
@@ -242,4 +278,10 @@ pub(super) struct ParsedIngestion {
     pub(super) chunk_count: usize,
     pub(super) preference_count: usize,
     pub(super) decision_count: usize,
+    /// Which extractor(s) contributed. See
+    /// [`extraction_backend`](crate::openhuman::memory::ingestion::types::extraction_backend).
+    pub(super) extraction_backend: String,
+    /// Resolved model identifier when the LLM extractor ran; `None`
+    /// when only the heuristic path produced output.
+    pub(super) model_label: Option<String>,
 }

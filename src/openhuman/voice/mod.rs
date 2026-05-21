@@ -29,6 +29,7 @@ pub use crate::openhuman::inference::voice::local_speech;
 pub use crate::openhuman::inference::voice::local_transcribe;
 pub use crate::openhuman::inference::voice::postprocess;
 pub use crate::openhuman::inference::voice::streaming;
+pub use crate::openhuman::inference::voice::system_speech;
 
 pub use factory::{
     create_stt_provider, create_tts_provider, default_stt_provider, default_tts_provider,

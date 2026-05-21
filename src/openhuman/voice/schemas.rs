@@ -102,6 +102,16 @@ struct SetProvidersParams {
     stt_model: Option<String>,
     #[serde(default)]
     tts_voice: Option<String>,
+    /// Kokoro (local OpenAI-compatible TTS) endpoint URL — base URL only,
+    /// without the `/v1/audio/speech` suffix.
+    #[serde(default)]
+    kokoro_endpoint_url: Option<String>,
+    /// `model` field used in the OpenAI-compatible request body.
+    #[serde(default)]
+    kokoro_model: Option<String>,
+    /// Default voice id for the Kokoro provider (e.g. `af_bella`).
+    #[serde(default)]
+    kokoro_voice: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,11 +340,11 @@ pub fn voice_schemas(function: &str) -> ControllerSchema {
                 required_string("text", "Text to synthesize."),
                 optional_string(
                     "provider",
-                    "Override provider: 'cloud' or 'piper'. Defaults to config.local_ai.tts_provider.",
+                    "Override provider: 'cloud', 'piper', or 'system' (macOS only). Defaults to config.local_ai.tts_provider.",
                 ),
                 optional_string(
                     "voice",
-                    "Voice id (provider-specific). Piper expects an id like 'en_US-lessac-medium'.",
+                    "Voice id (provider-specific). Piper expects 'en_US-lessac-medium'; system expects a macOS `say -v` id like 'Samantha'.",
                 ),
             ],
             outputs: vec![json_output(
@@ -356,14 +366,28 @@ pub fn voice_schemas(function: &str) -> ControllerSchema {
                 ),
                 optional_string(
                     "tts_provider",
-                    "TTS provider id ('cloud' or 'piper'). Omitted = unchanged.",
+                    "TTS provider id ('cloud', 'piper', 'kokoro', or 'system' for macOS-native say). Omitted = unchanged.",
                 ),
                 optional_string("stt_model", "Whisper model id (e.g. 'whisper-large-v3-turbo')."),
                 optional_string("tts_voice", "Piper voice id (e.g. 'en_US-lessac-medium')."),
+                optional_string(
+                    "kokoro_endpoint_url",
+                    "Base URL of a local OpenAI-compatible TTS server (Kokoro). \
+                     `/v1/audio/speech` is appended at call time. Omitted = unchanged.",
+                ),
+                optional_string(
+                    "kokoro_model",
+                    "`model` field sent in the OpenAI-compatible body. Omitted = unchanged.",
+                ),
+                optional_string(
+                    "kokoro_voice",
+                    "Default voice id for the Kokoro provider (e.g. 'af_bella'). Omitted = unchanged.",
+                ),
             ],
             outputs: vec![json_output(
                 "providers",
-                "Updated provider selectors: { stt_provider, tts_provider, stt_model_id, tts_voice_id }.",
+                "Updated provider selectors: { stt_provider, tts_provider, stt_model_id, tts_voice_id, \
+                 kokoro_endpoint_url, kokoro_model, kokoro_voice }.",
             )],
         },
         "voice_cloud_transcribe" => ControllerSchema {
@@ -692,14 +716,41 @@ fn handle_voice_set_providers(params: Map<String, Value>) -> ControllerFuture {
         {
             config.local_ai.tts_voice_id = voice.to_string();
         }
+        if let Some(url) = p
+            .kokoro_endpoint_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            config.local_ai.kokoro_endpoint_url = url.to_string();
+        }
+        if let Some(model) = p
+            .kokoro_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            config.local_ai.kokoro_model = model.to_string();
+        }
+        if let Some(voice) = p
+            .kokoro_voice
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            config.local_ai.kokoro_voice = voice.to_string();
+        }
 
         config.save().await.map_err(|e| e.to_string())?;
         log::debug!(
-            "[voice-factory] persisted providers stt={} tts={} stt_model={} tts_voice={}",
+            "[voice-factory] persisted providers stt={} tts={} stt_model={} tts_voice={} kokoro_endpoint={} kokoro_model={} kokoro_voice={}",
             config.local_ai.stt_provider,
             config.local_ai.tts_provider,
             config.local_ai.stt_model_id,
-            config.local_ai.tts_voice_id
+            config.local_ai.tts_voice_id,
+            config.local_ai.kokoro_endpoint_url,
+            config.local_ai.kokoro_model,
+            config.local_ai.kokoro_voice
         );
 
         Ok(serde_json::json!({
@@ -707,6 +758,9 @@ fn handle_voice_set_providers(params: Map<String, Value>) -> ControllerFuture {
             "tts_provider": config.local_ai.tts_provider,
             "stt_model_id": config.local_ai.stt_model_id,
             "tts_voice_id": config.local_ai.tts_voice_id,
+            "kokoro_endpoint_url": config.local_ai.kokoro_endpoint_url,
+            "kokoro_model": config.local_ai.kokoro_model,
+            "kokoro_voice": config.local_ai.kokoro_voice,
         }))
     })
 }
@@ -722,9 +776,9 @@ fn validate_stt_provider(provider: &str) -> Result<(), String> {
 
 fn validate_tts_provider(provider: &str) -> Result<(), String> {
     match provider {
-        "cloud" | "piper" => Ok(()),
+        "cloud" | "piper" | "kokoro" | "system" => Ok(()),
         other => Err(format!(
-            "invalid tts_provider '{other}' (valid: 'cloud', 'piper')"
+            "invalid tts_provider '{other}' (valid: 'cloud', 'piper', 'kokoro', 'system')"
         )),
     }
 }

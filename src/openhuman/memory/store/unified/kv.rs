@@ -21,25 +21,17 @@ impl UnifiedMemory {
             );
             return Err("kv key cannot contain secrets".to_string());
         }
-        if safety::pii::has_likely_pii(key) {
-            log::warn!(
-                "[memory:safety] kv_set_global rejected PII-like key key_chars={}",
-                key.chars().count()
-            );
-            return Err("kv key cannot contain personal identifiers".to_string());
-        }
 
         let sanitized_value = safety::sanitize_json(value);
         let report = sanitized_value.report;
         if report.changed() {
             log::warn!(
-                "[memory:safety] kv_set_global sanitized key_chars={} text_redactions={} key_redactions={} blocked_secret_hits={} depth_redactions={} pii_redactions={}",
+                "[memory:safety] kv_set_global sanitized key_chars={} text_redactions={} key_redactions={} blocked_secret_hits={} depth_redactions={}",
                 key.chars().count(),
                 report.text_redactions,
                 report.key_redactions,
                 report.blocked_secret_hits,
-                report.depth_redactions,
-                report.pii_redactions
+                report.depth_redactions
             );
         }
 
@@ -83,27 +75,18 @@ impl UnifiedMemory {
             );
             return Err("kv namespace/key cannot contain secrets".to_string());
         }
-        if safety::pii::has_likely_pii(namespace) || safety::pii::has_likely_pii(key) {
-            log::warn!(
-                "[memory:safety] kv_set_namespace rejected PII-like namespace/key namespace_chars={} key_chars={}",
-                namespace.chars().count(),
-                key.chars().count()
-            );
-            return Err("kv namespace/key cannot contain personal identifiers".to_string());
-        }
 
         let sanitized_value = safety::sanitize_json(value);
         let report = sanitized_value.report;
         if report.changed() {
             log::warn!(
-                "[memory:safety] kv_set_namespace sanitized namespace_chars={} key_chars={} text_redactions={} key_redactions={} blocked_secret_hits={} depth_redactions={} pii_redactions={}",
+                "[memory:safety] kv_set_namespace sanitized namespace_chars={} key_chars={} text_redactions={} key_redactions={} blocked_secret_hits={} depth_redactions={}",
                 namespace.chars().count(),
                 key.chars().count(),
                 report.text_redactions,
                 report.key_redactions,
                 report.blocked_secret_hits,
-                report.depth_redactions,
-                report.pii_redactions
+                report.depth_redactions
             );
         }
 

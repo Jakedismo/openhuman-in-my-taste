@@ -4,7 +4,7 @@ use crate::openhuman::agent::host_runtime::{NativeRuntime, RuntimeAdapter};
 use crate::openhuman::config::{Config, DelegateAgentConfig};
 use crate::openhuman::javascript::NodeBootstrap;
 use crate::openhuman::memory::Memory;
-use crate::openhuman::security::{AuditLogger, SecurityPolicy};
+use crate::openhuman::security::SecurityPolicy;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,18 +14,12 @@ pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
 }
 
 /// Create the default tool registry with explicit runtime adapter.
-///
-/// Convenience entry point used by tests and the lightweight CLI surface.
-/// Production assembly sites use [`all_tools_with_runtime`] and pass a real
-/// [`AuditLogger`]; this wrapper substitutes [`AuditLogger::disabled`] so
-/// existing test callers do not need to plumb one through.
 pub fn default_tools_with_runtime(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
 ) -> Vec<Box<dyn Tool>> {
-    let audit = AuditLogger::disabled();
     vec![
-        Box::new(ShellTool::new(security.clone(), runtime, audit)),
+        Box::new(ShellTool::new(security.clone(), runtime)),
         Box::new(FileReadTool::new(security.clone())),
         Box::new(FileWriteTool::new(security)),
     ]
@@ -36,7 +30,6 @@ pub fn default_tools_with_runtime(
 pub fn all_tools(
     config: Arc<Config>,
     security: &Arc<SecurityPolicy>,
-    audit: Arc<AuditLogger>,
     memory: Arc<dyn Memory>,
     browser_config: &crate::openhuman::config::BrowserConfig,
     http_config: &crate::openhuman::config::HttpRequestConfig,
@@ -48,7 +41,6 @@ pub fn all_tools(
         config,
         security,
         Arc::new(NativeRuntime::new()),
-        audit,
         memory,
         browser_config,
         http_config,
@@ -64,7 +56,6 @@ pub fn all_tools_with_runtime(
     config: Arc<Config>,
     security: &Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
-    audit: Arc<AuditLogger>,
     memory: Arc<dyn Memory>,
     browser_config: &crate::openhuman::config::BrowserConfig,
     http_config: &crate::openhuman::config::HttpRequestConfig,
@@ -98,15 +89,10 @@ pub fn all_tools_with_runtime(
         Box::new(ShellTool::with_node_bootstrap(
             security.clone(),
             Arc::clone(&runtime),
-            Arc::clone(&audit),
             Arc::clone(bootstrap),
         ))
     } else {
-        Box::new(ShellTool::new(
-            security.clone(),
-            Arc::clone(&runtime),
-            Arc::clone(&audit),
-        ))
+        Box::new(ShellTool::new(security.clone(), Arc::clone(&runtime)))
     };
 
     let mut tools: Vec<Box<dyn Tool>> = vec![
@@ -150,15 +136,6 @@ pub fn all_tools_with_runtime(
         Box::new(MemoryRecallTool::new(memory.clone())),
         Box::new(MemoryForgetTool::new(memory.clone(), security.clone())),
         Box::new(MemoryTreeTool),
-        // Explicit user-preference pinning — always registered so the model
-        // can save user-stated preferences regardless of whether the full
-        // inference-based learning subsystem is enabled.  The preference
-        // injection into the system prompt is controlled independently by
-        // `config.learning.explicit_preferences_enabled`.
-        Box::new(RememberPreferenceTool::new(
-            memory.clone(),
-            security.clone(),
-        )),
         // WhatsApp data store — read-only agent surface (issue #1341).
         // The matching `whatsapp_data_ingest` write-path stays internal-only
         // (registered in `src/core/all.rs::build_internal_only_controllers`)
@@ -189,6 +166,46 @@ pub fn all_tools_with_runtime(
         )),
         Box::new(GmailUnsubscribeTool),
     ];
+
+    // Skill invocation (`skill_invoke`) — runs a SKILL.md package's
+    // JS or Python entrypoint against the managed runtime(s). Only
+    // registered when the Node runtime is enabled (`node.enabled =
+    // true`) AND a NodeBootstrap was constructed above — without one
+    // there's no way to resolve the binary at call time. Mirror of the
+    // shell / node_exec / npm_exec registration policy.
+    //
+    // Python is opt-in via `runtime_python.enabled`: when set we attach
+    // a PythonBootstrap so `.py` entrypoints can run too. When Python
+    // is disabled the tool still works for `.js` / `.mjs` / `.cjs`
+    // skills and surfaces a precise "python runtime not configured"
+    // error for `.py` ones.
+    if let Some(bootstrap) = node_bootstrap.as_ref() {
+        let mut skill_tool = super::implementations::SkillInvokeTool::new(
+            workspace_dir.to_path_buf(),
+            Arc::clone(bootstrap),
+        );
+        if root_config.runtime_python.enabled {
+            tracing::debug!(
+                "[tools::ops] python runtime enabled — attaching PythonBootstrap to skill_invoke"
+            );
+            let py_bootstrap = Arc::new(crate::openhuman::runtime_python::PythonBootstrap::new(
+                root_config.runtime_python.clone(),
+            ));
+            skill_tool = skill_tool.with_python_bootstrap(py_bootstrap);
+        } else {
+            tracing::debug!(
+                "[tools::ops] python runtime disabled — skill_invoke will reject .py entrypoints"
+            );
+        }
+        tracing::debug!(
+            "[tools::ops] node runtime enabled — registering skill_invoke against the shared NodeBootstrap"
+        );
+        tools.push(Box::new(skill_tool));
+    } else {
+        tracing::debug!(
+            "[tools::ops] node runtime disabled — skill_invoke is unavailable until node.enabled = true"
+        );
+    }
 
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening
@@ -251,22 +268,6 @@ pub fn all_tools_with_runtime(
         root_config.curl.timeout_secs,
     )));
 
-    // Phase 3 STM recall — on-demand cross-thread episodic search tool.
-    // Feature-gated on `learning.stm_recall_enabled` (default true) so the
-    // tool surface and the preemptive prompt injection are enabled/disabled
-    // together. `session_id` is not known at tool-build time; exclude-own-
-    // session is enforced by the preemptive first-turn injection in turn.rs
-    // (the on-demand tool intentionally uses an empty exclude_session).
-    if root_config.learning.stm_recall_enabled {
-        tools.push(Box::new(
-            crate::openhuman::memory::stm_recall::tool::StmRecallTool::new(
-                memory.clone(),
-                String::new(),
-                None,
-            ),
-        ));
-    }
-
     // gitbooks — answers questions about OpenHuman by calling the
     // GitBook MCP server. Two tools mirroring the upstream MCP tools.
     if root_config.gitbooks.enabled {
@@ -305,39 +306,11 @@ pub fn all_tools_with_runtime(
     // knobs still come from `config.web_search`, but there is no
     // enable flag: every session needs research as a baseline
     // capability.
-    let seltz_has_api_key = root_config
-        .seltz
-        .api_key
-        .as_deref()
-        .is_some_and(|key| !key.trim().is_empty());
-    let direct_seltz_for_web_search = if root_config.seltz.enabled && seltz_has_api_key {
-        tracing::debug!(
-            max_results = root_config.seltz.max_results,
-            timeout_secs = root_config.seltz.timeout_secs,
-            "[web_search] direct Seltz routing enabled"
-        );
-        Some(crate::openhuman::integrations::SeltzSearchTool::new(
-            root_config.seltz.api_key.clone(),
-            root_config.seltz.api_url.clone(),
-            root_config.seltz.max_results,
-            root_config.seltz.timeout_secs,
-        ))
-    } else {
-        tracing::debug!(
-            seltz_enabled = root_config.seltz.enabled,
-            has_api_key = seltz_has_api_key,
-            "[web_search] direct Seltz routing disabled; backend proxy path remains"
-        );
-        None
-    };
-    tools.push(Box::new(
-        WebSearchTool::new(
-            crate::openhuman::integrations::build_client(root_config),
-            root_config.web_search.max_results,
-            root_config.web_search.timeout_secs,
-        )
-        .with_direct_search(direct_seltz_for_web_search),
-    ));
+    tools.push(Box::new(WebSearchTool::new(
+        crate::openhuman::integrations::build_client(root_config),
+        root_config.web_search.max_results,
+        root_config.web_search.timeout_secs,
+    )));
 
     // Seltz — direct-API web search, gated on `seltz.enabled` (auto-set
     // when `SELTZ_API_KEY` env var is present). Unlike the backend-proxied
@@ -355,27 +328,6 @@ pub fn all_tools_with_runtime(
         tracing::debug!("[seltz] registered seltz_search tool");
     } else {
         tracing::debug!("[seltz] disabled — set SELTZ_API_KEY to enable");
-    }
-
-    // SearXNG — self-hosted web search, gated on `searxng.enabled`.
-    // This is useful for users who want current web results without routing
-    // queries through OpenHuman's backend or a hosted search API.
-    if root_config.searxng.enabled {
-        tools.push(Box::new(
-            crate::openhuman::integrations::SearxngSearchTool::new(
-                root_config.searxng.base_url.clone(),
-                root_config.searxng.max_results,
-                root_config.searxng.default_language.clone(),
-                root_config.searxng.timeout_secs,
-            ),
-        ));
-        tracing::debug!(
-            base_url = %root_config.searxng.base_url,
-            max_results = root_config.searxng.max_results,
-            "[searxng] registered searxng_search tool"
-        );
-    } else {
-        tracing::debug!("[searxng] disabled — set searxng.enabled=true to enable");
     }
 
     // Managed Node.js exec tools — gated on `root_config.node.enabled`.
@@ -441,7 +393,7 @@ pub fn all_tools_with_runtime(
     // ── Agent integration tools (backend-proxied) ─────────────────
     if let Some(client) = crate::openhuman::integrations::build_client(root_config) {
         tracing::debug!("[integrations] client built successfully");
-        if root_config.integrations.apify.is_active() {
+        if root_config.integrations.apify.enabled {
             tools.push(Box::new(
                 crate::openhuman::integrations::ApifyRunActorTool::new(Arc::clone(&client)),
             ));
@@ -455,7 +407,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] apify disabled — skipping");
         }
-        if root_config.integrations.google_places.is_active() {
+        if root_config.integrations.google_places.enabled {
             tools.push(Box::new(
                 crate::openhuman::integrations::GooglePlacesSearchTool::new(Arc::clone(&client)),
             ));
@@ -466,7 +418,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] google_places disabled — skipping");
         }
-        if root_config.integrations.parallel.is_active() {
+        if root_config.integrations.parallel.enabled {
             tools.push(Box::new(
                 crate::openhuman::integrations::ParallelSearchTool::new(Arc::clone(&client)),
             ));
@@ -489,21 +441,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] parallel disabled — skipping");
         }
-        if root_config.integrations.tinyfish.is_active() {
-            tools.push(Box::new(
-                crate::openhuman::integrations::TinyFishSearchTool::new(Arc::clone(&client)),
-            ));
-            tools.push(Box::new(
-                crate::openhuman::integrations::TinyFishFetchTool::new(Arc::clone(&client)),
-            ));
-            tools.push(Box::new(
-                crate::openhuman::integrations::TinyFishAgentRunTool::new(Arc::clone(&client)),
-            ));
-            tracing::debug!("[integrations] registered tinyfish tools");
-        } else {
-            tracing::debug!("[integrations] tinyfish disabled — skipping");
-        }
-        if root_config.integrations.stock_prices.is_active() {
+        if root_config.integrations.stock_prices.enabled {
             tools.push(Box::new(
                 crate::openhuman::integrations::StockQuoteTool::new(Arc::clone(&client)),
             ));
@@ -523,7 +461,7 @@ pub fn all_tools_with_runtime(
         } else {
             tracing::debug!("[integrations] stock_prices disabled — skipping");
         }
-        if root_config.integrations.twilio.is_active() {
+        if root_config.integrations.twilio.enabled {
             tools.push(Box::new(
                 crate::openhuman::integrations::TwilioCallTool::new(Arc::clone(&client)),
             ));
@@ -550,16 +488,6 @@ pub fn all_tools_with_runtime(
         tracing::debug!(
             "[integrations] build_client returned None — integration tools not registered"
         );
-    }
-
-    if root_config.integrations.polymarket.enabled {
-        tools.push(Box::new(PolymarketTool::new(
-            &root_config.integrations.polymarket,
-            security.clone(),
-        )));
-        tracing::debug!("[integrations] registered polymarket tool (read + trading)");
-    } else {
-        tracing::debug!("[integrations] polymarket disabled — skipping");
     }
 
     // Coding-harness `lsp` tool (issue #1205) — capability-gated by the

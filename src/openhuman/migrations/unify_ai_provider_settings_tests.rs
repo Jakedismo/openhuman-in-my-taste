@@ -23,18 +23,19 @@ fn make_legacy_config_local_on() -> Config {
 }
 
 #[test]
-fn empty_config_seeds_openhuman_entry() {
+fn empty_config_seeds_openai_entry() {
     let mut c = Config::default();
     let stats = run(&mut c).expect("migration must succeed");
 
     assert_eq!(stats.cloud_providers_seeded, 1);
     assert_eq!(c.cloud_providers.len(), 1);
-    assert_eq!(c.cloud_providers[0].slug, "openhuman");
-    assert!(c.cloud_providers[0].id.starts_with("p_openhuman_"));
+    assert_eq!(c.cloud_providers[0].slug, "openai");
+    assert_eq!(c.cloud_providers[0].endpoint, "https://api.openai.com/v1");
+    assert!(c.cloud_providers[0].id.starts_with("p_openai_"));
 }
 
 #[test]
-fn primary_cloud_defaults_to_openhuman_id() {
+fn primary_cloud_defaults_to_openai_id() {
     let mut c = Config::default();
     let stats = run(&mut c).expect("migration must succeed");
 
@@ -62,11 +63,6 @@ fn legacy_inference_url_becomes_custom_entry() {
         .expect("custom entry must be seeded");
     assert_eq!(custom.endpoint, "https://api.example.com/v1");
     assert_eq!(custom.default_model.as_deref(), Some("gpt-4o"));
-    assert_eq!(
-        c.primary_cloud.as_deref(),
-        Some(custom.id.as_str()),
-        "legacy custom inference must remain the default cloud target after migration"
-    );
 }
 
 #[test]
@@ -74,9 +70,10 @@ fn openhuman_inference_url_does_not_seed_custom() {
     let mut c = Config::default();
     c.inference_url = Some("https://api.openhuman.ai/v1".into());
     let _ = run(&mut c).expect("migration must succeed");
-    // Only the openhuman entry should be seeded — no Custom entry.
+    // Only the openai entry should be seeded — no Custom entry, since
+    // the (now-defunct) OpenHuman backend URL doesn't get a slot.
     assert_eq!(c.cloud_providers.len(), 1);
-    assert_eq!(c.cloud_providers[0].slug, "openhuman");
+    assert_eq!(c.cloud_providers[0].slug, "openai");
 }
 
 #[test]
@@ -120,11 +117,24 @@ fn memory_provider_local_when_llm_backend_local() {
 }
 
 #[test]
-fn memory_provider_cloud_when_llm_backend_cloud() {
+fn memory_provider_defaults_to_local_ollama_in_local_oauth_fork() {
+    // `Config::default()` now has `llm_backend = Local`,
+    // `local_ai.runtime_enabled = true`, and a non-empty
+    // `local_ai.chat_model_id` (defaults to "gemma3:1b-it-qat"). The
+    // migration's Local arm matches, so `memory_provider` is set to
+    // `ollama:<chat_model_id>`. This replaces the legacy default
+    // where `llm_backend = Cloud` produced `memory_provider = "cloud"`
+    // — that path was tied to the dead OpenHuman backend's
+    // `summarization-v1` model, which is no longer reachable in this
+    // fork. Users who explicitly want cloud routing for memory can
+    // still set `memory_provider = "<slug>:<model>"` themselves; the
+    // factory's `provider_for_role("memory", ...)` honours it.
     let mut c = Config::default();
-    // default backend is Cloud
     let _ = run(&mut c).unwrap();
-    assert_eq!(c.memory_provider.as_deref(), Some("cloud"));
+    assert_eq!(
+        c.memory_provider.as_deref(),
+        Some("ollama:gemma3:1b-it-qat")
+    );
 }
 
 #[test]

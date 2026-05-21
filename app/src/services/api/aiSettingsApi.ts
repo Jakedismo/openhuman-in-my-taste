@@ -65,38 +65,11 @@ export const BACKGROUND_WORKLOADS: WorkloadId[] = [
 ];
 export const ALL_WORKLOADS: WorkloadId[] = [...CHAT_WORKLOADS, ...BACKGROUND_WORKLOADS];
 
-/** Provider reference parsed from a stored provider-string.
- *
- * Wire grammar: `"<slug>:<model>[@<temperature>]"`. The optional
- * `@<temperature>` suffix overrides the global default for this workload
- * only. The Rust factory strips it before sending the model id upstream.
- */
+/** Provider reference parsed from a stored provider-string. */
 export type ProviderRef =
   | { kind: 'openhuman' }
-  | { kind: 'cloud'; providerSlug: string; model: string; temperature?: number | null }
-  | { kind: 'local'; model: string; temperature?: number | null };
-
-/** Parse a `<model>[@<temp>]` suffix into `(model, temperature)`. */
-function splitModelAndTemp(raw: string): { model: string; temperature: number | null } {
-  const at = raw.lastIndexOf('@');
-  if (at < 0) return { model: raw.trim(), temperature: null };
-  const head = raw.slice(0, at).trim();
-  const tail = raw.slice(at + 1).trim();
-  const parsed = Number(tail);
-  if (!head || !Number.isFinite(parsed)) {
-    // Malformed suffix — treat the whole thing as the model id.
-    return { model: raw.trim(), temperature: null };
-  }
-  return { model: head, temperature: parsed };
-}
-
-/** Format the model + optional temperature suffix used on the wire. */
-function joinModelAndTemp(model: string, temperature: number | null | undefined): string {
-  if (temperature == null || !Number.isFinite(temperature)) return model;
-  // Two decimal places is plenty for the 0..2 slider and avoids 0.7000000001 drift.
-  const rounded = Math.round(temperature * 100) / 100;
-  return `${model}@${String(rounded)}`;
-}
+  | { kind: 'cloud'; providerSlug: string; model: string }
+  | { kind: 'local'; model: string };
 
 /**
  * Cloud provider entry as the UI sees it — endpoint config plus a derived
@@ -137,19 +110,16 @@ export function parseProviderString(s: string | null | undefined): ProviderRef {
     return { kind: 'openhuman' };
   }
   if (trimmed.startsWith('ollama:')) {
-    const { model, temperature } = splitModelAndTemp(trimmed.slice('ollama:'.length));
-    return temperature == null ? { kind: 'local', model } : { kind: 'local', model, temperature };
+    return { kind: 'local', model: trimmed.slice('ollama:'.length).trim() };
   }
   const colonIdx = trimmed.indexOf(':');
   if (colonIdx > 0) {
     const slug = trimmed.slice(0, colonIdx).trim();
-    const { model, temperature } = splitModelAndTemp(trimmed.slice(colonIdx + 1));
+    const model = trimmed.slice(colonIdx + 1).trim();
     if (slug === 'openhuman') {
       return { kind: 'openhuman' };
     }
-    return temperature == null
-      ? { kind: 'cloud', providerSlug: slug, model }
-      : { kind: 'cloud', providerSlug: slug, model, temperature };
+    return { kind: 'cloud', providerSlug: slug, model };
   }
   // Unrecognised bare string → fall back to openhuman.
   return { kind: 'openhuman' };
@@ -161,9 +131,9 @@ export function serializeProviderRef(ref: ProviderRef): string {
     case 'openhuman':
       return 'openhuman';
     case 'cloud':
-      return `${ref.providerSlug}:${joinModelAndTemp(ref.model, ref.temperature)}`;
+      return `${ref.providerSlug}:${ref.model}`;
     case 'local':
-      return `ollama:${joinModelAndTemp(ref.model, ref.temperature)}`;
+      return `ollama:${ref.model}`;
   }
 }
 
@@ -196,14 +166,12 @@ export async function loadAISettings(): Promise<AISettings> {
     profilesRes.result.map((p: AuthProfileSummary) => p.provider.toLowerCase())
   );
 
-  const cloudProviders: CloudProviderView[] = config.cloud_providers
-    .filter(p => !['', 'cloud', 'openhuman', 'ollama', 'pid'].includes(p.slug.trim()))
-    .map(p => {
-      const newKey = authKeyForSlug(p.slug).toLowerCase();
-      const legacyKey = p.slug.toLowerCase();
-      const has_api_key = profileProviders.has(newKey) || profileProviders.has(legacyKey);
-      return { ...p, has_api_key };
-    });
+  const cloudProviders: CloudProviderView[] = config.cloud_providers.map(p => {
+    const newKey = authKeyForSlug(p.slug).toLowerCase();
+    const legacyKey = p.slug.toLowerCase();
+    const has_api_key = profileProviders.has(newKey) || profileProviders.has(legacyKey);
+    return { ...p, has_api_key };
+  });
 
   const routing: Record<WorkloadId, ProviderRef> = {
     chat: parseProviderString(config.chat_provider),
@@ -245,15 +213,9 @@ export async function saveAISettings(prev: AISettings, next: AISettings): Promis
       );
     })
   ) {
-    patch.cloud_providers = next.cloudProviders
-      .filter(p => !['', 'cloud', 'openhuman', 'ollama', 'pid'].includes(p.slug.trim()))
-      .map(({ id, slug, label, endpoint, auth_style }) => ({
-        id,
-        slug,
-        label,
-        endpoint,
-        auth_style,
-      }));
+    patch.cloud_providers = next.cloudProviders.map(
+      ({ id, slug, label, endpoint, auth_style }) => ({ id, slug, label, endpoint, auth_style })
+    );
   }
 
   for (const w of ALL_WORKLOADS) {

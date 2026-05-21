@@ -37,7 +37,7 @@ export type SettingsRoute =
   | 'webhooks-triggers'
   | 'composio-triggers'
   | 'composio-routing'
-  | 'mcp-server';
+  | 'triggers';
 
 export interface BreadcrumbItem {
   label: string;
@@ -104,6 +104,7 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
     if (path.includes('/settings/webhooks-triggers')) return 'webhooks-triggers';
     if (path.includes('/settings/composio-triggers')) return 'composio-triggers';
     if (path.includes('/settings/composio-routing')) return 'composio-routing';
+    if (path.includes('/settings/triggers')) return 'triggers';
     if (path.includes('/settings/intelligence')) return 'intelligence';
     if (path.includes('/settings/recovery-phrase')) return 'recovery-phrase';
     if (path.includes('/settings/agent-chat')) return 'agent-chat';
@@ -114,7 +115,6 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
     if (path.includes('/settings/notifications')) return 'notifications';
     if (path.includes('/settings/mascot')) return 'mascot';
     if (path.includes('/settings/appearance')) return 'appearance';
-    if (path.includes('/settings/mcp-server')) return 'mcp-server';
     return 'home';
   };
 
@@ -220,8 +220,8 @@ export const useSettingsNavigation = (): SettingsNavigationHook => {
       case 'webhooks-triggers':
       case 'composio-triggers':
       case 'composio-routing':
+      case 'triggers':
       case 'notification-routing':
-      case 'mcp-server':
         return [settingsCrumb, developerCrumb];
 
       // Developer options section page

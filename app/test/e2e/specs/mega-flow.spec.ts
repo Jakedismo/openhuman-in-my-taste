@@ -101,8 +101,7 @@ async function resetEverything(label: string): Promise<void> {
 }
 
 describe('Mega flow — login + Gmail OAuth + Composio in one session', () => {
-  before(async function beforeSuite() {
-    this.timeout(90_000);
+  before(async () => {
     writeMockConfig();
     await startMockServer(MOCK_PORT);
     await waitForApp();

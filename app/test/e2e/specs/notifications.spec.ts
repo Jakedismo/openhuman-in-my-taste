@@ -54,9 +54,9 @@ async function waitForCoreSidecar(timeout = 30_000): Promise<void> {
   let lastErr: unknown;
   await browser.waitUntil(
     async () => {
-      const result = await callOpenhumanRpc('core.ping', {});
+      const result = await callOpenhumanRpc('openhuman.about_info', {});
       if (result.ok) {
-        stepLog('core ready (ping ok)', { result: result.result });
+        stepLog('core sidecar ready', { result: result.result });
         return true;
       }
       lastErr = result.error;

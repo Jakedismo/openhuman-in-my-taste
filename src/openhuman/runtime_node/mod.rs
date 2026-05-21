@@ -12,6 +12,7 @@
 
 pub mod bootstrap;
 pub mod downloader;
+pub mod execute;
 pub mod extractor;
 pub mod ops;
 pub mod resolver;
@@ -21,6 +22,7 @@ pub mod types;
 
 pub use bootstrap::{NodeBootstrap, NodeSource, ResolvedNode};
 pub use downloader::{download_distribution, fetch_shasums, NodeDistribution};
+pub use execute::{execute_script, ExecuteError, ExecuteOptions, ExecuteOutcome};
 pub use extractor::{atomic_install, extract_distribution};
 pub use ops::{execute_tool, list_tools};
 pub use resolver::{detect_system_node, parse_node_version, SystemNode};

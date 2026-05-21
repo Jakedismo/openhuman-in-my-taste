@@ -320,7 +320,6 @@ mod tests {
             toolkit: toolkit.into(),
             description: description.into(),
             tools: vec![],
-            gated_tools: vec![],
             connected: true,
         }
     }
@@ -463,7 +462,6 @@ mod tests {
                 toolkit: "github".into(),
                 description: "GitHub access.".into(),
                 tools: vec![],
-                gated_tools: vec![],
                 connected: false, // not connected — must not appear in the enum
             },
             integration("notion", "Read and write pages."),
@@ -537,7 +535,6 @@ mod tests {
                 toolkit: "Brand.New".into(),
                 description: "   ".into(),
                 tools: vec![],
-                gated_tools: vec![],
                 connected: true,
             },
             integration("gmail", "Email."),

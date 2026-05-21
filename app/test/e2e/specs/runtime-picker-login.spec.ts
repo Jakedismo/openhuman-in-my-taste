@@ -132,9 +132,7 @@ async function openRuntimePicker(): Promise<boolean> {
 }
 
 describe('Runtime picker → login → onboarding → home → logout', () => {
-  before(async function beforeSuite() {
-    // resetApp + app-ready can take longer than the default 30s per-hook budget.
-    this.timeout(90_000);
+  before(async () => {
     await startMockServer();
     await waitForApp();
     resetMockBehavior();
@@ -153,8 +151,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
   // Phase 1: Runtime picker
   // -------------------------------------------------------------------------
 
-  it('app is running and shows Welcome with OAuth providers', async function () {
-    this.timeout(90_000);
+  it('app is running and shows Welcome with OAuth providers', async () => {
     expect(await hasAppChrome()).toBe(true);
     await waitForWindowVisible(20_000);
     await waitForWebView(15_000);
@@ -201,9 +198,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
     expect(await textExists("We'll need an auth token to connect.")).toBe(true);
   });
 
-  it('"Test Connection" against an unreachable host shows the unreachable pill', async function () {
-    // Polling up to 20s for the connection result + potential accessibility tree dump.
-    this.timeout(60_000);
+  it('"Test Connection" against an unreachable host shows the unreachable pill', async () => {
     // Token already required; supply something + a deliberately closed port.
     const tokenOk = await fillInput('input[type="password"]', 'bad-token-e2e');
     expect(tokenOk).toBe(true);
@@ -233,9 +228,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
     expect(saw).toBe(true);
   });
 
-  it('switching back to Local and clicking Continue closes the picker', async function () {
-    // Polling up to 25s for picker to close + 15s for logged-out state.
-    this.timeout(60_000);
+  it('switching back to Local and clicking Continue closes the picker', async () => {
     expect(await clickByTextDom('Run Locally (Recommended)')).toBe(true);
     await browser.pause(500);
     expect(await clickByTextDom('Continue')).toBe(true);
@@ -271,8 +264,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
   // Phase 2: Provider login (bypass deep link simulates the OAuth callback)
   // -------------------------------------------------------------------------
 
-  it('OAuth provider buttons render on Welcome', async function () {
-    this.timeout(90_000);
+  it('OAuth provider buttons render on Welcome', async () => {
     // Real OAuth opens a system browser — out of scope for headless CI. We
     // just assert the buttons mount; the deep-link callback below covers the
     // post-OAuth path.
@@ -286,9 +278,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
     expect(providerButtonPresent).toBe(true);
   });
 
-  it('deep-link auth callback signs the user in and reaches Home', async function () {
-    // Auth + onboarding + home confirmation needs more than 30s.
-    this.timeout(90_000);
+  it('deep-link auth callback signs the user in and reaches Home', async () => {
     clearRequestLog();
     await triggerAuthDeepLinkBypass('e2e-runtime-picker-user');
     await waitForWindowVisible(20_000);
@@ -339,9 +329,7 @@ describe('Runtime picker → login → onboarding → home → logout', () => {
   // Phase 3: Logout returns to Welcome
   // -------------------------------------------------------------------------
 
-  it('logout from Settings returns the user to Welcome', async function () {
-    // Logout navigation + confirmation + wait for Welcome can take > 30s.
-    this.timeout(60_000);
+  it('logout from Settings returns the user to Welcome', async () => {
     await logoutViaSettings(LOG);
 
     // logoutViaSettings already asserts the logged-out marker; double-check
