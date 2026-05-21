@@ -1,0 +1,14 @@
+# Default 2 MiB thread stack overflows the recursive state machine in
+# several debug-build tests under `agent::harness::subagent_runner` —
+# the recursion is in the scripted-provider test harness, not in the
+# production `run_subagent` loop. Bumping `RUST_MIN_STACK` lifts the
+# floor for every thread `std::thread::spawn` creates (test threads
+# included), which is the simplest cure that scales to future tests
+# without forcing every async test to host its own runtime.
+#
+# 16 MiB is a comfortable headroom — release builds, the tauri shell,
+# and the production binary continue to use whatever the OS / process
+# defaults give them; this env var only sets the *minimum* a freshly
+# spawned thread starts with.
+[env]
+RUST_MIN_STACK = "16777216"

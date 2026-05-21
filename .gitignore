@@ -65,7 +65,10 @@ app/src-tauri/runtime-skill-*
 .mypy_cache
 .ruff_cache
 .kotlin
-.cargo
+# Keep `.cargo/config.toml` (RUST_MIN_STACK bump for tests) tracked
+# but ignore everything else in `.cargo/` (notably credentials.toml).
+.cargo/*
+!.cargo/config.toml
 
 CLAUDE.local.md
 

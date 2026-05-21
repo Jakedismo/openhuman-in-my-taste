@@ -196,6 +196,15 @@ mod tests {
         assert_eq!(out.get("turn_count"), Some(&json!(0)));
     }
 
+    // End-to-end through VAD → ASR → brain turn → TTS. Requires a
+    // real LLM provider AND a real TTS provider to produce synthesized
+    // PCM. In the closedhuman fork the workload factory hard-errors
+    // without configured `cloud_providers` (no silent fallback to a
+    // hosted backend), so this test cannot pass in CI without a
+    // provider configured. Opt-in via `cargo test -- --ignored
+    // push_then_poll_returns_audio_after_brain_turn` when verifying
+    // the meet pipeline on a workstation with credentials set.
+    #[ignore = "requires LLM + TTS providers; opt in with --ignored"]
     #[tokio::test]
     async fn push_then_poll_returns_audio_after_brain_turn() {
         let mut start = Map::new();

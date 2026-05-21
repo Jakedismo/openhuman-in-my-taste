@@ -122,6 +122,18 @@ pub async fn apply_decision(run: TriageRun, envelope: &TriggerEnvelope) -> anyho
 /// triggers are relatively rare (most triggers are `drop`/`acknowledge`)
 /// and the construction is the same O(1) code path `agent_chat` uses.
 async fn dispatch_target_agent(agent_id: &str, prompt: &str) -> anyhow::Result<String> {
+    // Validate the target agent id BEFORE loading the workspace config
+    // or building the `Agent` — both are expensive (config reads
+    // ~/.openhuman, Agent::from_config touches the provider factory,
+    // composio cache, etc.) and a bad agent id can be rejected for
+    // free. Fail-fast also makes the error message mention the
+    // offending id, which is what callers + tests assert on.
+    let registry = AgentDefinitionRegistry::global()
+        .ok_or_else(|| anyhow!("AgentDefinitionRegistry not initialised"))?;
+    let definition = registry
+        .get(agent_id)
+        .ok_or_else(|| anyhow!("agent definition `{agent_id}` not found in registry"))?;
+
     let config = Config::load_or_init()
         .await
         .context("loading config for sub-agent dispatch")?;
@@ -134,12 +146,6 @@ async fn dispatch_target_agent(agent_id: &str, prompt: &str) -> anyhow::Result<S
     // integrations in their system prompts.
     let integrations = crate::openhuman::composio::fetch_connected_integrations(&config).await;
     agent.set_connected_integrations(integrations);
-
-    let registry = AgentDefinitionRegistry::global()
-        .ok_or_else(|| anyhow!("AgentDefinitionRegistry not initialised"))?;
-    let definition = registry
-        .get(agent_id)
-        .ok_or_else(|| anyhow!("agent definition `{agent_id}` not found in registry"))?;
 
     // Build the ParentExecutionContext from the Agent's public accessors
     // so `run_subagent` can inherit the provider, tools, memory, etc.

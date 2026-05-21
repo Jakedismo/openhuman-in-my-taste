@@ -136,9 +136,19 @@ async fn process_channel_message_handles_models_command_without_llm_call() {
     let fallback_provider_impl = Arc::new(ModelCaptureProvider::default());
     let fallback_provider: Arc<dyn Provider> = fallback_provider_impl.clone();
 
+    // Seed the cache with every provider the test will reference,
+    // including `openhuman`. The closedhuman fork hard-errors the
+    // backend-construction path used by `get_or_create_provider`
+    // (`create_resilient_provider_with_options` ↦ dead
+    // `OpenHumanBackendProvider`), so a cache miss would fail the
+    // route-switch with "Failed to initialize provider `openhuman`".
+    // This test is exercising slash-command routing, not provider
+    // construction — pre-seeding sidesteps the irrelevant backend
+    // build.
     let mut provider_cache_seed: HashMap<String, Arc<dyn Provider>> = HashMap::new();
     provider_cache_seed.insert("test-provider".to_string(), Arc::clone(&default_provider));
     provider_cache_seed.insert("openrouter".to_string(), fallback_provider);
+    provider_cache_seed.insert("openhuman".to_string(), Arc::clone(&default_provider));
 
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
         channels_by_name: Arc::new(channels_by_name),
