@@ -1229,20 +1229,66 @@ fn extract_redirect_url(result: &serde_json::Value) -> Option<String> {
 
 async fn response_error(resp: reqwest::Response) -> String {
     let status = resp.status();
+    let code = status.as_u16();
     let body = resp.text().await.unwrap_or_default();
+
+    // Status-specific hints so 401/403/429 surface the most common
+    // root causes without forcing the operator to grep Composio's
+    // docs. The hint is appended AFTER the extracted message so the
+    // operator sees both signals.
+    let hint = match code {
+        401 => Some(
+            "auth rejected — check the Composio API key under Settings → Connections \
+             matches the one in app.composio.dev. The key must be the personal-tenant \
+             key, not a Composio v2 backend key.",
+        ),
+        403 => Some(
+            "forbidden — likely an invalid/revoked Composio API key, a key from a \
+             different tenant, or a toolkit not provisioned on this tenant. Verify the \
+             key at app.composio.dev → Settings → API Keys.",
+        ),
+        429 => Some(
+            "rate-limited by Composio. Back off and retry; the per-key limits are \
+             tier-dependent and visible in your Composio dashboard.",
+        ),
+        _ => None,
+    };
+    let hint_suffix = hint.map(|h| format!(" — {h}")).unwrap_or_default();
+
     if body.trim().is_empty() {
-        return format!("HTTP {}", status.as_u16());
+        return format!("HTTP {code}{hint_suffix}");
     }
 
-    if let Some(api_error) = extract_api_error_message(&body) {
-        return format!(
-            "HTTP {}: {}",
-            status.as_u16(),
-            sanitize_error_message(&api_error)
-        );
-    }
+    let extracted = extract_api_error_message(&body);
 
-    format!("HTTP {}", status.as_u16())
+    // Always include a sanitised body snippet on non-success — the
+    // extractor only knows a fixed set of shapes, but the operator
+    // still needs to see whatever Composio actually returned for
+    // novel error shapes (e.g. `{"detail": "..."}` from FastAPI-style
+    // upstream services, or a plain-text error from a proxy).
+    let snippet = compact_body_snippet(&body);
+
+    match extracted {
+        Some(msg) => format!(
+            "HTTP {code}: {}{hint_suffix}; body={snippet}",
+            sanitize_error_message(&msg)
+        ),
+        None => format!("HTTP {code}{hint_suffix}; body={snippet}"),
+    }
+}
+
+/// Trim, single-line, length-cap a response body so it fits on one log
+/// line without leaking secrets. Cap at 300 chars — long enough to see
+/// the actual error envelope, short enough to never dominate the log.
+fn compact_body_snippet(body: &str) -> String {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sanitised = sanitize_error_message(&collapsed);
+    const MAX: usize = 300;
+    if sanitised.chars().count() <= MAX {
+        return sanitised;
+    }
+    let truncated: String = sanitised.chars().take(MAX).collect();
+    format!("{truncated}…")
 }
 
 fn sanitize_error_message(message: &str) -> String {
@@ -1261,19 +1307,52 @@ fn sanitize_error_message(message: &str) -> String {
     crate::openhuman::util::truncate_with_ellipsis(&sanitized, 240)
 }
 
+/// Extract a human-readable error message from a JSON error body.
+///
+/// Tries multiple known shapes in priority order:
+/// 1. `{ "error": { "message": "..." } }` — OpenAI-style nested.
+/// 2. `{ "error": "..." }` — flat string (common in v3 auth errors).
+/// 3. `{ "message": "..." }` — flat message field.
+/// 4. `{ "detail": "..." }` — FastAPI / Pydantic upstreams.
+/// 5. `{ "errors": [{ "message": "..." }] }` — multi-error array.
+///
+/// Returns `None` only when the body isn't valid JSON or none of the
+/// known fields are populated. The caller (`response_error`) always
+/// surfaces a body snippet in that case, so a novel error shape still
+/// makes it to the log.
 fn extract_api_error_message(body: &str) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
-    parsed
+    // 1. error.message (nested object)
+    if let Some(msg) = parsed
         .get("error")
         .and_then(|v| v.get("message"))
         .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            parsed
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-        })
+    {
+        return Some(msg.to_string());
+    }
+    // 2. error (flat string)
+    if let Some(msg) = parsed.get("error").and_then(|v| v.as_str()) {
+        return Some(msg.to_string());
+    }
+    // 3. message
+    if let Some(msg) = parsed.get("message").and_then(|v| v.as_str()) {
+        return Some(msg.to_string());
+    }
+    // 4. detail (FastAPI / Pydantic)
+    if let Some(msg) = parsed.get("detail").and_then(|v| v.as_str()) {
+        return Some(msg.to_string());
+    }
+    // 5. errors[0].message
+    if let Some(msg) = parsed
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("message"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(msg.to_string());
+    }
+    None
 }
 
 // ── API response types ──────────────────────────────────────────
