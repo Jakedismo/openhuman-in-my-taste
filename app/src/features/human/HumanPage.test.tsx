@@ -20,13 +20,9 @@ vi.mock('../../pages/Conversations', () => ({
   default: () => <div data-testid="conversations-stub" />,
 }));
 
-vi.mock('./Mascot', () => ({ YellowMascot: () => <div data-testid="mascot-stub" /> }));
+vi.mock('./Mascot', () => ({ Ghosty2: () => <div data-testid="mascot-stub" /> }));
 
 vi.mock('./useHumanMascot', () => ({ useHumanMascot: () => ({ face: 'idle', visemes: [] }) }));
-
-vi.mock('../../store/hooks', () => ({ useAppSelector: () => 'yellow' }));
-
-vi.mock('../../store/mascotSlice', () => ({ selectMascotColor: () => 'yellow' }));
 
 const SPEAK_REPLIES_KEY = 'human.speakReplies';
 

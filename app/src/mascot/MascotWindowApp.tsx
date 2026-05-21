@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { YellowMascot } from '../features/human/Mascot';
+import { Ghosty2 } from '../features/human/Mascot';
 import type { MascotFace } from '../features/human/Mascot/Ghosty';
 
 /**
@@ -52,7 +52,7 @@ const MascotWindowApp = () => {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'transparent' }} data-face={face}>
-      <YellowMascot face={face} groundShadowOpacity={0.75} compactArmShading />
+      <Ghosty2 face={face} />
     </div>
   );
 };
