@@ -1243,3 +1243,170 @@ async fn all_tools_executes_stock_and_twilio_family_against_fake_backend() {
     assert_eq!(requests[2].body["requireGreeks"], serde_json::json!(true));
     assert_eq!(requests[5].body["to"], serde_json::json!("+14155551234"));
 }
+
+// ── skill_invoke registration tests ──────────────────────────────────────────
+//
+// SkillInvokeTool is gated on the Node runtime being enabled. When
+// `node.enabled = true` (the default) it should be registered as a
+// callable tool. When the runtime is disabled, it must not appear —
+// otherwise the agent would call it and hit a "node runtime resolution
+// failed" error at execute time. End-to-end execution coverage lives in
+// `tools::impl::skill::invoke::tests`; this file exercises the wiring.
+
+#[test]
+fn all_tools_registers_skill_invoke_when_node_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let security = Arc::new(SecurityPolicy::default());
+    let mem = test_memory(&tmp);
+    let browser = BrowserConfig::default();
+    let http = crate::openhuman::config::HttpRequestConfig::default();
+    let mut cfg = test_config(&tmp);
+    cfg.node.enabled = true;
+
+    let tools = all_tools(
+        Arc::new(cfg.clone()),
+        &security,
+        mem,
+        &browser,
+        &http,
+        tmp.path(),
+        &HashMap::new(),
+        &cfg,
+    );
+    let names = tool_names(&tools);
+    assert!(
+        names.contains(&"skill_invoke".to_string()),
+        "skill_invoke must be registered when node.enabled = true; got: {names:?}"
+    );
+}
+
+#[test]
+fn all_tools_skips_skill_invoke_when_node_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let security = Arc::new(SecurityPolicy::default());
+    let mem = test_memory(&tmp);
+    let browser = BrowserConfig::default();
+    let http = crate::openhuman::config::HttpRequestConfig::default();
+    let mut cfg = test_config(&tmp);
+    cfg.node.enabled = false;
+
+    let tools = all_tools(
+        Arc::new(cfg.clone()),
+        &security,
+        mem,
+        &browser,
+        &http,
+        tmp.path(),
+        &HashMap::new(),
+        &cfg,
+    );
+    let names = tool_names(&tools);
+    assert!(
+        !names.contains(&"skill_invoke".to_string()),
+        "skill_invoke must NOT be registered when node.enabled = false; got: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn all_tools_registered_skill_invoke_can_execute_end_to_end() {
+    // Full stack: install a fixture skill in the workspace, build the
+    // tool registry, find `skill_invoke` by name, call execute with a
+    // real `node` on PATH, verify the JSON payload round-trips through
+    // the wire contract. Gated on a system node — skipped otherwise.
+    let Some(host_version) = (|| {
+        let out = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stripped = raw.strip_prefix('v').unwrap_or(&raw);
+        let major = stripped.split('.').next()?;
+        if major.is_empty() {
+            return None;
+        }
+        Some(format!("v{major}.0.0"))
+    })() else {
+        log::info!("[ops_tests] end-to-end skill_invoke test skipped: no system `node` on PATH");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _ = crate::openhuman::skills::ops_discover::init_skills_dir(&workspace);
+
+    // Plant a fixture skill in the workspace's skills/ dir.
+    let workspace_skills = workspace.join("skills");
+    let skill_dir = workspace_skills.join("registered-echo");
+    std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: registered-echo\ndescription: end-to-end fixture\nmetadata:\n  entrypoint: scripts/main.js\n---\n\nFixture body.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill_dir.join("scripts").join("main.js"),
+        r#"
+            let chunks = [];
+            process.stdin.on('data', c => chunks.push(c));
+            process.stdin.on('end', () => {
+                const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                process.stdout.write(JSON.stringify({
+                    ok: true,
+                    result: { echoed: input.args, via: 'all_tools_registry' }
+                }));
+            });
+        "#,
+    )
+    .unwrap();
+
+    // Build the registry against a Config that pins node to the host
+    // version + a tempdir cache so the bootstrap reuses the system node
+    // and doesn't race siblings on `~/Library/Caches/...`.
+    let mut cfg = test_config(&tmp);
+    cfg.workspace_dir = workspace.clone();
+    cfg.node.enabled = true;
+    cfg.node.prefer_system = true;
+    cfg.node.version = host_version;
+    cfg.node.cache_dir = tmp.path().join("node-cache").to_string_lossy().to_string();
+
+    let security = Arc::new(SecurityPolicy::default());
+    let mem = test_memory(&tmp);
+    let browser = BrowserConfig::default();
+    let http = crate::openhuman::config::HttpRequestConfig::default();
+
+    let tools = all_tools(
+        Arc::new(cfg.clone()),
+        &security,
+        mem,
+        &browser,
+        &http,
+        &workspace,
+        &HashMap::new(),
+        &cfg,
+    );
+
+    let invoke = tools
+        .iter()
+        .find(|t| t.name() == "skill_invoke")
+        .expect("skill_invoke must be in the registry");
+
+    let outcome = invoke
+        .execute(serde_json::json!({
+            "skill_id": "registered-echo",
+            "args": { "ping": "pong" }
+        }))
+        .await
+        .expect("execute should succeed");
+    assert!(
+        !outcome.is_error,
+        "expected success but got error: {}",
+        outcome.text()
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.text()).expect("valid JSON");
+    assert_eq!(parsed["echoed"], serde_json::json!({"ping": "pong"}));
+    assert_eq!(parsed["via"], serde_json::json!("all_tools_registry"));
+}

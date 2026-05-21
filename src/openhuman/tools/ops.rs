@@ -167,6 +167,26 @@ pub fn all_tools_with_runtime(
         Box::new(GmailUnsubscribeTool),
     ];
 
+    // Skill invocation (`skill_invoke`) — runs a SKILL.md package's
+    // JS entrypoint against the managed Node runtime. Only registered
+    // when the Node runtime is enabled (`node.enabled = true`) AND a
+    // NodeBootstrap was constructed above — without one there's no
+    // way to resolve the binary at call time. Mirror of the shell /
+    // node_exec / npm_exec registration policy.
+    if let Some(bootstrap) = node_bootstrap.as_ref() {
+        tracing::debug!(
+            "[tools::ops] node runtime enabled — registering skill_invoke against the shared NodeBootstrap"
+        );
+        tools.push(Box::new(super::implementations::SkillInvokeTool::new(
+            workspace_dir.to_path_buf(),
+            Arc::clone(bootstrap),
+        )));
+    } else {
+        tracing::debug!(
+            "[tools::ops] node runtime disabled — skill_invoke is unavailable until node.enabled = true"
+        );
+    }
+
     if browser_config.enabled {
         // Add legacy browser_open tool for simple URL opening
         tools.push(Box::new(BrowserOpenTool::new(
