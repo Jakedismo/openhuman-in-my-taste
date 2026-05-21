@@ -72,11 +72,10 @@
   },
   "plugins": {
     "updater": {
-      "active": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0OTREMjkxREFCNUIzRTEKUldUaHM3WGFrZEtVZEJzZWtMTlc5dGxnT0R2Q3hUTWVaclJWSm9JUFpPcVFUV2RBSG5oNFN6UjQK",
-      "endpoints": [
-        "https://github.com/tinyhumansai/openhuman/releases/latest/download/latest.json"
-      ]
+      "_comment": "Disabled in the closedhuman fork — we don't pull updates from the upstream tinyhumansai/openhuman release feed. To re-enable: set active=true, swap the pubkey for the closedhuman signing key, and point endpoints at the fork's own latest.json. The Tauri shell will refuse to launch with active=true unless a non-empty pubkey is present.",
+      "active": false,
+      "pubkey": "",
+      "endpoints": []
     },
     "deep-link": {
       "desktop": {

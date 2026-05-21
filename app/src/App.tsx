@@ -6,7 +6,10 @@ import { PersistGate } from 'redux-persist/integration/react';
 
 import AppRoutes from './AppRoutes';
 import AppBackground from './components/AppBackground';
-import AppUpdatePrompt from './components/AppUpdatePrompt';
+// AppUpdatePrompt deliberately not mounted: the closedhuman fork does not
+// consume upstream tinyhumansai/openhuman releases, and the Tauri updater
+// plugin is disabled in tauri.conf.json. Re-mount this when the fork has
+// its own signed release feed wired up.
 import BootCheckGate from './components/BootCheckGate/BootCheckGate';
 import BottomTabBar from './components/BottomTabBar';
 import CommandProvider from './components/commands/CommandProvider';
@@ -96,7 +99,6 @@ function App() {
                             <AppShell />
                             <DictationHotkeyManager />
                             <LocalAIDownloadSnackbar />
-                            <AppUpdatePrompt />
                           </ServiceBlockingGate>
                         </CommandProvider>
                       </Router>
