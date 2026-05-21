@@ -177,6 +177,20 @@ pub async fn invoke_method(state: AppState, method: &str, params: Value) -> Resu
     // workers stand down, and (eventually) pushes a sign-out to the UI.
     // Centralising via the event bus means 401 detection from any path
     // (this one, `llm_provider.api_error`, …) gets the same teardown.
+    //
+    // Exempt the `auth_get_me` / `auth_get_session_token` probes
+    // themselves — those exist to ask "are we logged in?" and the
+    // frontend polls them on every chat reply (see
+    // `ChatRuntimeProvider`). Publishing `SessionExpired` in response
+    // to the very probe that asks about session state is circular and
+    // tears down background workers every turn. The closedhuman fork's
+    // `auth_get_me` returns a synthetic local user so this branch
+    // shouldn't fire in practice — the exemption is belt-and-braces.
+    let is_auth_probe = matches!(
+        method,
+        "openhuman.auth_get_me" | "openhuman.auth_get_session_token"
+    );
+    if !is_auth_probe {
     if let Err(ref msg) = result {
         if is_session_expired_error(msg) {
             log::warn!(
@@ -195,6 +209,7 @@ pub async fn invoke_method(state: AppState, method: &str, params: Value) -> Resu
             );
         }
     }
+    } // end `if !is_auth_probe`
 
     result
 }

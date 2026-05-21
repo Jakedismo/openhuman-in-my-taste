@@ -1528,3 +1528,44 @@ fn composio_transport_timeout_is_dropped_by_before_send() {
         "composio transport timeout must be dropped by integrations filter (#1608)"
     );
 }
+
+// ── try_native_dispatch fall-through ────────────────────────────────────
+
+#[test]
+fn looks_like_missing_native_credential_matches_load_access_token_errors() {
+    use super::looks_like_missing_native_credential;
+    // Exact substrings emitted by `providers_native::load_access_token`.
+    assert!(looks_like_missing_native_credential(
+        "no connected account for provider 'gmail' — run the OAuth flow first"
+    ));
+    assert!(looks_like_missing_native_credential(
+        "profile for 'gmail' has no token_set"
+    ));
+    assert!(looks_like_missing_native_credential(
+        "profile for 'gmail' carries an empty access_token"
+    ));
+}
+
+#[test]
+fn looks_like_missing_native_credential_is_case_insensitive() {
+    use super::looks_like_missing_native_credential;
+    assert!(looks_like_missing_native_credential(
+        "No Connected Account For Provider 'github' — Run The OAuth Flow First"
+    ));
+}
+
+#[test]
+fn looks_like_missing_native_credential_ignores_unrelated_failures() {
+    use super::looks_like_missing_native_credential;
+    // HTTP errors, malformed args, network timeouts — surface, don't fall through.
+    assert!(!looks_like_missing_native_credential(
+        "HTTP 500: upstream error from Gmail API"
+    ));
+    assert!(!looks_like_missing_native_credential(
+        "missing required field 'recipient_email' in arguments"
+    ));
+    assert!(!looks_like_missing_native_credential(
+        "request timed out after 30s"
+    ));
+    assert!(!looks_like_missing_native_credential(""));
+}
