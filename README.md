@@ -325,4 +325,4 @@ closedhuman is licensed under the **GNU General Public License v3.0** (GPLv3) â€
 
 All credit for the original architecture, design language, and the parts of the codebase still standing goes to the OpenHuman team. The criticism above is criticism of specific implementation choices, not of the project or its authors â€” building a hosted-tier business model and an open-source product on the same codebase is a genuine tension, and the fork resolves it by simply dropping the hosted side.
 
-The fork is maintained by [Jokke Ruokolainen](https://github.com/jruokola). PRs welcome against the fork's own `main` branch.
+PRs welcome against the fork's own `main` branch.
