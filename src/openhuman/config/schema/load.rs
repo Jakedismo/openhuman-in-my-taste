@@ -629,11 +629,30 @@ pub(super) fn redact_url_for_log(raw: &str) -> String {
 /// untouched. Routing fields that already contain a `:` are assumed to be
 /// in the new `<slug>:<model>` form.
 fn migrate_cloud_provider_slugs(config: &mut Config) {
-    use super::cloud_providers::migrate_legacy_fields;
+    use super::cloud_providers::{migrate_legacy_fields, migrate_openhuman_jwt_entries};
 
     // Step 1: migrate every cloud_providers entry in-place.
     for entry in &mut config.cloud_providers {
         migrate_legacy_fields(entry);
+    }
+
+    // Step 1b: closedhuman-fork-only — convert any OpenhumanJwt entries
+    // (left over from the upstream backend-shipped era) to Bearer with
+    // empty key. The factory's openhuman-backend path is gone, so these
+    // rows would otherwise surface the misleading SESSION_EXPIRED error
+    // for every chat call. The user has to re-add a real API key under
+    // Settings → AI for each converted slug; that's a one-time chore the
+    // fork can't avoid because the upstream entries never had a real
+    // key on disk (the backend session JWT did the auth).
+    let converted = migrate_openhuman_jwt_entries(&mut config.cloud_providers);
+    if !converted.is_empty() {
+        log::info!(
+            "[config][cloud_providers] migrated {} OpenhumanJwt entr{} to Bearer (empty key): [{}]. \
+             Re-add API keys under Settings → AI.",
+            converted.len(),
+            if converted.len() == 1 { "y" } else { "ies" },
+            converted.join(", ")
+        );
     }
 
     // Step 2: rewrite per-workload routing strings from legacy bare grammar.

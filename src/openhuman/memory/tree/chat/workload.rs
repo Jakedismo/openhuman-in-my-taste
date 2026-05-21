@@ -3,12 +3,12 @@
 //! + `create_chat_provider_from_string`) to the memory-tree
 //! [`super::ChatProvider`] trait surface.
 //!
-//! Used when the user has configured a non-Ollama cloud provider for
-//! the `memory` workload (e.g. an `openai:gpt-5.4-mini` row in
-//! `cloud_providers`). The legacy [`super::cloud::CloudChatProvider`]
-//! still wraps the dead OpenHuman backend (`summarization-v1` model);
-//! this adapter is the local-OAuth replacement that respects the
-//! user's own cloud key + model selection.
+//! Used when the user has configured a non-Ollama cloud provider for the
+//! `memory` workload (e.g. an `openai:gpt-5.4-mini` row in
+//! `cloud_providers`). This is the only cloud-side memory-tree provider —
+//! the legacy `CloudChatProvider` (which wrapped the dead OpenHuman
+//! backend) was removed when the local-OAuth fork stopped shipping a
+//! product backend.
 //!
 //! Built once per `build_chat_provider` call. The underlying
 //! `Box<dyn Provider>` from the factory is `Send + Sync`, so the

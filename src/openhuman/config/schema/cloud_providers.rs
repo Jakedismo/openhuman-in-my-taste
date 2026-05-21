@@ -151,17 +151,46 @@ pub fn migrate_legacy_fields(entry: &mut CloudProviderCreds) {
     }
 
     // Auth style from legacy type when still at default Bearer.
-    if entry.auth_style == AuthStyle::Bearer {
-        match lt {
-            "anthropic" => {
-                entry.auth_style = AuthStyle::Anthropic;
-            }
-            "openhuman" => {
-                entry.auth_style = AuthStyle::OpenhumanJwt;
-            }
-            _ => {}
+    //
+    // The legacy `"openhuman"` → `OpenhumanJwt` branch is intentionally
+    // gone in the closedhuman fork: the OpenHuman product backend is not
+    // available, so minting OpenhumanJwt entries would only route the
+    // chat factory into the dead make_openhuman_backend path. Existing
+    // OpenhumanJwt rows already on disk are normalised at load time by
+    // `migrate_openhuman_jwt_entries` (below).
+    if entry.auth_style == AuthStyle::Bearer && lt == "anthropic" {
+        entry.auth_style = AuthStyle::Anthropic;
+    }
+}
+
+/// Closedhuman-fork-only sweep: rewrite any `OpenhumanJwt` entries to
+/// `Bearer` with empty credentials. These rows are leftovers from the
+/// upstream backend-shipped era and can't be honoured here — the factory
+/// would route them at the dead `make_openhuman_backend` path and produce
+/// the misleading `SESSION_EXPIRED: backend session not active` error.
+///
+/// Run at config load time, after `migrate_legacy_fields`. Returns the
+/// list of slugs that were converted so the caller can surface a
+/// one-time toast / log line pointing the user at Settings → AI.
+pub fn migrate_openhuman_jwt_entries(entries: &mut [CloudProviderCreds]) -> Vec<String> {
+    let mut converted = Vec::new();
+    for entry in entries.iter_mut() {
+        if entry.auth_style == AuthStyle::OpenhumanJwt {
+            log::warn!(
+                "[config][cloud_providers] OpenhumanJwt entry slug='{}' id='{}' converted to Bearer with empty key — \
+                 add your own API key under Settings → AI to re-enable this provider",
+                entry.slug,
+                entry.id
+            );
+            entry.auth_style = AuthStyle::Bearer;
+            // Clear the legacy_type so a future re-migration doesn't
+            // bounce it back to OpenhumanJwt. (The branch is gone but
+            // be defensive in case downstream code still inspects it.)
+            entry.legacy_type = None;
+            converted.push(entry.slug.clone());
         }
     }
+    converted
 }
 
 /// Map a legacy type string (or slug) to a human-readable label.
@@ -284,5 +313,80 @@ impl CloudProviderType {
             Self::Anthropic => AuthStyle::Anthropic,
             _ => AuthStyle::Bearer,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(slug: &str, auth: AuthStyle, legacy_type: Option<&str>) -> CloudProviderCreds {
+        CloudProviderCreds {
+            id: generate_provider_id(slug),
+            slug: slug.to_string(),
+            label: slug.to_string(),
+            endpoint: format!("https://api.{slug}.example.com/v1"),
+            auth_style: auth,
+            legacy_type: legacy_type.map(str::to_string),
+            default_model: None,
+        }
+    }
+
+    #[test]
+    fn migrate_legacy_fields_no_longer_mints_openhuman_jwt() {
+        // The legacy branch that flipped Bearer → OpenhumanJwt for
+        // `lt == "openhuman"` is gone in the closedhuman fork. Migration
+        // should leave the auth_style as Bearer so the dead backend
+        // path is never re-entered for a fresh upgrade.
+        let mut e = entry("openhuman", AuthStyle::Bearer, Some("openhuman"));
+        migrate_legacy_fields(&mut e);
+        assert_eq!(e.auth_style, AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn migrate_legacy_fields_still_promotes_anthropic() {
+        // Anthropic's legacy entries (auth_style = Bearer, type =
+        // "anthropic") still get promoted to AuthStyle::Anthropic so the
+        // x-api-key + anthropic-version headers go on outgoing calls.
+        let mut e = entry("anthropic", AuthStyle::Bearer, Some("anthropic"));
+        migrate_legacy_fields(&mut e);
+        assert_eq!(e.auth_style, AuthStyle::Anthropic);
+    }
+
+    #[test]
+    fn migrate_openhuman_jwt_entries_converts_to_bearer_and_returns_slugs() {
+        let mut entries = vec![
+            entry("openai", AuthStyle::Bearer, None),
+            entry("openhuman", AuthStyle::OpenhumanJwt, Some("openhuman")),
+            entry("anthropic", AuthStyle::Anthropic, None),
+            entry(
+                "legacy-openhuman",
+                AuthStyle::OpenhumanJwt,
+                Some("openhuman"),
+            ),
+        ];
+        let converted = migrate_openhuman_jwt_entries(&mut entries);
+        assert_eq!(converted, vec!["openhuman", "legacy-openhuman"]);
+        // Both OpenhumanJwt rows became Bearer; the other two are untouched.
+        assert_eq!(entries[0].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[1].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[2].auth_style, AuthStyle::Anthropic);
+        assert_eq!(entries[3].auth_style, AuthStyle::Bearer);
+        // legacy_type cleared on the converted rows so a re-run of
+        // migrate_legacy_fields can't bounce them back.
+        assert!(entries[1].legacy_type.is_none());
+        assert!(entries[3].legacy_type.is_none());
+    }
+
+    #[test]
+    fn migrate_openhuman_jwt_entries_is_noop_when_nothing_to_convert() {
+        let mut entries = vec![
+            entry("openai", AuthStyle::Bearer, None),
+            entry("anthropic", AuthStyle::Anthropic, None),
+        ];
+        let converted = migrate_openhuman_jwt_entries(&mut entries);
+        assert!(converted.is_empty());
+        assert_eq!(entries[0].auth_style, AuthStyle::Bearer);
+        assert_eq!(entries[1].auth_style, AuthStyle::Anthropic);
     }
 }

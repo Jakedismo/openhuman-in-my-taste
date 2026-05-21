@@ -36,8 +36,10 @@
 //! ingest cascades. Real bugs (e.g. malformed config) are still acceptable
 //! `Err` cases — they should be rare and surfaced loudly.
 //!
-//! See [`local::OllamaChatProvider`] and [`cloud::CloudChatProvider`] for
-//! the two production implementations.
+//! See [`local::OllamaChatProvider`] for the local-Ollama branch and
+//! [`workload::WorkloadChatProvider`] for the cloud branch (which delegates
+//! to whatever provider the user has wired in `cloud_providers` —
+//! OpenAI, Anthropic, OpenRouter, or any OpenAI-compatible endpoint).
 
 use std::sync::Arc;
 
@@ -49,7 +51,6 @@ use crate::openhuman::inference::provider::factory::{
     create_chat_provider_from_string, provider_for_role, PROVIDER_OPENHUMAN,
 };
 
-pub mod cloud;
 pub mod local;
 pub mod workload;
 
@@ -105,14 +106,17 @@ pub trait ChatProvider: Send + Sync {
 /// Build the [`ChatProvider`] dictated by the unified
 /// `Config::workload_local_model("memory")`.
 ///
-/// - When that returns `None` (i.e. `memory_provider` is unset / `"cloud"`):
-///   wires [`cloud::CloudChatProvider`] against the OpenHuman backend with
-///   `cloud_llm_model` (defaulting to `summarization-v1`).
-/// - When it returns `Some(model)` (i.e. `memory_provider = "ollama:<m>"`):
+/// - When that returns `Some(model)` (i.e. `memory_provider = "ollama:<m>"`):
 ///   wires [`local::OllamaChatProvider`] against the legacy
 ///   `llm_extractor_endpoint` / `llm_summariser_endpoint` (the daemon
 ///   endpoints stay in the `memory_tree` block — only the cloud/local
 ///   routing decision moves to the unified `memory_provider`).
+/// - When it returns `None` (i.e. `memory_provider` is unset / `"cloud"`):
+///   routes through [`workload::WorkloadChatProvider`] using the user's
+///   configured `cloud_providers` entry (OpenAI / Anthropic / a custom
+///   OpenAI-compatible endpoint). The legacy OpenHuman backend path is
+///   gone — a missing provider hard-errors with a Settings → AI pointer
+///   instead of silently routing to a backend that no longer exists.
 ///
 /// `consumer` is one of `"extract"` / `"summarise"` and selects the local
 /// endpoint+model pair (extract uses `llm_extractor_*`, summarise uses
