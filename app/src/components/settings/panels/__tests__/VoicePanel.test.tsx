@@ -125,6 +125,9 @@ describe('VoicePanel', () => {
         llm_cleanup_enabled: true,
         stt_provider: 'cloud',
         tts_provider: 'cloud',
+        kokoro_endpoint_url: 'http://localhost:8880',
+        kokoro_model: 'kokoro',
+        kokoro_voice: 'af_bella',
       },
       sttState: 'ready',
       whisperStatus: makeInstallStatus('whisper'),
@@ -168,11 +171,18 @@ describe('VoicePanel', () => {
       if (update.tts_provider) runtime.voiceStatus.tts_provider = update.tts_provider;
       if (update.stt_model) runtime.voiceStatus.stt_model_id = update.stt_model;
       if (update.tts_voice) runtime.voiceStatus.tts_voice_id = update.tts_voice;
+      if (update.kokoro_endpoint_url)
+        runtime.voiceStatus.kokoro_endpoint_url = update.kokoro_endpoint_url;
+      if (update.kokoro_model) runtime.voiceStatus.kokoro_model = update.kokoro_model;
+      if (update.kokoro_voice) runtime.voiceStatus.kokoro_voice = update.kokoro_voice;
       return {
         stt_provider: runtime.voiceStatus.stt_provider,
         tts_provider: runtime.voiceStatus.tts_provider,
         stt_model_id: runtime.voiceStatus.stt_model_id,
         tts_voice_id: runtime.voiceStatus.tts_voice_id,
+        kokoro_endpoint_url: runtime.voiceStatus.kokoro_endpoint_url,
+        kokoro_model: runtime.voiceStatus.kokoro_model,
+        kokoro_voice: runtime.voiceStatus.kokoro_voice,
       };
     });
 

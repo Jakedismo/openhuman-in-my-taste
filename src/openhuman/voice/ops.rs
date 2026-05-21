@@ -78,6 +78,9 @@ pub async fn voice_status(config: &Config) -> Result<RpcOutcome<VoiceStatus>, St
         llm_cleanup_enabled: config.local_ai.voice_llm_cleanup_enabled,
         stt_provider,
         tts_provider,
+        kokoro_endpoint_url: config.local_ai.kokoro_endpoint_url.clone(),
+        kokoro_model: config.local_ai.kokoro_model.clone(),
+        kokoro_voice: config.local_ai.kokoro_voice.clone(),
     };
 
     Ok(RpcOutcome::single_log(status, "voice status checked"))

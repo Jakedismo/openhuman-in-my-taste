@@ -6,6 +6,7 @@
 
 pub mod cloud_transcribe;
 pub mod hallucination;
+pub mod kokoro_speech;
 pub mod local_speech;
 pub mod local_transcribe;
 pub mod postprocess;

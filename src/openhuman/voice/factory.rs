@@ -23,9 +23,11 @@
 //!   which also returns Oculus-15 visemes for the mascot lip-sync.
 //! - `"piper"` → local Piper subprocess via `PIPER_BIN`. Lower latency than
 //!   ElevenLabs and runs offline; default voice `en_US-lessac-medium`.
-//!   **Note**: Kokoro (higher quality, 82M params) is intentionally out of
-//!   scope for this ship — `PIPER_BIN` is already reserved in `.env.example`
-//!   and Piper is the simpler integration. Kokoro is tracked as future work.
+//! - `"kokoro"` → local OpenAI-compatible TTS server (Kokoro on
+//!   kokoro-fastapi / mlx-audio / LM Studio audio mode). Higher quality
+//!   than Piper, runs offline, and on Apple Silicon the MLX backend is
+//!   markedly faster than Piper's CPU ONNX path. Endpoint, model, and
+//!   default voice come from `config.local_ai.kokoro_*`.
 //!
 //! ## Logging prefixes
 //!
@@ -45,6 +47,7 @@ use super::local_transcribe::{transcribe_whisper, WhisperTranscribeOptions};
 use super::reply_speech::{synthesize_reply, ReplySpeechOptions, ReplySpeechResult};
 use super::system_speech::{synthesize_system_say, SystemSpeechOptions};
 use crate::openhuman::config::Config;
+use crate::openhuman::inference::voice::kokoro_speech::{synthesize_kokoro, KokoroOptions};
 use crate::rpc::RpcOutcome;
 
 const LOG_PREFIX: &str = "[voice-factory]";
@@ -302,6 +305,65 @@ impl TtsProvider for PiperTtsProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Kokoro (local OpenAI-compatible HTTP server) TTS
+// ---------------------------------------------------------------------------
+
+/// Local-server TTS via an OpenAI-compatible `/v1/audio/speech` endpoint.
+/// Reference deployments: `kokoro-fastapi`, `mlx-audio` (Apple Silicon /
+/// MLX-accelerated). The provider is protocol-only — anything that speaks
+/// OpenAI Audio API works. See [`super::super::inference::voice::kokoro_speech`].
+pub struct KokoroTtsProvider {
+    endpoint_url: String,
+    model: String,
+    voice: Option<String>,
+}
+
+impl KokoroTtsProvider {
+    pub fn new(endpoint_url: String, model: String, voice: Option<String>) -> Self {
+        Self {
+            endpoint_url,
+            model,
+            voice,
+        }
+    }
+}
+
+#[async_trait]
+impl TtsProvider for KokoroTtsProvider {
+    fn name(&self) -> &'static str {
+        "kokoro"
+    }
+
+    async fn synthesize(
+        &self,
+        config: &Config,
+        text: &str,
+        voice: Option<&str>,
+    ) -> Result<RpcOutcome<ReplySpeechResult>, String> {
+        // Per-call voice override wins; otherwise fall back to the configured
+        // default. Empty strings on either side trigger the server's own
+        // default by omitting `voice` from the request body.
+        let resolved_voice = voice
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.voice.clone());
+        debug!(
+            "{LOG_PREFIX} kokoro TTS dispatch endpoint={} model={} voice={} chars={}",
+            self.endpoint_url,
+            self.model,
+            resolved_voice.as_deref().unwrap_or("<server-default>"),
+            text.len()
+        );
+        let opts = KokoroOptions {
+            endpoint_url: self.endpoint_url.clone(),
+            model: self.model.clone(),
+            voice: resolved_voice,
+        };
+        synthesize_kokoro(config, text, &opts).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // System (host-native) TTS
 // ---------------------------------------------------------------------------
 
@@ -404,19 +466,16 @@ pub fn create_stt_provider(
 /// Supported provider names:
 /// - `"cloud"` → backend ElevenLabs proxy with viseme alignment
 /// - `"piper"` → local Piper subprocess via `PIPER_BIN`
+/// - `"kokoro"` → local OpenAI-compatible TTS server (Kokoro on
+///   kokoro-fastapi / mlx-audio / LM Studio audio mode). Endpoint URL,
+///   model, and default voice come from `config.local_ai.kokoro_*`.
 /// - `"system"` → host-native TTS (macOS only — wraps `/usr/bin/say`).
 ///   Falls back here when the broken upstream Piper macOS release would
 ///   otherwise leave the user with no working local-TTS option.
-///
-/// Kokoro is **not** implemented in this cut — the integration shipped with
-/// Piper because `PIPER_BIN` is already reserved in `.env.example` and the
-/// runtime contract (subprocess + `.onnx` model) is simpler. Adding Kokoro
-/// later is straightforward: add a new branch here and a `local_speech_kokoro`
-/// sibling module.
 pub fn create_tts_provider(
     provider: &str,
     voice: &str,
-    _config: &Config,
+    config: &Config,
 ) -> anyhow::Result<Box<dyn TtsProvider>> {
     debug!("{LOG_PREFIX} create_tts_provider provider={provider} voice={voice}");
     let trimmed_voice = voice.trim();
@@ -432,6 +491,30 @@ pub fn create_tts_provider(
             Some(trimmed_voice.to_string())
         }))),
         "piper" => Ok(Box::new(PiperTtsProvider::new(piper_voice))),
+        "kokoro" => {
+            // Kokoro/MLX-audio servers use their own voice id namespace
+            // (`af_bella`, `am_michael`, …). A user who flipped from
+            // Piper would still have `tts_voice_id = "en_US-lessac-medium"`
+            // saved — that's a Piper id, not a Kokoro id, so we'd send
+            // an unknown voice to the server. Drop voice ids that look
+            // Piper-shaped (contain `_`, dash-quality suffix) and let the
+            // configured `kokoro_voice` default take over.
+            let configured_default = if config.local_ai.kokoro_voice.trim().is_empty() {
+                None
+            } else {
+                Some(config.local_ai.kokoro_voice.trim().to_string())
+            };
+            let voice_override = if trimmed_voice.is_empty() || trimmed_voice.contains('_') {
+                None
+            } else {
+                Some(trimmed_voice.to_string())
+            };
+            Ok(Box::new(KokoroTtsProvider::new(
+                config.local_ai.kokoro_endpoint_url.clone(),
+                config.local_ai.kokoro_model.clone(),
+                voice_override.or(configured_default),
+            )))
+        }
         // System TTS uses host-native voice IDs (e.g. macOS `say -v
         // Samantha`), which don't share a namespace with Piper voice
         // IDs. Only forward the voice argument when it looks non-Piper
@@ -446,7 +529,7 @@ pub fn create_tts_provider(
             },
         ))),
         unknown => Err(anyhow::anyhow!(
-            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\", \"system\""
+            "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\", \"kokoro\", \"system\""
         )),
     }
 }
@@ -555,19 +638,44 @@ mod tests {
 
     #[test]
     fn tts_factory_unknown_provider_errors() {
-        let err = create_tts_provider("kokoro", "af_bella", &cfg())
+        let err = create_tts_provider("deepgram", "luna", &cfg())
             .err()
-            .expect("kokoro is not implemented in this cut");
+            .expect("deepgram TTS is not implemented");
         let msg = err.to_string();
-        assert!(msg.contains("kokoro"), "should name the provider: {msg}");
+        assert!(msg.contains("deepgram"), "should name the provider: {msg}");
         assert!(msg.contains("unknown"), "should say unknown: {msg}");
-        // The error surfaces the supported list — make sure 'system' is in
+        // The error surfaces the supported list — make sure each id is in
         // it so a user typo'd as "say" or "macos" gets pointed at the right
         // provider id.
-        assert!(
-            msg.contains("system"),
-            "supported-provider list should advertise 'system': {msg}"
-        );
+        for expected in ["cloud", "piper", "kokoro", "system"] {
+            assert!(
+                msg.contains(expected),
+                "supported-provider list should advertise '{expected}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tts_factory_kokoro_branch() {
+        let p = create_tts_provider("kokoro", "af_bella", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_piper_style_voice_id() {
+        // Same reasoning as the system branch: voice ids containing `_`
+        // are Piper-shaped (`en_US-lessac-medium`) and would be rejected
+        // by a Kokoro server that knows only `af_bella` / `am_michael`.
+        // The factory must fall back to the configured kokoro default
+        // rather than forward the foreign id.
+        let p = create_tts_provider("kokoro", "en_US-lessac-medium", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_empty_voice_uses_configured_default() {
+        let p = create_tts_provider("kokoro", "", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
     }
 
     #[test]
