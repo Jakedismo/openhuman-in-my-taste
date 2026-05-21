@@ -34,6 +34,7 @@
 //! [`mlx-audio`]: https://github.com/Blaizzy/mlx-audio
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use futures::StreamExt;
 use log::debug;
 use serde_json::json;
 
@@ -128,6 +129,11 @@ pub async fn synthesize_kokoro(
     let started = std::time::Instant::now();
     let response = client
         .post(&url)
+        // mlx-audio (and several Kokoro wrappers) content-negotiate
+        // differently when no `Accept` is set — explicit `audio/wav`
+        // prevents them from defaulting to a streaming MP3 path that
+        // confuses downstream WAV consumers.
+        .header(reqwest::header::ACCEPT, "audio/wav")
         .json(&body)
         .send()
         .await
@@ -145,21 +151,80 @@ pub async fn synthesize_kokoro(
         ));
     }
 
-    let audio_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("{LOG_PREFIX} kokoro response read failed: {e}"))?;
-    if audio_bytes.is_empty() {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_string();
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    // Read the body via a streaming accumulator instead of `.bytes()`.
+    // mlx-audio's `--realtime-model` flag puts /v1/audio/speech into a
+    // chunked streaming mode (WAV header + streamed PCM frames). `.bytes()`
+    // surfaces a single opaque "error decoding response body" if the
+    // transfer-encoded stream ends abnormally — the accumulator lets us
+    // report how many bytes we received before the break, so we can tell
+    // the server crashed mid-synth from "server never responded" cases.
+    let mut audio_buf: Vec<u8> = match content_length {
+        Some(n) => Vec::with_capacity(n.min(64 * 1024 * 1024) as usize),
+        None => Vec::with_capacity(256 * 1024),
+    };
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => audio_buf.extend_from_slice(&bytes),
+            Err(e) => {
+                return Err(format!(
+                    "{LOG_PREFIX} kokoro response stream broke after {} bytes \
+                     (content-type={}, content-length={:?}): {e}",
+                    audio_buf.len(),
+                    content_type,
+                    content_length
+                ));
+            }
+        }
+    }
+    if audio_buf.is_empty() {
         return Err(format!(
-            "{LOG_PREFIX} kokoro returned an empty audio body — server is misconfigured"
+            "{LOG_PREFIX} kokoro returned an empty audio body \
+             (content-type={content_type}) — server is misconfigured"
         ));
     }
+    // Sanity-check the magic: a real WAV starts `RIFF…WAVE`. If the
+    // server handed us something else (a streamed MP3, raw PCM without
+    // a header, or an error blob masquerading as audio), surface that
+    // here so the user knows to flip `response_format` or drop
+    // `--realtime-model`.
+    let looks_like_wav =
+        audio_buf.len() >= 12 && &audio_buf[0..4] == b"RIFF" && &audio_buf[8..12] == b"WAVE";
+    if !looks_like_wav {
+        let preview = audio_buf
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        debug!(
+            "{LOG_PREFIX} kokoro response did NOT start with RIFF/WAVE magic \
+             (content-type={content_type}, first 16 bytes: {preview}) — \
+             passing through anyway",
+        );
+    }
 
+    let audio_bytes = audio_buf;
     let audio_base64 = BASE64.encode(&audio_bytes);
     let visemes = synthetic_viseme_timeline(trimmed);
     debug!(
-        "{LOG_PREFIX} kokoro synthesized wav_bytes={} visemes={} elapsed_ms={}",
+        "{LOG_PREFIX} kokoro synthesized wav_bytes={} content_type={} \
+         is_riff_wave={} visemes={} elapsed_ms={}",
         audio_bytes.len(),
+        content_type,
+        looks_like_wav,
         visemes.len(),
         started.elapsed().as_millis()
     );
