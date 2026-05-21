@@ -492,22 +492,32 @@ pub fn create_tts_provider(
         }))),
         "piper" => Ok(Box::new(PiperTtsProvider::new(piper_voice))),
         "kokoro" => {
-            // Kokoro/MLX-audio servers use their own voice id namespace
-            // (`af_bella`, `am_michael`, …). A user who flipped from
-            // Piper would still have `tts_voice_id = "en_US-lessac-medium"`
-            // saved — that's a Piper id, not a Kokoro id, so we'd send
-            // an unknown voice to the server. Drop voice ids that look
-            // Piper-shaped (contain `_`, dash-quality suffix) and let the
-            // configured `kokoro_voice` default take over.
+            // Kokoro uses its own voice-id namespace: a lowercase
+            // language-gender prefix followed by `_<name>` — e.g.
+            // `af_bella` (American Female), `am_michael` (American Male),
+            // `bf_emma` (British Female), `jf_alpha` (Japanese Female),
+            // `zf_xiaoxiao` (Chinese Female), `ef_dora` (Spanish Female),
+            // `ff_siwis` (French Female).
+            //
+            // The factory's per-call `voice` argument comes from a wide
+            // mix of call sites — the mascot stores an ElevenLabs voice
+            // id (e.g. `Rachel`), Piper stores `en_US-lessac-medium`,
+            // and ad-hoc `voice_tts_dispatch` invocations forward
+            // whatever the user typed. Only forward `voice` when it
+            // actually matches Kokoro's pattern; anything else falls
+            // back to the configured `kokoro_voice` so we never POST a
+            // foreign id to mlx-audio and trigger an unknown-voice 4xx
+            // (or worse, a default that doesn't sound like what the
+            // user picked in Settings).
             let configured_default = if config.local_ai.kokoro_voice.trim().is_empty() {
                 None
             } else {
                 Some(config.local_ai.kokoro_voice.trim().to_string())
             };
-            let voice_override = if trimmed_voice.is_empty() || trimmed_voice.contains('_') {
-                None
-            } else {
+            let voice_override = if is_kokoro_voice_id(trimmed_voice) {
                 Some(trimmed_voice.to_string())
+            } else {
+                None
             };
             Ok(Box::new(KokoroTtsProvider::new(
                 config.local_ai.kokoro_endpoint_url.clone(),
@@ -532,6 +542,38 @@ pub fn create_tts_provider(
             "unknown TTS provider: \"{unknown}\". Supported: \"cloud\", \"piper\", \"kokoro\", \"system\""
         )),
     }
+}
+
+/// Recognise a Kokoro voice id. Kokoro voices share a strict naming
+/// convention: a two-character language+gender prefix (`af` / `am` /
+/// `bf` / `bm` / `ef` / `ff` / `jf` / `jm` / `zf` / `zm`), an underscore,
+/// then a lowercase name. Anything that doesn't match isn't a Kokoro
+/// voice — typically it's an ElevenLabs name (`Rachel`), a Piper id
+/// (`en_US-lessac-medium`), or a macOS `say` voice (`Samantha`).
+///
+/// The match is intentionally narrow (gate at the second character,
+/// then explicit prefix check) rather than `[a-z]{2}_…` because the
+/// false-positive cost is high: a foreign id slipping through routes
+/// to mlx-audio's unknown-voice error path.
+fn is_kokoro_voice_id(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 || bytes[2] != b'_' {
+        return false;
+    }
+    let lang = bytes[0];
+    let gender = bytes[1];
+    if !matches!(lang, b'a' | b'b' | b'e' | b'f' | b'j' | b'z') {
+        return false;
+    }
+    if !matches!(gender, b'f' | b'm') {
+        return false;
+    }
+    // Tail must be ASCII lowercase letters / digits / underscores. No
+    // dashes (rules out Piper ids like `en_US-lessac-medium`), no
+    // uppercase (rules out CamelCase ElevenLabs ids).
+    s[3..]
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// Default Whisper model. `whisper-large-v3-turbo` is the recommended ship
@@ -663,12 +705,26 @@ mod tests {
 
     #[test]
     fn tts_factory_kokoro_drops_piper_style_voice_id() {
-        // Same reasoning as the system branch: voice ids containing `_`
-        // are Piper-shaped (`en_US-lessac-medium`) and would be rejected
-        // by a Kokoro server that knows only `af_bella` / `am_michael`.
-        // The factory must fall back to the configured kokoro default
-        // rather than forward the foreign id.
+        // Piper ids contain a dash + quality suffix and would 404 on
+        // mlx-audio. The factory falls back to the configured default.
         let p = create_tts_provider("kokoro", "en_US-lessac-medium", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_elevenlabs_style_voice_id() {
+        // ElevenLabs voices use CamelCase names (`Rachel`, `Adam`,
+        // `Bella`). They have no underscore so the previous heuristic
+        // let them through and the kokoro server returned "unknown
+        // voice". The new validator rejects them.
+        let p = create_tts_provider("kokoro", "Rachel", &cfg()).unwrap();
+        assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn tts_factory_kokoro_drops_macos_say_voice_id() {
+        // macOS `say` voice ids look like `Samantha` / `Daniel`.
+        let p = create_tts_provider("kokoro", "Samantha", &cfg()).unwrap();
         assert_eq!(p.name(), "kokoro");
     }
 
@@ -676,6 +732,46 @@ mod tests {
     fn tts_factory_kokoro_empty_voice_uses_configured_default() {
         let p = create_tts_provider("kokoro", "", &cfg()).unwrap();
         assert_eq!(p.name(), "kokoro");
+    }
+
+    #[test]
+    fn is_kokoro_voice_id_accepts_canonical_ids() {
+        // Spot-check the published Kokoro v1 naming convention.
+        for id in [
+            "af_bella",
+            "af_heart",
+            "am_michael",
+            "bf_emma",
+            "bm_lewis",
+            "jf_alpha",
+            "zf_xiaoxiao",
+            "ef_dora",
+            "ff_siwis",
+        ] {
+            assert!(is_kokoro_voice_id(id), "{id} should be accepted");
+        }
+    }
+
+    #[test]
+    fn is_kokoro_voice_id_rejects_foreign_ids() {
+        for id in [
+            "",                    // empty
+            "a",                   // too short
+            "Rachel",              // ElevenLabs CamelCase
+            "rachel",              // lowercase ElevenLabs — no `_`
+            "en_US-lessac-medium", // Piper
+            "en_US",               // Piper locale only
+            "Samantha",            // macOS say
+            "AF_BELLA",            // uppercase prefix
+            "xf_bella",            // unknown language prefix
+            "an_bella",            // unknown gender
+            "a_bella",             // missing gender char
+        ] {
+            assert!(
+                !is_kokoro_voice_id(id),
+                "{id} should NOT be accepted as a kokoro id"
+            );
+        }
     }
 
     #[test]

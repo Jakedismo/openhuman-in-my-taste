@@ -728,7 +728,7 @@ const VoicePanel = ({ embedded = false }: VoicePanelProps = {}) => {
                       aria-label="Kokoro model name"
                       data-testid="kokoro-model-input"
                       value={kokoroModel}
-                      placeholder="kokoro"
+                      placeholder="mlx-community/Kokoro-82M-bf16"
                       disabled={isSavingProviders}
                       onChange={e => setKokoroModel(e.target.value)}
                       onBlur={() => {

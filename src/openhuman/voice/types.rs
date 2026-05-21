@@ -119,7 +119,7 @@ mod tests {
             stt_provider: "whisper".into(),
             tts_provider: "cloud".into(),
             kokoro_endpoint_url: "http://localhost:8880".into(),
-            kokoro_model: "kokoro".into(),
+            kokoro_model: "mlx-community/Kokoro-82M-bf16".into(),
             kokoro_voice: "af_bella".into(),
         };
         let v = serde_json::to_value(&s).unwrap();

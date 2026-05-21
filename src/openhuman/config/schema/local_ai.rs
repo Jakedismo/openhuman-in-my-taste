@@ -199,7 +199,13 @@ fn default_kokoro_endpoint_url() -> String {
 }
 
 fn default_kokoro_model() -> String {
-    "kokoro".to_string()
+    // mlx-audio's `/v1/audio/speech` resolves the `model` field against
+    // the exact id the server was launched with (`--realtime-model …`),
+    // so the default has to be the full Hugging Face path rather than
+    // the shorthand `kokoro` alias kokoro-fastapi accepts. Users running
+    // a different Kokoro flavour (e.g. `Kokoro-82M-8bit`) can swap this
+    // in Settings → Voice.
+    "mlx-community/Kokoro-82M-bf16".to_string()
 }
 
 fn default_kokoro_voice() -> String {

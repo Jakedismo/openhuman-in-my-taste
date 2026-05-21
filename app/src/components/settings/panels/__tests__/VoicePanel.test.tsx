@@ -126,7 +126,7 @@ describe('VoicePanel', () => {
         stt_provider: 'cloud',
         tts_provider: 'cloud',
         kokoro_endpoint_url: 'http://localhost:8880',
-        kokoro_model: 'kokoro',
+        kokoro_model: 'mlx-community/Kokoro-82M-bf16',
         kokoro_voice: 'af_bella',
       },
       sttState: 'ready',
