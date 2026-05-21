@@ -1038,26 +1038,31 @@ pub async fn direct_list_available_triggers(
             if slug.is_empty() {
                 return None;
             }
-            let default_config = item.get("config").cloned();
-            // Composio v3 `config` is a map of {field_name: {type, required?, …}}.
-            // Pull names with `required: true` so the existing
-            // `required_config_keys` consumers keep working — fall back
-            // to an empty list when the schema is shaped differently.
-            let required_config_keys = default_config.as_ref().and_then(|cfg| {
-                let map = cfg.as_object()?;
-                let mut keys: Vec<String> = map
-                    .iter()
-                    .filter_map(|(name, descriptor)| {
-                        let is_required = descriptor
-                            .get("required")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                        is_required.then(|| name.clone())
-                    })
-                    .collect();
-                keys.sort();
-                Some(keys)
-            });
+            let raw_config = item.get("config").cloned();
+            tracing::debug!(
+                trigger_slug = %slug,
+                raw_config = ?raw_config,
+                "[composio-direct] parsing trigger config schema"
+            );
+            // Composio v3 returns trigger `config` as a JSON Schema:
+            //   { "type": "object",
+            //     "properties": { "owner": {…}, "repo": {…} },
+            //     "required": ["owner", "repo"] }
+            // For backwards compatibility we also accept a flat-map
+            // shape `{ "field": { "required": true } }` (some non-GitHub
+            // toolkits historically used this). Whichever shape comes
+            // back, surface a flat `required_config_keys: ["owner",
+            // "repo"]` so the renderer can show the inline form without
+            // branching on schema version.
+            let required_config_keys = raw_config.as_ref().and_then(extract_required_keys);
+            // `default_config` is the *prefilled values* the UI seeds
+            // its form with — not the schema. Pull `default` per
+            // property when present; otherwise return an empty map so
+            // the renderer's `defaultConfig[key] ?? ""` falls back
+            // cleanly. The full schema would break the form input
+            // since the renderer treats `defaultConfig[owner]` as a
+            // string, not as `{type, title, description}`.
+            let default_config = raw_config.as_ref().map(extract_default_values);
             Some(ComposioAvailableTrigger {
                 slug,
                 scope: "static".to_string(),
@@ -1072,6 +1077,73 @@ pub async fn direct_list_available_triggers(
         "[composio-direct] list_available_triggers: mapped v3 trigger types"
     );
     Ok(ComposioAvailableTriggersResponse { triggers })
+}
+
+/// Extract the canonical `required_config_keys` list from a v3 trigger
+/// `config` value, tolerating two shapes Composio has used historically:
+///
+/// 1. **JSON Schema** (current — GitHub, Slack, most modern toolkits):
+///    `{ "type": "object", "properties": {…}, "required": ["owner", "repo"] }`
+///    → read `required` directly as a `Vec<String>`.
+/// 2. **Flat per-field map** (legacy fallback):
+///    `{ "channel": { "required": true }, "filter": { "required": false } }`
+///    → return the names with `required: true`.
+///
+/// Returns `None` only when the shape matches neither — leaves the
+/// renderer's `requiredConfigKeys ?? []` fallback in charge of the rest.
+fn extract_required_keys(config: &serde_json::Value) -> Option<Vec<String>> {
+    let obj = config.as_object()?;
+    if let Some(required_arr) = obj.get("required").and_then(serde_json::Value::as_array) {
+        let mut keys: Vec<String> = required_arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        keys.sort();
+        return Some(keys);
+    }
+    let mut keys: Vec<String> = obj
+        .iter()
+        .filter_map(|(name, descriptor)| {
+            let is_required = descriptor
+                .get("required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            is_required.then(|| name.clone())
+        })
+        .collect();
+    keys.sort();
+    Some(keys)
+}
+
+/// Extract a flat `{key: default_value}` map from a v3 trigger `config`
+/// value. The renderer treats `defaultConfig` as the *prefilled form
+/// values*, not as the schema — passing the raw JSON Schema (with nested
+/// `{type, title, description}` objects) would crash the input controls.
+///
+/// Reads `properties.<key>.default` per JSON Schema; returns an empty map
+/// when no defaults are declared (so the form starts blank, which is the
+/// right behaviour for required-without-default fields like `owner`/`repo`).
+fn extract_default_values(config: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = config.as_object() else {
+        return serde_json::json!({});
+    };
+    let mut out = serde_json::Map::new();
+    if let Some(props) = obj.get("properties").and_then(serde_json::Value::as_object) {
+        for (key, descriptor) in props {
+            if let Some(default) = descriptor.get("default") {
+                out.insert(key.clone(), default.clone());
+            }
+        }
+    } else {
+        // Legacy flat-map shape — pull `default` straight off the
+        // per-field descriptor.
+        for (key, descriptor) in obj {
+            if let Some(default) = descriptor.get("default") {
+                out.insert(key.clone(), default.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Direct-mode counterpart to

@@ -1094,3 +1094,76 @@ async fn pricing_for_config_short_circuits_in_direct_mode() {
     assert!(pricing.integrations.google_places.is_none());
     assert!(pricing.integrations.parallel.is_none());
 }
+
+// ── direct_list_available_triggers config parsing ───────────────────────────
+
+#[test]
+fn extract_required_keys_reads_json_schema_array() {
+    // Composio v3 shape for GITHUB_COMMIT_EVENT and most modern toolkits.
+    let cfg = serde_json::json!({
+        "type": "object",
+        "title": "WebhookConfigSchema",
+        "properties": {
+            "owner": {"type": "string", "title": "Owner", "description": "Owner of the repository"},
+            "repo": {"type": "string", "title": "Repo", "description": "Repository name"},
+        },
+        "required": ["owner", "repo"],
+    });
+    let keys = extract_required_keys(&cfg).expect("must parse JSON Schema required array");
+    assert_eq!(keys, vec!["owner".to_string(), "repo".to_string()]);
+}
+
+#[test]
+fn extract_required_keys_reads_legacy_flat_map() {
+    // Older toolkits returned a per-field map with a boolean `required`
+    // flag rather than a JSON Schema array. Keep parsing it so a Composio
+    // schema rollback doesn't blank the form out.
+    let cfg = serde_json::json!({
+        "channel": {"type": "string", "required": true},
+        "filter": {"type": "string", "required": false},
+    });
+    let keys = extract_required_keys(&cfg).expect("must parse legacy flat-map shape");
+    assert_eq!(keys, vec!["channel".to_string()]);
+}
+
+#[test]
+fn extract_required_keys_empty_required_array_returns_empty() {
+    let cfg = serde_json::json!({
+        "type": "object",
+        "properties": {"label": {"type": "string"}},
+        "required": [],
+    });
+    let keys = extract_required_keys(&cfg).expect("empty `required` is still a valid array");
+    assert!(keys.is_empty());
+}
+
+#[test]
+fn extract_default_values_returns_empty_when_no_defaults() {
+    // GITHUB_COMMIT_EVENT has no `default` on owner/repo — the form
+    // should start blank rather than receiving the JSON Schema as a
+    // map of `{type, title, …}` objects (which would break inputs).
+    let cfg = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "owner": {"type": "string"},
+            "repo": {"type": "string"},
+        },
+        "required": ["owner", "repo"],
+    });
+    let defaults = extract_default_values(&cfg);
+    assert_eq!(defaults, serde_json::json!({}));
+}
+
+#[test]
+fn extract_default_values_pulls_property_defaults() {
+    let cfg = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "labelIds": {"type": "string", "default": "INBOX"},
+            "owner": {"type": "string"},
+        },
+        "required": ["owner"],
+    });
+    let defaults = extract_default_values(&cfg);
+    assert_eq!(defaults, serde_json::json!({"labelIds": "INBOX"}));
+}
