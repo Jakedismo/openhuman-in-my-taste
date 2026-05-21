@@ -71,6 +71,60 @@ pub struct MemoryConfig {
     /// milliseconds. Defaults to 5000 ms.
     #[serde(default)]
     pub agentmemory_timeout_ms: Option<u64>,
+
+    /// Selects how the namespace knowledge graph is populated during
+    /// `UnifiedMemory::ingest_document` / `extract_graph`. See
+    /// [`GraphExtractionMode`] for the per-variant semantics. Default
+    /// `Auto` — LLM when a `memory_provider` is configured, heuristic
+    /// otherwise. Soft-falls back to heuristic on any LLM failure so
+    /// ingest stays write-through.
+    #[serde(default)]
+    pub graph_extraction: GraphExtractionMode,
+}
+
+/// Strategy for populating the namespace knowledge graph during
+/// document ingestion.
+///
+/// The heuristic path (`memory::ingestion::parse::parse_document`) extracts
+/// entities and relations from email-header / markdown-heading / explicit
+/// owner/preference regex patterns — high precision on structured text,
+/// low recall on arbitrary vault prose or source code. The LLM path
+/// (`memory::ingestion::llm_extract::ChatBackedLlmGraphExtractor`) routes
+/// the chunk through the user's configured `memory_provider` workload
+/// and merges the model's `(subject, predicate, object)` output into the
+/// same accumulator the heuristic feeds.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphExtractionMode {
+    /// Only run the heuristic regex extractor. Keeps the legacy
+    /// behaviour for users who do not want their `memory_provider`
+    /// hit on every doc upsert.
+    Heuristic,
+    /// Always attempt the LLM extractor. Falls back to heuristic on
+    /// any failure (provider unreachable, timeout, malformed JSON).
+    Llm,
+    /// Default. Use the LLM when a `memory_provider` is configured
+    /// and a chat extractor is wired; otherwise heuristic. Same
+    /// soft-fallback as `Llm` on failure.
+    #[default]
+    Auto,
+}
+
+impl GraphExtractionMode {
+    /// Stable wire string for env vars / RPCs / logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Heuristic => "heuristic",
+            Self::Llm => "llm",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Whether this mode wants the LLM extractor invoked (subject to
+    /// availability — `Auto` only invokes when an extractor is wired).
+    pub fn wants_llm(self) -> bool {
+        matches!(self, Self::Llm | Self::Auto)
+    }
 }
 
 fn default_memory_backend() -> String {
@@ -122,6 +176,7 @@ impl Default for MemoryConfig {
             agentmemory_url: None,
             agentmemory_secret: None,
             agentmemory_timeout_ms: None,
+            graph_extraction: GraphExtractionMode::default(),
         }
     }
 }
@@ -147,6 +202,7 @@ impl std::fmt::Debug for MemoryConfig {
                 &self.agentmemory_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("agentmemory_timeout_ms", &self.agentmemory_timeout_ms)
+            .field("graph_extraction", &self.graph_extraction)
             .finish()
     }
 }

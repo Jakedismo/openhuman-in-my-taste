@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+use super::llm_extract::LlmGraphExtractor;
 use super::state::IngestionState;
 use super::MemoryIngestionConfig;
 use crate::core::event_bus::{publish_global, DomainEvent};
@@ -20,9 +21,13 @@ use crate::openhuman::memory::store::{NamespaceDocumentInput, UnifiedMemory};
 /// A job submitted to the ingestion worker.
 ///
 /// Contains all the necessary information to process a document for graph
-/// extraction, including the document content itself and the configuration
-/// for the extraction process.
-#[derive(Debug, Clone)]
+/// extraction, including the document content itself, the configuration
+/// for the extraction process, and an optional LLM extractor that the
+/// worker will pass through to
+/// [`UnifiedMemory::extract_graph_with_extractor`].
+///
+/// `Clone` is manual because [`LlmGraphExtractor`] is a trait object held
+/// behind an `Arc`; cloning the job re-arc's the extractor handle.
 pub struct IngestionJob {
     /// The document that was already stored via `upsert_document`.
     pub document: NamespaceDocumentInput,
@@ -30,6 +35,40 @@ pub struct IngestionJob {
     pub document_id: String,
     /// Configuration for the extraction process (e.g., model name, thresholds).
     pub config: MemoryIngestionConfig,
+    /// LLM extractor to use for the namespace graph. `None` keeps the
+    /// legacy heuristic-only behaviour. When `Some`, the worker calls
+    /// [`UnifiedMemory::extract_graph_with_extractor`] which runs both
+    /// the heuristic and the LLM extractor and merges their output.
+    pub extractor: Option<Arc<dyn LlmGraphExtractor>>,
+}
+
+impl Clone for IngestionJob {
+    fn clone(&self) -> Self {
+        Self {
+            document: self.document.clone(),
+            document_id: self.document_id.clone(),
+            config: self.config.clone(),
+            extractor: self.extractor.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for IngestionJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestionJob")
+            .field("document", &self.document)
+            .field("document_id", &self.document_id)
+            .field("config", &self.config)
+            .field(
+                "extractor",
+                &self
+                    .extractor
+                    .as_deref()
+                    .map(|e| e.name())
+                    .unwrap_or("<none>"),
+            )
+            .finish()
+    }
 }
 
 /// Handle used by callers to submit ingestion jobs.
@@ -156,7 +195,12 @@ async fn ingestion_worker(
 
         let started = Instant::now();
         let success = match memory
-            .extract_graph(&document_id, &job.document, &job.config)
+            .extract_graph_with_extractor(
+                &document_id,
+                &job.document,
+                &job.config,
+                job.extractor.clone(),
+            )
             .await
         {
             Ok(result) => {

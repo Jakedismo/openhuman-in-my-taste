@@ -68,8 +68,8 @@ pub use runtime::{DockerRuntimeConfig, ReliabilityConfig, RuntimeConfig, Schedul
 pub use runtime_python::RuntimePythonConfig;
 pub use scheduler_gate::{SchedulerGateConfig, SchedulerGateMode};
 pub use storage_memory::{
-    LlmBackend, MemoryConfig, MemoryTreeConfig, StorageConfig, StorageProviderConfig,
-    StorageProviderSection, DEFAULT_CLOUD_LLM_MODEL,
+    GraphExtractionMode, LlmBackend, MemoryConfig, MemoryTreeConfig, StorageConfig,
+    StorageProviderConfig, StorageProviderSection, DEFAULT_CLOUD_LLM_MODEL,
 };
 pub use tools::{
     BrowserComputerUseConfig, BrowserConfig, ComposioConfig, ComposioWebhookConfig,
