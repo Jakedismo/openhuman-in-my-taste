@@ -205,9 +205,22 @@ async fn delegate_context_is_prepended_to_prompt() {
         .await
         .unwrap();
 
+    // In the closedhuman fork the dead `OpenHumanBackendProvider`
+    // construction path hard-errors before the delegate even tries
+    // to talk to a model, producing `"Failed to create inference
+    // client for delegate agent 'tester': …"`. The pre-fork code
+    // path that surfaced `"Agent 'tester' failed"` / `"timed out"`
+    // only fires once the delegate is rebuilt against the workload
+    // factory (see `triage::routing::build_remote_provider` for the
+    // template — deferred to a follow-up because `DelegateTool`
+    // doesn't currently load a `Config`).
     assert!(result.is_error);
     assert!(
-        result.output().contains("Agent 'tester' failed") || result.output().contains("timed out")
+        result.output().contains("Failed to create inference client for delegate agent 'tester'")
+            || result.output().contains("Agent 'tester' failed")
+            || result.output().contains("timed out"),
+        "unexpected delegate failure output: {}",
+        result.output()
     );
 }
 
@@ -233,9 +246,17 @@ async fn delegate_empty_context_omits_prefix() {
         .await
         .unwrap();
 
+    // See `delegate_context_is_prepended_to_prompt` — the closedhuman
+    // fork's hard-error on `create_backend_inference_provider` lands
+    // before the per-agent call surfaces a "failed" / "timed out"
+    // message.
     assert!(result.is_error);
     assert!(
-        result.output().contains("Agent 'tester' failed") || result.output().contains("timed out")
+        result.output().contains("Failed to create inference client for delegate agent 'tester'")
+            || result.output().contains("Agent 'tester' failed")
+            || result.output().contains("timed out"),
+        "unexpected delegate failure output: {}",
+        result.output()
     );
 }
 
